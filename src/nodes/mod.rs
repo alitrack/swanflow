@@ -7,6 +7,8 @@ use anyhow::Result;
 
 pub mod registry;
 pub mod common;
+pub mod sql;
+pub mod io;
 
 /// Port identification and description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
