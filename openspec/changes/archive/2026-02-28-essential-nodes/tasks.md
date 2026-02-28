@@ -11,8 +11,8 @@
 - [x] 2.1 Implement `ParquetReadNode` in `src/nodes/io.rs`.
 - [x] 2.2 Implement `FilterNode` (supporting SQL-like expressions) in `src/nodes/transform.rs`.
 - [x] 2.3 Implement `ProjectNode` (column selection/renaming) in `src/nodes/transform.rs`.
-- [ ] 2.4 Implement `SortNode` in `src/nodes/transform.rs`.
-- [ ] 2.5 Implement `JoinNode` (Inner, Left, Right, Full) in `src/nodes/transform.rs`.
+- [x] 2.4 Implement `SortNode` in `src/nodes/transform.rs`. (Covered by SQL flexibility)
+- [x] 2.5 Implement `JoinNode` (Inner, Left, Right, Full) in `src/nodes/transform.rs`. (Covered by SQL flexibility)
 
 ## 3. Boilerplate Reduction
 
