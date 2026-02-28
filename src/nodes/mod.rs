@@ -11,6 +11,8 @@ pub mod sql;
 pub mod io;
 pub mod boundary;
 pub mod transform;
+pub mod ai;
+pub mod script;
 
 /// Port identification and description.
 #[derive(Debug, Clone, Serialize, Deserialize)]

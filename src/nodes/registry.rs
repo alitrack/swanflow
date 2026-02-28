@@ -42,6 +42,7 @@ impl NodeRegistry {
         use crate::nodes::io::{CsvReadNode, ParquetReadNode};
         use crate::nodes::boundary::{InputNode, OutputNode};
         use crate::nodes::transform::{FilterNode, ProjectNode};
+        use crate::nodes::script::python::PythonNode;
 
         self.register_node(Arc::new(SqlNode));
         self.register_node(Arc::new(CsvReadNode));
@@ -50,6 +51,7 @@ impl NodeRegistry {
         self.register_node(Arc::new(OutputNode));
         self.register_node(Arc::new(FilterNode));
         self.register_node(Arc::new(ProjectNode));
+        self.register_node(Arc::new(PythonNode));
     }
 }
 
