@@ -61,8 +61,8 @@ impl ExtensionPlanner for SwanFlowPlanner {
         if let Some(sink) = node.as_any().downcast_ref::<ExcelSinkLogical>() {
             return Ok(Some(Arc::new(ExcelSinkExec::new(
                 sink.path.clone(),
-                sink.sheet.clone(),
-                physical_inputs[0].clone(),
+                sink.sheets.clone(),
+                physical_inputs.to_vec(),
             ))));
         }
         if let Some(python) = node.as_any().downcast_ref::<PythonLogical>() {

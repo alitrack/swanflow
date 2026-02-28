@@ -147,6 +147,10 @@ impl AnalystAgent {
             Variables are GLOBAL and do NOT require explicit connections or Input nodes.\n\
             For example: \"expr\": \"dept = '${{context.target_dept}}'\"\n\n\
             AVAILABLE NODES:\n{}\n\n\
+            EXCEL DASHBOARDING:\n\
+            - 'core.io.excel_write' supports multiple input ports. Map each port to a sheet using the 'sheets' array config.\n\
+            - It automatically applies professional styling (blue headers, thin borders).\n\
+            - It automatically generates a Column Chart for the first sheet.\n\n\
             PYTHON CAPABILITIES:\n\
             The 'core.script.python' node is HIGH PERFORMANCE (zero-copy via Arrow FFI).\n\
             Use it for complex math, specialized data cleaning, or libraries like Scikit-learn.\n\

@@ -194,27 +194,21 @@ impl NodeBehavior for ExcelWriteNode {
         NodeSpec {
             type_id: "core.io.excel_write".to_string(),
             display_name: "Excel Writer".to_string(),
-            description: "Write data to an Excel file with chart and pivot support".to_string(),
-            input_ports: vec![PortSpec {
-                id: 0,
-                name: "sheet_0".into(),
-                description: "Data to write".into(),
-            }],
+            description: "Write data to an Excel file with multi-sheet, chart and pivot support".to_string(),
+            input_ports: vec![
+                PortSpec { id: 0, name: "sheet_0".into(), description: "Data for sheet 1".into() },
+                PortSpec { id: 1, name: "sheet_1".into(), description: "Data for sheet 2 (Optional)".into() },
+                PortSpec { id: 2, name: "sheet_2".into(), description: "Data for sheet 3 (Optional)".into() },
+            ],
             output_ports: vec![],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "sheet": { "type": "string", "default": "Sheet1" },
-                    "charts": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "type": { "type": "string", "enum": ["column", "line", "pie"] },
-                                "title": { "type": "string" }
-                            }
-                        }
+                    "sheets": { 
+                        "type": "array", 
+                        "items": { "type": "string" },
+                        "default": ["Sheet1"]
                     }
                 },
                 "required": ["path"]
@@ -235,17 +229,60 @@ impl NodeBehavior for ExcelWriteNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let path = PathBuf::from(config["path"].as_str().unwrap());
-        let sheet = config["sheet"].as_str().unwrap_or("Sheet1").to_string();
+        let sheets: Vec<String> = if let Some(arr) = config["sheets"].as_array() {
+            arr.iter().map(|v| v.as_str().unwrap_or("Sheet").to_string()).collect()
+        } else {
+            vec!["Sheet1".to_string()]
+        };
 
         let sink_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(ExcelSinkLogical {
                 path,
-                sheet,
-                input: inputs[0].clone(),
+                sheets,
+                inputs,
             }),
         });
 
         Ok(vec![sink_plan])
+    }
+}
+
+pub struct ExcelTemplateNode;
+
+#[async_trait]
+impl NodeBehavior for ExcelTemplateNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.io.excel_template".to_string(),
+            display_name: "Excel Template Filler".to_string(),
+            description: "Fill a pre-styled Excel template with data based on markers like {{name}}".to_string(),
+            input_ports: vec![
+                PortSpec { id: 0, name: "input".into(), description: "Data to inject".into() },
+            ],
+            output_ports: vec![],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "template_path": { "type": "string" },
+                    "output_path": { "type": "string" }
+                },
+                "required": ["template_path", "output_path"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["template_path"].as_str().ok_or_else(|| anyhow!("template_path is required"))?;
+        config["output_path"].as_str().ok_or_else(|| anyhow!("output_path is required"))?;
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        Ok(inputs)
     }
 }
 

@@ -1,30 +1,42 @@
-name: "Tutorial 09: Advanced Excel Reports"
-description: "Demonstrates reading Excel, cleaning with SQL, and writing back with chart metadata."
-id: "00000000-0000-0000-0000-000000000009"
+name: "Tutorial 09: Professional Excel Reports"
+description: "Demonstrates multi-sheet reporting with professional styling and automatic charts."
+id: "00000000-0000-0000-0009-000000000001"
 graph:
   nodes:
-    - id: "excel_source"
-      type_id: "core.io.excel_read"
-      config:
-        path: "data.xlsx"
-        sheet: "Sheet1"
+    - id: "00000000-0000-0000-0009-000000000002"
+      type_id: "core.io.csv"
+      config: { path: "users.csv" }
       state: "Configured"
-    - id: "cleaner"
-      type_id: "core.sql"
+    
+    # Summary 1: Average salary by Dept
+    - id: "00000000-0000-0000-0009-000000000003"
+      type_id: "core.transform.aggregate"
       config:
-        query: 'SELECT "Name", "Score" FROM input_0'
+        groupby: ["dept"]
+        aggs: { "avg_salary": "AVG(salary)" }
       state: "Configured"
-    - id: "report_generator"
+    
+    # Summary 2: Total count by Dept
+    - id: "00000000-0000-0000-0009-000000000004"
+      type_id: "core.transform.aggregate"
+      config:
+        groupby: ["dept"]
+        aggs: { "headcount": "COUNT(*)" }
+      state: "Configured"
+
+    # Multi-sheet sink
+    - id: "00000000-0000-0000-0009-000000000005"
       type_id: "core.io.excel_write"
       config:
-        path: "final_report.xlsx"
-        sheet: "Analysis"
-        charts:
-          - type: "column"
-            title: "Performance Scores"
+        path: "executive_summary.xlsx"
+        sheets: ["Salary Analysis", "Headcount", "Raw Data"]
       state: "Configured"
+
   edges:
     - [0, 1, { source_port: 0, target_port: 0 }]
-    - [1, 2, { source_port: 0, target_port: 0 }]
+    - [0, 2, { source_port: 0, target_port: 0 }]
+    - [1, 3, { source_port: 0, target_port: 0 }] # Salary Analysis -> Port 0
+    - [2, 3, { source_port: 0, target_port: 1 }] # Headcount -> Port 1
+    - [0, 3, { source_port: 0, target_port: 2 }] # Raw Data -> Port 2
   node_holes: []
   edge_property: "directed"
