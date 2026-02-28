@@ -2,3 +2,8 @@
 **/*.rs.bk
 Cargo.lock
 test_data.csv
+/libs
+*.so
+*.a
+*.h
+*.hpp
