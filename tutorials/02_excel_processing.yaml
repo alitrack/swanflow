@@ -1,0 +1,27 @@
+name: "Tutorial 02: Excel Processing"
+description: "Shows how to read from one Excel file and write the processed result to another."
+id: "00000000-0000-0000-0000-000000000002"
+graph:
+  nodes:
+    - id: "00000000-0000-0000-0002-000000000001"
+      type_id: "core.io.excel_read"
+      config:
+        path: "data.xlsx"
+        sheet: "Sheet1"
+      state: "Configured"
+    - id: "00000000-0000-0000-0002-000000000002"
+      type_id: "core.transform.project"
+      config:
+        columns: ["Name", "Score"]
+      state: "Configured"
+    - id: "00000000-0000-0000-0002-000000000003"
+      type_id: "core.io.excel_write"
+      config:
+        path: "output_tutorial.xlsx"
+        sheet: "ProcessedResults"
+      state: "Configured"
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::core::graph::Workflow;
 use crate::core::compiler::WorkflowCompiler;
 use crate::core::observer::{StateProbeLogical, StateProbeExec, MaterializerLogical, MaterializerExec};
-use crate::core::datasource::{ExcelScanLogical, ExcelScanExec};
+use crate::core::datasource::{ExcelScanLogical, ExcelScanExec, ExcelSinkLogical, ExcelSinkExec};
 use crate::nodes::registry::NodeRegistry;
 use crate::nodes::NodeEvent;
 
@@ -55,6 +55,13 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 excel.sheet.clone(),
                 excel.mode.clone(),
                 Arc::new(excel.schema.as_ref().into()),
+            ))));
+        }
+        if let Some(sink) = node.as_any().downcast_ref::<ExcelSinkLogical>() {
+            return Ok(Some(Arc::new(ExcelSinkExec::new(
+                sink.path.clone(),
+                sink.sheet.clone(),
+                physical_inputs[0].clone(),
             ))));
         }
         Ok(None)

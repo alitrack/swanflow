@@ -1,0 +1,22 @@
+name: "Tutorial 04: Branching and Parallelism"
+description: "Shows how a single data source can be split into multiple branches for different processing goals."
+id: "00000000-0000-0000-0000-000000000004"
+graph:
+  nodes:
+    - id: "source"
+      type_id: "core.io.parquet"
+      config: { path: "data.parquet" }
+      state: "Configured"
+    - id: "branch_a"
+      type_id: "core.sql"
+      config: { query: "SELECT category, SUM(amount) as total FROM input_0 GROUP BY category" }
+      state: "Configured"
+    - id: "branch_b"
+      type_id: "core.transform.filter"
+      config: { expr: "amount > 200" }
+      state: "Configured"
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [0, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

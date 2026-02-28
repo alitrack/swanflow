@@ -10,13 +10,15 @@ use anyhow::{Result, anyhow};
 use calamine::{Reader, Xlsx, open_workbook, Data};
 use std::sync::Arc;
 use std::path::PathBuf;
+use duckdb::{Connection, AccessMode};
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec, InferredMetadata};
-use crate::core::datasource::{ExcelScanLogical, ExcelScanMode};
+use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
 
 pub struct ExcelReadNode;
 
 impl ExcelReadNode {
+    #[allow(dead_code)]
     fn promote_type(_current: &DataType, _data: &Data) -> DataType {
         DataType::Utf8
     }
@@ -101,9 +103,8 @@ impl NodeBehavior for ExcelReadNode {
                 .map(|_| StringBuilder::new())
                 .collect();
             
-            // Re-create the iterator because we used rows.next()
             let mut data_rows = sheet.rows();
-            if has_header { data_rows.next(); } // skip header
+            if has_header { data_rows.next(); } 
 
             let mut count = 0;
             for row in data_rows.take(sample_limit) {
@@ -181,13 +182,14 @@ impl NodeBehavior for ExcelWriteNode {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "sheets": { 
-                        "type": "array", 
-                        "items": { 
+                    "sheet": { "type": "string", "default": "Sheet1" },
+                    "charts": {
+                        "type": "array",
+                        "items": {
                             "type": "object",
                             "properties": {
-                                "name": { "type": "string" },
-                                "bold_header": { "type": "boolean", "default": true }
+                                "type": { "type": "string", "enum": ["column", "line", "pie"] },
+                                "title": { "type": "string" }
                             }
                         }
                     }
@@ -205,8 +207,109 @@ impl NodeBehavior for ExcelWriteNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let path = PathBuf::from(config["path"].as_str().unwrap());
+        let sheet = config["sheet"].as_str().unwrap_or("Sheet1").to_string();
+
+        let sink_plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(ExcelSinkLogical {
+                path,
+                sheet,
+                input: inputs[0].clone(),
+            }),
+        });
+
+        Ok(vec![sink_plan])
+    }
+}
+
+pub struct DuckDBReadNode;
+
+#[async_trait]
+impl NodeBehavior for DuckDBReadNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.io.duckdb_read".to_string(),
+            display_name: "DuckDB Reader".to_string(),
+            description: "Read data from a DuckDB database or Parquet via DuckDB".to_string(),
+            input_ports: vec![],
+            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Query Result".into() }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "default": ":memory:" },
+                    "query": { "type": "string" }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["query"].as_str().ok_or_else(|| anyhow!("Query is required"))?;
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        _inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let path = config["path"].as_str().unwrap_or(":memory:");
+        // For MVP, we treat DuckDB result as an in-memory batch.
+        // In prod, we'd implement a TableProvider that queries DuckDB on scan.
+        let conn = Connection::open(path)?;
+        let query = config["query"].as_str().unwrap();
+        
+        let mut stmt = conn.prepare(query)?;
+        // Use Arrow integration via duckdb's arrow feature if possible,
+        // or just return empty schema for now as a placeholder.
+        // DuckDB crate arrow support is complex, so we'll use a placeholder EmptyRelation
+        // with a dummy schema for this MVP step.
+        let schema = Arc::new(Schema::new(vec![Field::new("placeholder", DataType::Utf8, true)]));
+        let df_schema = datafusion::common::DFSchema::try_from(schema)?;
+        
+        Ok(vec![LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(df_schema),
+        })])
+    }
+}
+
+pub struct DuckDBWriteNode;
+
+#[async_trait]
+impl NodeBehavior for DuckDBWriteNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.io.duckdb_write".to_string(),
+            display_name: "DuckDB Writer".to_string(),
+            description: "Write data to a DuckDB table".to_string(),
+            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data".into() }],
+            output_ports: vec![],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "default": "data.db" },
+                    "table": { "type": "string" }
+                },
+                "required": ["table"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["table"].as_str().ok_or_else(|| anyhow!("Table name is required"))?;
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        // Physical plan for DuckDB writing would go here
         Ok(inputs)
     }
 }

@@ -39,9 +39,9 @@ impl NodeRegistry {
     /// Register all fundamental SwanFlow nodes.
     pub fn register_core_nodes(&mut self) {
         use crate::nodes::sql::SqlNode;
-        use crate::nodes::io::{CsvReadNode, ParquetReadNode, ExcelReadNode, ExcelWriteNode};
+        use crate::nodes::io::{CsvReadNode, ParquetReadNode, ExcelReadNode, ExcelWriteNode, DuckDBReadNode, DuckDBWriteNode};
         use crate::nodes::boundary::{InputNode, OutputNode};
-        use crate::nodes::transform::{FilterNode, ProjectNode};
+        use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode};
         use crate::nodes::script::python::PythonNode;
 
         self.register_node(Arc::new(SqlNode));
@@ -49,10 +49,14 @@ impl NodeRegistry {
         self.register_node(Arc::new(ParquetReadNode));
         self.register_node(Arc::new(ExcelReadNode));
         self.register_node(Arc::new(ExcelWriteNode));
+        self.register_node(Arc::new(DuckDBReadNode));
+        self.register_node(Arc::new(DuckDBWriteNode));
         self.register_node(Arc::new(InputNode));
         self.register_node(Arc::new(OutputNode));
         self.register_node(Arc::new(FilterNode));
         self.register_node(Arc::new(ProjectNode));
+        self.register_node(Arc::new(AggregateNode));
+        self.register_node(Arc::new(WindowNode));
         self.register_node(Arc::new(PythonNode));
     }
 }

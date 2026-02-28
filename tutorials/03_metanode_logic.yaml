@@ -1,0 +1,40 @@
+name: "Tutorial 03: Logic Encapsulation (MetaNodes)"
+description: "Demonstrates how to group multiple nodes into a single MetaNode for reusability."
+id: "00000000-0000-0000-0000-000000000003"
+graph:
+  nodes:
+    - id: "00000000-0000-0000-0003-000000000001"
+      type_id: "core.io.parquet"
+      config:
+        path: "data.parquet"
+      state: "Configured"
+    - id: "00000000-0000-0000-0003-000000000002"
+      type_id: "core.metanode"
+      config: {}
+      state: "Configured"
+      sub_workflow:
+        name: "CleaningLogic"
+        id: "00000000-0000-0000-0003-000000000003"
+        graph:
+          nodes:
+            - id: "sub-in"
+              type_id: "core.input"
+              config: { port_index: 0 }
+              state: "Configured"
+            - id: "sub-filter"
+              type_id: "core.transform.filter"
+              config: { expr: "amount > 150" }
+              state: "Configured"
+            - id: "sub-out"
+              type_id: "core.output"
+              config: { port_index: 0 }
+              state: "Configured"
+          edges:
+            - [0, 1, { source_port: 0, target_port: 0 }]
+            - [1, 2, { source_port: 0, target_port: 0 }]
+          node_holes: []
+          edge_property: "directed"
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

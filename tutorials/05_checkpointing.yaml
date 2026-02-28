@@ -1,0 +1,18 @@
+name: "Tutorial 05: Checkpointing and Caching"
+description: "Demonstrates how to enable materialization to cache intermediate results and skip redundant computation."
+id: "00000000-0000-0000-0000-000000000005"
+graph:
+  nodes:
+    - id: "heavy_reader"
+      type_id: "core.io.csv"
+      config: { path: "users.csv" }
+      state: "Configured"
+      materialize: true  # This will save to target/swanflow_cache/ after first run
+    - id: "filter_node"
+      type_id: "core.transform.filter"
+      config: { expr: "age < 40" }
+      state: "Configured"
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

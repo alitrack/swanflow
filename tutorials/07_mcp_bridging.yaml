@@ -1,0 +1,20 @@
+name: "Tutorial 07: MCP Tool Bridging"
+description: "Demonstrates how to call external AI tools via the Model Context Protocol (MCP)."
+id: "00000000-0000-0000-0000-000000000007"
+graph:
+  nodes:
+    - id: "web_search"
+      type_id: "core.ai.mcp.google_search"
+      config:
+        arguments:
+          query: "latest rust datafusion benchmarks"
+      state: "Configured"
+    - id: "filter_results"
+      type_id: "core.transform.filter"
+      config:
+        expr: "relevance > 0.8"
+      state: "Configured"
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

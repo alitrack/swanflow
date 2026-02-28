@@ -1,1 +1,0 @@
-use rust_xlsxwriter::Workbook; fn main() { let mut wb = Workbook::new(); let ws = wb.add_worksheet(); ws.write(0,0,"Name").unwrap(); ws.write(0,1,"Score").unwrap(); ws.write(1,0,"Alice").unwrap(); ws.write(1,1,95.5).unwrap(); wb.save("data.xlsx").unwrap(); }
