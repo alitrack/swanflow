@@ -1,0 +1,25 @@
+name: "Multi-Output Branching Demo"
+id: "d4e5f6a7-b8c9-0e1f-2a3b-4c5d6e7f8a9b"
+graph:
+  nodes:
+    - id: "00000000-0000-0000-0000-000000000001"
+      type_id: "core.io.csv"
+      config:
+        path: "users.csv"
+      state: "Configured"
+      sub_workflow: null
+    - id: "00000000-0000-0000-0000-000000000002"
+      type_id: "core.sql"
+      config: { query: "SELECT * FROM input_0 WHERE dept = 'IT'" }
+      state: "Configured"
+      sub_workflow: null
+    - id: "00000000-0000-0000-0000-000000000003"
+      type_id: "core.sql"
+      config: { query: "SELECT * FROM input_0 WHERE dept = 'HR'" }
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [0, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

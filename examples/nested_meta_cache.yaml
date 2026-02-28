@@ -1,0 +1,45 @@
+name: "Nested Meta Cache Demo"
+id: "c3d4e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f"
+graph:
+  nodes:
+    - id: "00000000-0000-0000-0000-000000000001"
+      type_id: "core.io.csv"
+      config:
+        path: "users.csv"
+      state: "Configured"
+      materialize: false
+      sub_workflow: null
+    - id: "00000000-0000-0000-0000-000000000002"
+      type_id: "core.metanode"
+      config: {}
+      state: "Configured"
+      materialize: true
+      sub_workflow:
+        name: "InnerCleaning"
+        id: "d4e5f6a7-b8c9-0e1f-2a3b-4c5d6e7f8a9b"
+        graph:
+          nodes:
+            - id: "00000000-0000-0000-0001-000000000001"
+              type_id: "core.input"
+              config: { port_index: 0 }
+              state: "Configured"
+              sub_workflow: null
+            - id: "00000000-0000-0000-0001-000000000002"
+              type_id: "core.sql"
+              config: { query: "SELECT * FROM input_0 WHERE salary > 10000" }
+              state: "Configured"
+              sub_workflow: null
+            - id: "00000000-0000-0000-0001-000000000003"
+              type_id: "core.output"
+              config: { port_index: 0 }
+              state: "Configured"
+              sub_workflow: null
+          edges:
+            - [0, 1, { source_port: 0, target_port: 0 }]
+            - [1, 2, { source_port: 0, target_port: 0 }]
+          node_holes: []
+          edge_property: "directed"
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
