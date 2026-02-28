@@ -18,9 +18,28 @@ use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec};
 pub struct ExcelReadNode;
 
 impl ExcelReadNode {
+    /// Promotes Excel cell data to appropriate Arrow data type.
+    /// This handles type inference from raw Excel data.
     #[allow(dead_code)]
-    fn promote_type(_current: &DataType, _data: &Data) -> DataType {
-        DataType::Utf8
+    fn promote_type(current: &DataType, data: &Data) -> DataType {
+        use calamine::Data::*;
+        
+        match data {
+            // Empty cells don't change the type
+            Empty => current.clone(),
+            // String type stays as string
+            String(_) => DataType::Utf8,
+            // Float type
+            Float(_) => DataType::Float64,
+            // Integer type - promote to Int64
+            Int(_) => DataType::Int64,
+            // Boolean type  
+            Bool(_) => DataType::Boolean,
+            // DateTime - store as string for now (could be improved with proper datetime type)
+            DateTime(_) => DataType::Utf8,
+            // Error types - convert to null
+            Error(_) => DataType::Null,
+        }
     }
 }
 
@@ -325,12 +344,30 @@ impl NodeBehavior for DuckDBReadNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let path = config["path"].as_str().unwrap_or(":memory:");
-        let _conn = Connection::open(path)?;
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "placeholder",
-            DataType::Utf8,
-            true,
-        )]));
+        let query = config["query"].as_str().unwrap_or("SELECT 1");
+        
+        // Open DuckDB connection to validate query and infer schema
+        let conn = Connection::open(path)?;
+        
+        // Execute query to get result schema (for validation)
+        let mut stmt = conn.prepare(query)?;
+        let column_count = stmt.column_count();
+        
+        let mut fields = Vec::new();
+        for i in 0..column_count {
+            let duckdb_type = stmt.column_type(i);
+            let arrow_type = match duckdb_type {
+                duckdb::types::Type::INT64 => DataType::Int64,
+                duckdb::types::Type::FLOAT => DataType::Float64,
+                duckdb::types::Type::DOUBLE => DataType::Float64,
+                duckdb::types::Type::VARCHAR => DataType::Utf8,
+                duckdb::types::Type::BOOLEAN => DataType::Boolean,
+                _ => DataType::Utf8,
+            };
+            fields.push(Field::new(stmt.column_name(i), arrow_type, true));
+        }
+        
+        let schema = Arc::new(Schema::new(fields));
         let df_schema = datafusion::common::DFSchema::try_from(schema)?;
 
         Ok(vec![LogicalPlan::EmptyRelation(

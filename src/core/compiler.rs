@@ -71,11 +71,28 @@ impl WorkflowCompiler {
             .map_err(|_| anyhow!("Workflow contains cycles (possibly via variable dependencies) and cannot be compiled"))
     }
 
+    /// Check if consumer node depends on variables produced by producer node.
+    /// This is used to add implicit edges for variable dependencies.
     fn is_variable_dependent(&self, consumer: &NodeInstance, producer: &NodeInstance) -> bool {
         let config_str = serde_json::to_string(&consumer.config).unwrap_or_default();
+        
+        // Variable-producing node types
+        let variable_producer_types = [
+            "core.flow.table_to_variable",
+            "core.flow.variable_creator",
+        ];
+        
+        // Check if producer is a variable-producing node
+        if !variable_producer_types.contains(&producer.type_id.as_str()) {
+            return false;
+        }
+        
+        // For table_to_variable: check if consumer uses ${context.*}
         if producer.type_id == "core.flow.table_to_variable" {
             return config_str.contains("${context.");
         }
+        
+        // For variable_creator: check if consumer uses any of the created variables
         if producer.type_id == "core.flow.variable_creator" {
             if let Some(vars) = producer.config["variables"].as_object() {
                 for var in vars.keys() {
@@ -85,6 +102,7 @@ impl WorkflowCompiler {
                 }
             }
         }
+        
         false
     }
 

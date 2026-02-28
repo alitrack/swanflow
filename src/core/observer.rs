@@ -340,19 +340,45 @@ impl Stream for MaterializingStream {
                 if !self.batches.is_empty() {
                     let batches = std::mem::take(&mut self.batches);
                     let path = self.path.clone();
-                    // Perform writing in a non-blocking way (simplified for MVP)
+                    
+                    // Perform writing with proper error handling
                     let schema = batches[0].schema();
-                    let file = std::fs::File::create(path).unwrap();
-                    let mut writer =
-                        parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+                    let file = match std::fs::File::create(&path) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::warn!("Failed to create cache file {:?}: {}", path, e);
+                            return Poll::Ready(Some(Err(datafusion::error::DataFusionError::Execution(
+                                format!("Failed to create cache file: {}", e)
+                            ))));
+                        }
+                    };
+                    
+                    let mut writer = match parquet::arrow::ArrowWriter::try_new(file, schema, None) {
+                        Ok(w) => w,
+                        Err(e) => {
+                            tracing::warn!("Failed to create Parquet writer: {}", e);
+                            return Poll::Ready(Some(Err(datafusion::error::DataFusionError::Execution(
+                                format!("Failed to create Parquet writer: {}", e)
+                            ))));
+                        }
+                    };
+                    
                     for batch in batches {
-                        writer.write(&batch).unwrap();
+                        if let Err(e) = writer.write(&batch) {
+                            tracing::warn!("Failed to write batch to cache: {}", e);
+                            return Poll::Ready(Some(Err(datafusion::error::DataFusionError::Execution(
+                                format!("Failed to write batch to cache: {}", e)
+                            ))));
+                        }
                     }
-                    writer.close().unwrap();
+                    
+                    if let Err(e) = writer.close() {
+                        tracing::warn!("Failed to close Parquet writer: {}", e);
+                        return Poll::Ready(Some(Err(datafusion::error::DataFusionError::Execution(
+                            format!("Failed to close Parquet writer: {}", e)
+                        ))));
+                    }
                 }
                 Poll::Ready(None)
-            }
-            other => other,
-        }
     }
 }

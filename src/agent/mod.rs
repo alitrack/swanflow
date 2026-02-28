@@ -93,9 +93,9 @@ impl AnalystAgent {
                 return Ok(workflow);
             }
 
-            if i > 0 && workflow.graph.node_count() > 0 {
+            // Return immediately if workflow has nodes - we have a valid solution
+            if workflow.graph.node_count() > 0 {
                 return Ok(workflow);
-            }
         }
         Ok(workflow)
     }

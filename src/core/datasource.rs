@@ -446,7 +446,16 @@ impl ExcelWritingStream {
                             DataType::Int64 => {
                                 let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
                                 if !a.is_null(row_idx) {
-                                    worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64).ok();
+                                    let val = a.value(row_idx);
+                                    // Check if value fits in f64 without precision loss
+                                    // i64::MAX is ~9.2e18, f64::MAX_PRECISION is ~2^53 (~9e15)
+                                    if val > 9_000_000_000_000_000 || val < -9_000_000_000_000_000 {
+                                        // Large integers: write as string to preserve precision
+                                        worksheet.write(row_offset as u32, col_idx as u16, val.to_string()).ok();
+                                    } else {
+                                        // Small integers: safe to write as f64
+                                        worksheet.write(row_offset as u32, col_idx as u16, val as f64).ok();
+                                    }
                                 }
                             }
                             DataType::Float64 => {
