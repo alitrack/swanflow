@@ -41,7 +41,7 @@ impl NodeRegistry {
         use crate::nodes::sql::SqlNode;
         use crate::nodes::io::{CsvReadNode, ParquetReadNode, ExcelReadNode, ExcelWriteNode, DuckDBReadNode, DuckDBWriteNode, HttpFetchNode};
         use crate::nodes::boundary::{InputNode, OutputNode, DuckDBExtensionNode};
-        use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode, ProfilerNode};
+        use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode, ProfilerNode, VariableCreatorNode, TableToVariableNode};
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
 
         self.register_node(Arc::new(SqlNode));
@@ -62,6 +62,8 @@ impl NodeRegistry {
         self.register_node(Arc::new(ConditionNode));
         self.register_node(Arc::new(ForEachNode));
         self.register_node(Arc::new(ProfilerNode));
+        self.register_node(Arc::new(VariableCreatorNode));
+        self.register_node(Arc::new(TableToVariableNode));
         self.register_node(Arc::new(PythonNode));
         self.register_node(Arc::new(PythonUdfNode));
     }

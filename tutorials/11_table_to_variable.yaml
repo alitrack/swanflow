@@ -1,0 +1,32 @@
+name: "Tutorial 11: Table to Variable"
+description: "Shows how to extract a value from a table during compilation and use it as a variable."
+id: "00000000-0000-0000-0011-000000000001"
+graph:
+  nodes:
+    - id: "00000000-0000-0000-0011-000000000002"
+      type_id: "core.io.csv"
+      config: { path: "users.csv" }
+      state: "Configured"
+    - id: "00000000-0000-0000-0011-000000000003"
+      type_id: "core.transform.aggregate"
+      config:
+        groupby: []
+        aggs: { "max_val": "MAX(salary)" }
+      state: "Configured"
+    - id: "00000000-0000-0000-0011-000000000004"
+      type_id: "core.flow.table_to_variable"
+      config:
+        mapping: { "max_val": "global_max_salary" }
+      state: "Configured"
+    - id: "00000000-0000-0000-0011-000000000005"
+      type_id: "core.transform.filter"
+      config:
+        # Use the variable created by the previous node during compilation pass
+        expr: "salary = ${context.global_max_salary}"
+      state: "Configured"
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+    - [0, 3, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

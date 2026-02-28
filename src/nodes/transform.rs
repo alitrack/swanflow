@@ -123,21 +123,23 @@ impl NodeBehavior for AggregateNode {
         let mut select_parts = groupby_cols.clone();
         for (out_name, agg_expr) in aggs {
             let expr = agg_expr.as_str().unwrap();
-            // Handle case where AI might pass just the function name or full expr
             if expr.contains('(') {
                 select_parts.push(format!("{} as \"{}\"", expr, out_name));
             } else {
-                // If it's just 'sum', we might need more info, but for now assume full expr is provided as per spec
                 select_parts.push(format!("{}(\"{}\") as \"{}\"", expr, out_name, out_name));
             }
         }
         
         ctx.register_table("agg_input", df.into_view())?;
-        let sql = format!(
-            "SELECT {} FROM agg_input GROUP BY {}", 
-            select_parts.join(", "), 
-            groupby_cols.join(", ")
-        );
+        let sql = if groupby_cols.is_empty() {
+            format!("SELECT {} FROM agg_input", select_parts.join(", "))
+        } else {
+            format!(
+                "SELECT {} FROM agg_input GROUP BY {}", 
+                select_parts.join(", "), 
+                groupby_cols.join(", ")
+            )
+        };
         let agg_df = ctx.sql(&sql).await?;
         Ok(vec![agg_df.into_optimized_plan()?])
     }
@@ -183,6 +185,7 @@ impl NodeBehavior for WindowNode {
             .map(|v| v.iter().map(|s| format!("\"{}\"", s.as_str().unwrap())).collect())
             .unwrap_or_default();
         let window_exprs = config["window_exprs"].as_object().unwrap();
+        
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         let mut window_selects = Vec::new();
@@ -316,6 +319,7 @@ impl NodeBehavior for ProfilerNode {
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         let schema = df.schema();
+        
         let cols: Vec<String> = if let Some(c) = config["columns"].as_array() {
             c.iter().map(|v| v.as_str().unwrap().to_string()).collect()
         } else {
@@ -333,5 +337,68 @@ impl NodeBehavior for ProfilerNode {
         let sql = format!("SELECT {} FROM profile_input", select_parts.join(", "));
         let profile_df = ctx.sql(&sql).await?;
         Ok(vec![profile_df.into_optimized_plan()?])
+    }
+}
+
+/// Manually define variables.
+pub struct VariableCreatorNode;
+
+#[async_trait]
+impl NodeBehavior for VariableCreatorNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.flow.variable_creator".to_string(),
+            display_name: "Variable Creator".to_string(),
+            description: "Define one or more variables manually in the configuration".to_string(),
+            input_ports: vec![],
+            output_ports: vec![],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "variables": { "type": "object" }
+                },
+                "required": ["variables"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["variables"].as_object().ok_or_else(|| anyhow!("Variables object is required"))?;
+        Ok(())
+    }
+
+    async fn propose_plan(&self, _inputs: Vec<LogicalPlan>, _config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+        Ok(vec![])
+    }
+}
+
+/// Promote table data to variables.
+pub struct TableToVariableNode;
+
+#[async_trait]
+impl NodeBehavior for TableToVariableNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.flow.table_to_variable".to_string(),
+            display_name: "Table to Variable".to_string(),
+            description: "Convert the first row of a table into flow variables".to_string(),
+            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Source Table".into() }],
+            output_ports: vec![],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "mapping": { 
+                        "type": "object",
+                        "description": "Mapping of column name to variable name"
+                    }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+
+    async fn propose_plan(&self, _inputs: Vec<LogicalPlan>, _config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+        Ok(vec![])
     }
 }

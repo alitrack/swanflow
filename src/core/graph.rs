@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 use anyhow::{Result, anyhow};
+use std::collections::HashMap;
 use crate::nodes::NodeState;
 
 /// An instance of a node in a workflow.
@@ -31,6 +32,9 @@ pub struct EdgeInstance {
 pub struct Workflow {
     pub id: Uuid,
     pub name: String,
+    /// Global context/variables available to all nodes via templating.
+    #[serde(default)]
+    pub context: HashMap<String, JsonValue>,
     /// The logical graph using petgraph's StableGraph.
     pub graph: StableGraph<NodeInstance, EdgeInstance>,
 }
@@ -41,6 +45,7 @@ impl Workflow {
         Self {
             id: Uuid::new_v4(),
             name: name.to_string(),
+            context: HashMap::new(),
             graph: StableGraph::new(),
         }
     }
@@ -62,7 +67,6 @@ impl Workflow {
         target: NodeIndex,
         edge: EdgeInstance,
     ) -> Result<()> {
-        // Simple cycle detection during edge addition to maintain DAG.
         let mut test_graph = self.graph.clone();
         test_graph.add_edge(source, target, edge.clone());
         if petgraph::algo::is_cyclic_directed(&test_graph) {
@@ -81,7 +85,7 @@ impl Workflow {
     pub fn update_config(&mut self, node_idx: NodeIndex, config: JsonValue) -> Result<()> {
         if let Some(node) = self.graph.node_weight_mut(node_idx) {
             node.config = config;
-            node.state = NodeState::Unconfigured; // Reset state on config change.
+            node.state = NodeState::Unconfigured;
             Ok(())
         } else {
             Err(anyhow!("Node index not found"))

@@ -68,10 +68,10 @@ impl AnalystAgent {
                 match self.engine.infer_metadata(&workflow).await {
                     Ok(metadata) => {
                         let schema_summary = self.summarize_metadata(&metadata);
-                        history.push_str(&format!("\nValidation Success! Current schemas are valid. You can now provide the final_answer or continue adding nodes.\nSchemas:\n{}\n", schema_summary));
+                        history.push_str(&format!("\nValidation Success! Schemas:\n{}\n", schema_summary));
                     }
                     Err(e) => {
-                        history.push_str(&format!("\nValidation Error: {}. Fix the workflow using patch_node_config or by adjusting connections.\n", e));
+                        history.push_str(&format!("\nValidation Error: {}. Fix the workflow.\n", e));
                     }
                 }
             }
@@ -81,9 +81,7 @@ impl AnalystAgent {
                 return Ok(workflow);
             }
             
-            // If LLM didn't provide a final answer but built a valid graph, consider it done if iteration count > 1
-            if i > 0 && !workflow.graph.node_count() == 0 {
-                 println!("🎯 Inferring completion based on valid graph.");
+            if i > 0 && workflow.graph.node_count() > 0 {
                  return Ok(workflow);
             }
         }
@@ -91,12 +89,22 @@ impl AnalystAgent {
     }
 
     fn normalize_tool_call(&self, val: serde_json::Value) -> Result<AgentToolCall> {
-        // Handle both {"name": "...", "arguments": {...}} and {"type": "...", ...fields...}
+        // AI sometimes nests everything under "config" or "params"
+        let mut target = val.clone();
+        if let Some(inner) = target.get("config").filter(|v| v.is_object() && (v.get("type_id").is_some() || v.get("source_idx").is_some())) {
+            target = inner.clone();
+        } else if let Some(inner) = target.get("params").filter(|v| v.is_object()) {
+            target = inner.clone();
+        }
+
         if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
             let args = val.get("arguments").cloned().unwrap_or(serde_json::json!({}));
             Ok(AgentToolCall { name: name.to_string(), arguments: args })
+        } else if let Some(method) = val.get("method").and_then(|v| v.as_str()) {
+            let params = val.get("params").cloned().unwrap_or(serde_json::json!({}));
+            Ok(AgentToolCall { name: method.to_string(), arguments: params })
         } else if let Some(t) = val.get("type").and_then(|v| v.as_str()) {
-            Ok(AgentToolCall { name: t.to_string(), arguments: val.clone() })
+            Ok(AgentToolCall { name: t.to_string(), arguments: target })
         } else {
             anyhow::bail!("Invalid tool call format: {}", val)
         }
@@ -108,13 +116,16 @@ impl AnalystAgent {
 
         format!(
             "You are the SwanFlow Analyst Agent. You build data science workflows.\n\n\
+            VARIABLE TEMPLATING:\n\
+            You can use variables in node configurations using the syntax: ${{context.key_name}}.\n\
+            Variables are GLOBAL and do NOT require explicit connections or Input nodes.\n\
+            For example: \"expr\": \"dept = '${{context.target_dept}}'\"\n\n\
             AVAILABLE NODES:\n{}\n\n\
             YOUR TOOLS:\n\
-            - add_node(type_id, config): Add a node. Config must match the JSON schema of the node type.\n\
-            - connect(source_idx, target_idx, source_port, target_port): Connect nodes by their creation order indices (0, 1, 2...).\n\n\
+            - add_node(type_id, config): Add a node.\n\
+            - connect(source_idx, target_idx, source_port, target_port): Connect nodes.\n\n\
             OUTPUT FORMAT:\n\
-            Return a JSON object with: {{ \"explanation\": \"...\", \"actions\": [{{ \"type\": \"add_node\", \"type_id\": \"...\", \"config\": {{...}} }}, ...], \"final_answer\": \"...\" }}\n\
-            Always create a complete workflow. Start with a data reader (CSV/Excel), then analytical nodes, ending with a writer.",
+            Return a JSON object with: {{ \"explanation\": \"...\", \"actions\": [{{ \"type\": \"add_node\", \"type_id\": \"...\", \"config\": {{...}} }}, ...], \"final_answer\": \"...\" }}",
             specs_json
         )
     }
@@ -122,8 +133,10 @@ impl AnalystAgent {
     async fn execute_tool(&self, call: &AgentToolCall, workflow: &mut Workflow) -> Result<String> {
         match call.name.as_str() {
             "add_node" => {
-                let type_id = call.arguments["type_id"].as_str().context("Missing type_id")?;
-                let config = call.arguments["config"].clone();
+                let type_id = call.arguments.get("type_id").and_then(|v| v.as_str())
+                    .context(format!("Missing type_id in arguments: {}", call.arguments))?;
+                let config = call.arguments.get("config").cloned()
+                    .unwrap_or(serde_json::json!({}));
                 let instance = NodeInstance {
                     id: uuid::Uuid::new_v4(),
                     type_id: type_id.to_string(),
@@ -136,8 +149,12 @@ impl AnalystAgent {
                 Ok(format!("Added node {} at index {:?}", type_id, idx.index()))
             }
             "connect" => {
-                let src = call.arguments["source_idx"].as_u64().context("Missing source_idx")? as usize;
-                let dst = call.arguments["target_idx"].as_u64().context("Missing target_idx")? as usize;
+                let src = call.arguments.get("source_idx").and_then(|v| v.as_u64())
+                    .or_else(|| call.arguments.get("source").and_then(|v| v.as_u64()))
+                    .context(format!("Missing source_idx in arguments: {}", call.arguments))? as usize;
+                let dst = call.arguments.get("target_idx").and_then(|v| v.as_u64())
+                    .or_else(|| call.arguments.get("target").and_then(|v| v.as_u64()))
+                    .context(format!("Missing target_idx in arguments: {}", call.arguments))? as usize;
                 let src_p = call.arguments["source_port"].as_u64().unwrap_or(0) as u32;
                 let dst_p = call.arguments["target_port"].as_u64().unwrap_or(0) as u32;
                 workflow.add_edge(NodeIndex::new(src), NodeIndex::new(dst), EdgeInstance { source_port: src_p, target_port: dst_p })?;
