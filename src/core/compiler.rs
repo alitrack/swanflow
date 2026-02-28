@@ -6,6 +6,7 @@ use uuid::Uuid;
 use datafusion::logical_expr::{LogicalPlan, Extension};
 use datafusion::prelude::*;
 use datafusion::common::DFSchemaRef;
+use arrow::record_batch::RecordBatch;
 use anyhow::{Result, anyhow};
 use async_recursion::async_recursion;
 use sha2::{Sha256, Digest};
@@ -21,6 +22,8 @@ pub struct WorkflowCompiler {
     pub compiled_outputs: HashMap<Uuid, HashMap<u32, LogicalPlan>>,
     /// Inferred schemas for each node instance (node_id -> Vec<schema>)
     pub inferred_schemas: HashMap<Uuid, Vec<DFSchemaRef>>,
+    /// Optional sample data for each node instance (node_id -> Vec<RecordBatch>)
+    pub sample_data: HashMap<Uuid, Vec<RecordBatch>>,
     /// Cache keys for each node instance (node_id -> hash_string)
     pub node_hashes: HashMap<Uuid, String>,
     /// Whether to inject state probes for observation (Traffic Lights)
@@ -32,39 +35,33 @@ impl WorkflowCompiler {
         Self {
             compiled_outputs: HashMap::new(),
             inferred_schemas: HashMap::new(),
+            sample_data: HashMap::new(),
             node_hashes: HashMap::new(),
             inject_probes,
         }
     }
 
-    /// Performs a topological sort on the workflow graph to determine the execution order.
     pub fn get_execution_order(&self, workflow: &Workflow) -> Result<Vec<NodeIndex>> {
         toposort(&workflow.graph, None)
             .map_err(|_| anyhow!("Workflow contains cycles and cannot be compiled"))
     }
 
-    /// Generates a deterministic cache key for a node based on its type, config, and input lineage.
     fn generate_cache_key(&self, node: &NodeInstance, input_hashes: &HashMap<u32, String>) -> String {
         let mut hasher = Sha256::new();
         hasher.update(node.type_id.as_bytes());
-        
         let config_str = serde_json::to_string(&node.config).unwrap_or_default();
         hasher.update(config_str.as_bytes());
-        
         let mut input_ports: Vec<_> = input_hashes.keys().cloned().collect();
         input_ports.sort_unstable();
-        
         for port in input_ports {
             hasher.update(port.to_be_bytes());
             if let Some(hash) = input_hashes.get(&port) {
                 hasher.update(hash.as_bytes());
             }
         }
-        
         format!("{:x}", hasher.finalize())
     }
 
-    /// Main entry point for compilation.
     #[async_recursion]
     pub async fn compile(
         &mut self,
@@ -96,9 +93,11 @@ impl WorkflowCompiler {
                 let compiled_node_outputs = if let Some(ref sub_workflow) = node.sub_workflow {
                     let mut sub_compiler = WorkflowCompiler::new(self.inject_probes);
                     let res = sub_compiler.compile(sub_workflow, registry, Some(inputs)).await?;
-                    // Merge sub-compiler schemas and hashes for transparency
                     for (id, schemas) in sub_compiler.inferred_schemas {
                         self.inferred_schemas.insert(id, schemas);
+                    }
+                    for (id, samples) in sub_compiler.sample_data {
+                        self.sample_data.insert(id, samples);
                     }
                     res
                 } else if node.type_id == "core.input" {
@@ -116,12 +115,19 @@ impl WorkflowCompiler {
                     let behavior = registry.get_node(&node.type_id)?;
                     behavior.validate(&node.config)?;
                     
+                    // NEW: Use infer_schema to get metadata
+                    let input_schemas = inputs.values().map(|p| p.schema().clone()).collect();
+                    let metadata = behavior.infer_schema(input_schemas, &node.config).await?;
+                    
+                    if let Some(samples) = metadata.sample_data {
+                        self.sample_data.insert(node.id, samples);
+                    }
+
                     let mut input_vec: Vec<(u32, LogicalPlan)> = inputs.into_iter().collect();
                     input_vec.sort_by_key(|(port, _)| *port);
                     let ordered_inputs: Vec<LogicalPlan> = input_vec.into_iter().map(|(_, p)| p).collect();
 
                     let output_plans = behavior.propose_plan(ordered_inputs, &node.config).await?;
-                    
                     let mut output_map = HashMap::new();
                     for (i, plan) in output_plans.into_iter().enumerate() {
                         output_map.insert(i as u32, plan);
@@ -143,7 +149,6 @@ impl WorkflowCompiler {
                 wrapped_outputs
             };
 
-            // Store inferred schemas
             let schemas: Vec<DFSchemaRef> = outputs.values().map(|p| p.schema().clone()).collect();
             self.inferred_schemas.insert(node.id, schemas);
 
@@ -164,7 +169,6 @@ impl WorkflowCompiler {
 
         let mut final_outputs = HashMap::new();
         let mut has_output_nodes = false;
-
         for &node_idx in &order {
             let node = &workflow.graph[node_idx];
             if node.type_id == "core.output" {
@@ -177,7 +181,6 @@ impl WorkflowCompiler {
                 }
             }
         }
-
         if !has_output_nodes {
             if let Some(&last_idx) = order.last() {
                 let last_id = workflow.graph[last_idx].id;
@@ -186,7 +189,6 @@ impl WorkflowCompiler {
                 }
             }
         }
-
         Ok(final_outputs)
     }
 

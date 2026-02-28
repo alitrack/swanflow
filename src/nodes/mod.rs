@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::common::DFSchemaRef;
+use arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
@@ -57,6 +58,13 @@ pub enum NodeEvent {
     },
 }
 
+/// Metadata inferred before full execution.
+pub struct InferredMetadata {
+    pub schemas: Vec<DFSchemaRef>,
+    /// Optional sample data for each output port.
+    pub sample_data: Option<Vec<RecordBatch>>,
+}
+
 /// The core interface for all nodes in SwanFlow.
 /// Nodes implement this trait to describe their behavior and how they
 /// modify the DataFusion logical plan.
@@ -75,13 +83,12 @@ pub trait NodeBehavior: Send + Sync {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>>;
 
-    /// Predict the output schema(s) without executing data.
-    /// Default implementation uses propose_plan with empty relations.
+    /// Predict the output schema(s) and optionally provide a data sample.
     async fn infer_schema(
         &self,
         input_schemas: Vec<DFSchemaRef>,
         config: &JsonValue,
-    ) -> Result<Vec<DFSchemaRef>> {
+    ) -> Result<InferredMetadata> {
         use datafusion::logical_expr::EmptyRelation;
         
         let inputs = input_schemas.into_iter().map(|s| {
@@ -92,6 +99,9 @@ pub trait NodeBehavior: Send + Sync {
         }).collect();
 
         let output_plans = self.propose_plan(inputs, config).await?;
-        Ok(output_plans.into_iter().map(|p| p.schema().clone()).collect())
+        Ok(InferredMetadata {
+            schemas: output_plans.into_iter().map(|p| p.schema().clone()).collect(),
+            sample_data: None,
+        })
     }
 }

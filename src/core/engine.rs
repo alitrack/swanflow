@@ -10,6 +10,7 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner, DefaultPhy
 use datafusion::execution::context::{SessionState, QueryPlanner};
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::common::DFSchemaRef;
+use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use uuid::Uuid;
 
@@ -74,6 +75,12 @@ impl QueryPlanner for SwanFlowQueryPlanner {
     }
 }
 
+/// Comprehensive metadata inferred for a workflow.
+pub struct WorkflowMetadata {
+    pub schemas: HashMap<Uuid, Vec<DFSchemaRef>>,
+    pub sample_data: HashMap<Uuid, Vec<RecordBatch>>,
+}
+
 pub struct SwanFlowEngine {
     pub ctx: SessionContext,
     pub registry: Arc<NodeRegistry>,
@@ -85,11 +92,14 @@ impl SwanFlowEngine {
         Self { ctx, registry }
     }
 
-    /// Performs schema inference for all nodes in the workflow without execution.
-    pub async fn infer_schemas(&self, workflow: &Workflow) -> anyhow::Result<HashMap<Uuid, Vec<DFSchemaRef>>> {
+    /// Performs schema and sample inference for all nodes in the workflow without full execution.
+    pub async fn infer_metadata(&self, workflow: &Workflow) -> anyhow::Result<WorkflowMetadata> {
         let mut compiler = WorkflowCompiler::new(false);
         compiler.compile(workflow, &self.registry, None).await?;
-        Ok(compiler.inferred_schemas)
+        Ok(WorkflowMetadata {
+            schemas: compiler.inferred_schemas,
+            sample_data: compiler.sample_data,
+        })
     }
 
     /// Executes a workflow DAG and returns a stream of node events.

@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 datafusion = "45.0"
-arrow = { version = "54.0", features = ["pyarrow"] }
+arrow = { version = "54.0", features = ["ffi", "pyarrow"] }
 tokio = { version = "1.0", features = ["full"] }
 async-trait = "0.1"
 futures = "0.3"
@@ -27,3 +27,5 @@ clap = { version = "4.5.60", features = ["derive"] }
 sha2 = "0.10.9"
 pyo3-arrow = "0.7"
 parquet = { version = "54.0", features = ["arrow"] }
+calamine = "0.33.0"
+rust_xlsxwriter = "0.93.0"

@@ -57,12 +57,15 @@ async fn main() -> anyhow::Result<()> {
             let registry = Arc::new(NodeRegistry::default());
             let engine = SwanFlowEngine::new(registry);
 
-            let schemas = engine.infer_schemas(&workflow).await?;
+            let metadata = engine.infer_metadata(&workflow).await?;
 
-            for (node_id, node_schemas) in schemas {
+            for (node_id, node_schemas) in metadata.schemas {
                 println!("  Node[{}]:", node_id);
                 for (i, schema) in node_schemas.iter().enumerate() {
                     println!("    Port {}: {:?}", i, schema.fields().iter().map(|f| format!("{}: {:?}", f.name(), f.data_type())).collect::<Vec<_>>());
+                }
+                if let Some(samples) = metadata.sample_data.get(&node_id) {
+                    println!("    Sample Rows: {}", samples.iter().map(|b| b.num_rows()).sum::<usize>());
                 }
             }
         }
