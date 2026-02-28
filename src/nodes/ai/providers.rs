@@ -12,9 +12,39 @@ pub enum ProviderKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
     pub provider: ProviderKind,
-    pub api_key: String,
+    /// API key. If not provided, will try to read from environment variable:
+    /// - OPENAI_API_KEY for OpenAI
+    /// - ANTHROPIC_API_KEY for Anthropic
+    /// - GEMINI_API_KEY for Gemini
+    pub api_key: Option<String>,
     pub model: String,
     pub endpoint: Option<String>,
+}
+
+impl LlmConfig {
+    /// Create config with API key from environment variable if not provided.
+    pub fn resolve_api_key(&mut self) -> Result<()> {
+        if self.api_key.is_some() {
+            return Ok(());
+        }
+        
+        let env_key = match self.provider {
+            ProviderKind::OpenAI => "OPENAI_API_KEY",
+            ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+            ProviderKind::Gemini => "GEMINI_API_KEY",
+        };
+        
+        self.api_key = std::env::var(env_key).ok();
+        
+        if self.api_key.is_none() {
+            anyhow::bail!(
+                "API key not provided in config and {} environment variable not set",
+                env_key
+            );
+        }
+        
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -28,11 +58,12 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    pub fn new(config: LlmConfig) -> Self {
-        Self {
+    pub fn new(mut config: LlmConfig) -> Result<Self> {
+        config.resolve_api_key()?;
+        Ok(Self {
             config,
             client: reqwest::Client::new(),
-        }
+        })
     }
 }
 
@@ -58,7 +89,7 @@ impl LlmProvider for OpenAiProvider {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Authorization", format!("Bearer {}", self.config.api_key.as_ref().unwrap()))
             .json(&serde_json::json!({
                 "model": self.config.model,
                 "messages": [{"role": "user", "content": prompt}],

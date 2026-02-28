@@ -37,6 +37,10 @@ impl NodeRegistry {
     }
 
     /// Register all fundamental SwanFlow nodes.
+    /// 
+    /// Note: AI nodes (ConfigWizard, McpNode) are not registered here as they
+    /// require runtime configuration (API keys, tool names) and are used as
+    /// helpers rather than direct workflow nodes.
     pub fn register_core_nodes(&mut self) {
         use crate::nodes::sql::SqlNode;
         use crate::nodes::io::{CsvReadNode, ParquetReadNode, ExcelReadNode, ExcelWriteNode, ExcelTemplateNode, DuckDBReadNode, DuckDBWriteNode, HttpFetchNode};
@@ -66,8 +70,8 @@ impl NodeRegistry {
         self.register_node(Arc::new(VariableCreatorNode));
         self.register_node(Arc::new(TableToVariableNode));
         self.register_node(Arc::new(PythonNode));
+        // Note: PythonUdfNode is registered but currently returns empty plan (stub implementation)
         self.register_node(Arc::new(PythonUdfNode));
-    }
 }
 
 impl Default for NodeRegistry {
