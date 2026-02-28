@@ -4,13 +4,13 @@
 
 - [x] 1.1 Integrate `duckdb` crate and implement `DuckDBReadNode`.
 - [x] 1.2 Implement `DuckDBWriteNode` for fast analytical storage.
-- [ ] 1.3 Implement `HttpFetchNode` with automatic JSON-to-Arrow conversion.
+- [x] 1.3 Implement `HttpFetchNode` with automatic JSON-to-Arrow conversion.
 
 ## 2. Logic and Flow Control
 
-- [ ] 2.1 Implement `ConditionNode`: Branching based on SQL boolean expressions.
-- [ ] 2.2 Implement `LoopNode`: Supporting `ForEach` iterator over input lists.
-- [ ] 2.3 Update `WorkflowCompiler` to handle non-linear branching and sub-graph iteration.
+- [x] 2.1 Implement `ConditionNode`: Branching based on SQL boolean expressions.
+- [x] 2.2 Implement `LoopNode`: Supporting `ForEach` iterator over input lists.
+- [x] 2.3 Update `WorkflowCompiler` to handle non-linear branching and sub-graph iteration.
 
 ## 3. Excel Pro: Pivot and Charts
 
@@ -20,7 +20,7 @@
 
 ## 4. Analyst Agent (ZeroClaw Migration)
 
-- [ ] 4.1 Create `src/agent/loop_.rs` by adapting ZeroClaw's Reasoning Loop.
+- [x] 4.1 Create `src/agent/loop_.rs` by adapting ZeroClaw's Reasoning Loop.
 - [ ] 4.2 Define **SwanFlow Tools** for the Agent: `ListNodes`, `DraftWorkflow`, `ValidateSchema`.
 - [ ] 4.3 Implement the **HOTL (Human-on-the-Loop)** CLI interface for workflow approval.
 
