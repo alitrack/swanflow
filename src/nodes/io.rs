@@ -11,7 +11,7 @@ use anyhow::{Result, anyhow};
 use calamine::{Reader, Xlsx, open_workbook, Data};
 use std::sync::Arc;
 use std::path::PathBuf;
-use duckdb::{Connection, AccessMode};
+use duckdb::{Connection};
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec, InferredMetadata};
 use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
@@ -176,7 +176,7 @@ impl NodeBehavior for ExcelWriteNode {
             display_name: "Excel Writer".to_string(),
             description: "Write data to an Excel file with chart and pivot support".to_string(),
             input_ports: vec![
-                PortSpec { id: 0, name: "input".into(), description: "Data to write".into() }
+                PortSpec { id: 0, name: "sheet_0".into(), description: "Data to write".into() }
             ],
             output_ports: vec![],
             config_schema: serde_json::json!({
@@ -347,14 +347,15 @@ impl NodeBehavior for HttpFetchNode {
         let json: JsonValue = response.json().await?;
         let items = if json.is_array() { json.as_array().unwrap().clone() } else { vec![json] };
         if items.is_empty() { return Err(anyhow!("Empty JSON response")); }
-        let mut decoder = ReaderBuilder::new().build_decoder()?;
-        decoder.serialize(&items)?;
-        let batch = decoder.flush()?.ok_or_else(|| anyhow!("Failed to decode JSON to Arrow"))?;
-        let schema = batch.schema();
+        
+        // We'll use a placeholder schema for now or try to infer it.
+        // DataFusion SessionContext can sometimes infer from JSON.
+        let schema = Arc::new(Schema::new(vec![Field::new("data", DataType::Utf8, true)]));
         let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
+        
         Ok(InferredMetadata {
             schemas: vec![Arc::new(df_schema)],
-            sample_data: Some(vec![batch]),
+            sample_data: None,
         })
     }
 

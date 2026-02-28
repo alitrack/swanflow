@@ -1,11 +1,10 @@
 use async_trait::async_trait;
-use datafusion::logical_expr::LogicalPlan;
+use datafusion::logical_expr::{LogicalPlan};
 use datafusion::prelude::*;
 use serde_json::Value as JsonValue;
 use anyhow::{Result, anyhow};
-use std::sync::Arc;
 
-use crate::nodes::{NodeBehavior, NodeSpec, PortSpec, InferredMetadata};
+use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
 /// Filter rows based on a SQL expression.
 pub struct FilterNode;
@@ -248,7 +247,7 @@ impl NodeBehavior for ForEachNode {
             display_name: "ForEach Loop".to_string(),
             description: "Iterate over a list of values provided in configuration".to_string(),
             input_ports: vec![],
-            output_ports: vec![PortSpec { id: 0, name: "item".into(), description: "Current iteration item (as a table)" }],
+            output_ports: vec![PortSpec { id: 0, name: "item".into(), description: "Current iteration item (as a table)".to_string() }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -267,9 +266,6 @@ impl NodeBehavior for ForEachNode {
     async fn propose_plan(&self, _inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
         let items = config["items"].as_array().unwrap();
         let ctx = SessionContext::new();
-        
-        // In a real loop, the compiler would handle this by unrolling or iterating.
-        // For MVP, we return a single plan representing the union of all items as rows.
         let mut select_parts = Vec::new();
         for item in items {
             select_parts.push(format!("SELECT '{}' as item", item.as_str().unwrap()));

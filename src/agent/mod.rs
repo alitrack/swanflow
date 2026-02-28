@@ -30,13 +30,11 @@ impl AnalystAgent {
 
     /// The core reasoning loop, adapted from ZeroClaw.
     pub async fn run_loop(&self, user_prompt: &str, workflow: &mut Workflow) -> Result<String> {
-        let mut history = format!("User: {}
-", user_prompt);
+        let mut history = format!("User: {}\n", user_prompt);
         let system_prompt = self.build_system_prompt();
 
         for _iteration in 0..10 {
-            let full_prompt = format!("System: {}
-{}", system_prompt, history);
+            let full_prompt = format!("System: {}\n{}", system_prompt, history);
             let response_text = self.provider.complete(&full_prompt).await?;
             
             // Simplified parsing: assume JSON response for MVP
@@ -51,9 +49,7 @@ impl AnalystAgent {
 
             for call in response.tool_calls {
                 let result = self.execute_tool(&call, workflow).await?;
-                history.push_str(&format!("
-Tool Result ({}): {}
-", call.name, result));
+                history.push_str(&format!("\nTool Result ({}): {}\n", call.name, result));
             }
         }
 
@@ -65,31 +61,22 @@ Tool Result ({}): {}
         let specs_json = serde_json::to_string_pretty(&node_specs).unwrap();
 
         format!(
-            "You are the SwanFlow Analyst Agent. Your goal is to build a data science workflow to solve the user's request.
-
-            Available Nodes:
-{}
-
-
-            You can use the following tools:
-
-            - add_node(type_id, config): Add a node to the DAG.
-
-            - connect(source_id, target_id, source_port, target_port): Connect two nodes.
-
-            - inspect_schema(node_id): Get the output schema of a node.
-
-
-            Respond in JSON format: {{ "thought": "...", "tool_calls": [{{ "name": "...", "arguments": {{...}} }}], "final_answer": "..." }}",
+            "You are the SwanFlow Analyst Agent. Your goal is to build a data science workflow to solve the user's request.\n\
+            Available Nodes:\n{}\n\n\
+            You can use the following tools:\n\
+            - add_node(type_id, config): Add a node to the DAG.\n\
+            - connect(source_id, target_id, source_port, target_port): Connect two nodes.\n\
+            - inspect_schema(node_id): Get the output schema of a node.\n\n\
+            Respond in JSON format like this: {{ \"thought\": \"...\", \"tool_calls\": [], \"final_answer\": null }}",
             specs_json
         )
     }
 
-    async fn execute_tool(&self, call: &AgentToolCall, workflow: &mut Workflow) -> Result<String> {
+    async fn execute_tool(&self, call: &AgentToolCall, _workflow: &mut Workflow) -> Result<String> {
         match call.name.as_str() {
             "add_node" => {
                 let type_id = call.arguments["type_id"].as_str().unwrap();
-                let config = call.arguments["config"].clone();
+                let _config = call.arguments["config"].clone();
                 // ... logic to add node to workflow ...
                 Ok(format!("Added node of type {}", type_id))
             }
