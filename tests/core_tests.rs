@@ -1,12 +1,12 @@
-use rustflow::core::graph::{Workflow, NodeInstance, EdgeInstance};
-use rustflow::nodes::{NodeState, NodeBehavior, NodeSpec, PortSpec};
-use rustflow::nodes::registry::NodeRegistry;
-use serde_json::json;
-use uuid::Uuid;
-use std::sync::Arc;
+use anyhow::Result;
 use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
-use anyhow::Result;
+use rustflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
+use rustflow::nodes::registry::NodeRegistry;
+use rustflow::nodes::{NodeBehavior, NodeSpec, NodeState, PortSpec};
+use serde_json::json;
+use std::sync::Arc;
+use uuid::Uuid;
 
 struct DummyNode;
 
@@ -17,8 +17,16 @@ impl NodeBehavior for DummyNode {
             type_id: "test.dummy".into(),
             display_name: "Dummy Node".into(),
             description: "Used for tests".into(),
-            input_ports: vec![PortSpec { id: 0, name: "in".into(), description: "input".into() }],
-            output_ports: vec![PortSpec { id: 0, name: "out".into(), description: "output".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "in".into(),
+                description: "input".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "out".into(),
+                description: "output".into(),
+            }],
             config_schema: json!({ "type": "object" }),
         }
     }
@@ -64,7 +72,16 @@ fn test_workflow_graph_construction() {
         sub_workflow: None,
     });
 
-    workflow.add_edge(n1, n2, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    workflow
+        .add_edge(
+            n1,
+            n2,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     assert_eq!(workflow.graph.node_count(), 2);
     assert_eq!(workflow.graph.edge_count(), 1);
@@ -88,8 +105,24 @@ fn test_cycle_detection() {
         sub_workflow: None,
     });
 
-    workflow.add_edge(n1, n2, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    let result = workflow.add_edge(n2, n1, EdgeInstance { source_port: 0, target_port: 0 });
+    workflow
+        .add_edge(
+            n1,
+            n2,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    let result = workflow.add_edge(
+        n2,
+        n1,
+        EdgeInstance {
+            source_port: 0,
+            target_port: 0,
+        },
+    );
 
     assert!(result.is_err());
 }
@@ -117,5 +150,8 @@ fn test_metanode_structure() {
 
     let metanode = main_workflow.get_node(metanode_idx).unwrap();
     assert!(metanode.sub_workflow.is_some());
-    assert_eq!(metanode.sub_workflow.as_ref().unwrap().graph.node_count(), 1);
+    assert_eq!(
+        metanode.sub_workflow.as_ref().unwrap().graph.node_count(),
+        1
+    );
 }

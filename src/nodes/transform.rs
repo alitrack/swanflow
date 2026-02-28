@@ -1,8 +1,8 @@
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use datafusion::logical_expr::{LogicalPlan};
+use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
 use serde_json::Value as JsonValue;
-use anyhow::{Result, anyhow};
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
@@ -16,8 +16,16 @@ impl NodeBehavior for FilterNode {
             type_id: "core.transform.filter".to_string(),
             display_name: "Filter".to_string(),
             description: "Filter rows using a SQL expression".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data".into() }],
-            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Filtered Data".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Filtered Data".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -29,11 +37,17 @@ impl NodeBehavior for FilterNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["expr"].as_str().ok_or_else(|| anyhow!("Filter expression is required"))?;
+        config["expr"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Filter expression is required"))?;
         Ok(())
     }
 
-    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
         let expr_str = config["expr"].as_str().unwrap();
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
@@ -54,8 +68,16 @@ impl NodeBehavior for ProjectNode {
             type_id: "core.transform.project".to_string(),
             display_name: "Project".to_string(),
             description: "Select and rename columns".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data".into() }],
-            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Projected Data".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Projected Data".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -67,12 +89,23 @@ impl NodeBehavior for ProjectNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["columns"].as_array().ok_or_else(|| anyhow!("Column list is required"))?;
+        config["columns"]
+            .as_array()
+            .ok_or_else(|| anyhow!("Column list is required"))?;
         Ok(())
     }
 
-    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
-        let cols: Vec<&str> = config["columns"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let cols: Vec<&str> = config["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         let df = df.select_columns(&cols)?;
@@ -108,18 +141,30 @@ impl NodeBehavior for AggregateNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["groupby"].as_array().ok_or_else(|| anyhow!("GroupBy columns are required"))?;
-        config["aggs"].as_object().ok_or_else(|| anyhow!("Aggregations are required"))?;
+        config["groupby"]
+            .as_array()
+            .ok_or_else(|| anyhow!("GroupBy columns are required"))?;
+        config["aggs"]
+            .as_object()
+            .ok_or_else(|| anyhow!("Aggregations are required"))?;
         Ok(())
     }
 
-    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
-        let groupby_cols: Vec<String> = config["groupby"].as_array().unwrap().iter()
-            .map(|v| format!("\"{}\"", v.as_str().unwrap())).collect();
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let groupby_cols: Vec<String> = config["groupby"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| format!("\"{}\"", v.as_str().unwrap()))
+            .collect();
         let aggs = config["aggs"].as_object().unwrap();
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
-        
+
         let mut select_parts = groupby_cols.clone();
         for (out_name, agg_expr) in aggs {
             let expr = agg_expr.as_str().unwrap();
@@ -129,14 +174,14 @@ impl NodeBehavior for AggregateNode {
                 select_parts.push(format!("{}(\"{}\") as \"{}\"", expr, out_name, out_name));
             }
         }
-        
+
         ctx.register_table("agg_input", df.into_view())?;
         let sql = if groupby_cols.is_empty() {
             format!("SELECT {} FROM agg_input", select_parts.join(", "))
         } else {
             format!(
-                "SELECT {} FROM agg_input GROUP BY {}", 
-                select_parts.join(", "), 
+                "SELECT {} FROM agg_input GROUP BY {}",
+                select_parts.join(", "),
                 groupby_cols.join(", ")
             )
         };
@@ -154,15 +199,24 @@ impl NodeBehavior for WindowNode {
         NodeSpec {
             type_id: "core.transform.window".to_string(),
             display_name: "Window Functions".to_string(),
-            description: "Apply calculations across a set of rows related to the current row".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data".into() }],
-            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Enriched Data".into() }],
+            description: "Apply calculations across a set of rows related to the current row"
+                .to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Enriched Data".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "partition_by": { "type": "array", "items": { "type": "string" } },
                     "order_by": { "type": "array", "items": { "type": "string" } },
-                    "window_exprs": { 
+                    "window_exprs": {
                         "type": "object",
                         "description": "Mapping of output column name to window expression (e.g., 'rank()', 'sum(salary)')"
                     }
@@ -173,19 +227,35 @@ impl NodeBehavior for WindowNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["window_exprs"].as_object().ok_or_else(|| anyhow!("Window expressions are required"))?;
+        config["window_exprs"]
+            .as_object()
+            .ok_or_else(|| anyhow!("Window expressions are required"))?;
         Ok(())
     }
 
-    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
-        let partition_by: Vec<String> = config["partition_by"].as_array()
-            .map(|v| v.iter().map(|s| format!("\"{}\"", s.as_str().unwrap())).collect())
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let partition_by: Vec<String> = config["partition_by"]
+            .as_array()
+            .map(|v| {
+                v.iter()
+                    .map(|s| format!("\"{}\"", s.as_str().unwrap()))
+                    .collect()
+            })
             .unwrap_or_default();
-        let order_by: Vec<String> = config["order_by"].as_array()
-            .map(|v| v.iter().map(|s| format!("\"{}\"", s.as_str().unwrap())).collect())
+        let order_by: Vec<String> = config["order_by"]
+            .as_array()
+            .map(|v| {
+                v.iter()
+                    .map(|s| format!("\"{}\"", s.as_str().unwrap()))
+                    .collect()
+            })
             .unwrap_or_default();
         let window_exprs = config["window_exprs"].as_object().unwrap();
-        
+
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         let mut window_selects = Vec::new();
@@ -216,11 +286,25 @@ impl NodeBehavior for ConditionNode {
         NodeSpec {
             type_id: "core.flow.condition".to_string(),
             display_name: "Condition (IF)".to_string(),
-            description: "Route data based on a boolean condition. Port 0 for TRUE, Port 1 for FALSE.".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data to check".into() }],
+            description:
+                "Route data based on a boolean condition. Port 0 for TRUE, Port 1 for FALSE."
+                    .to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data to check".into(),
+            }],
             output_ports: vec![
-                PortSpec { id: 0, name: "true".into(), description: "Rows matching condition".into() },
-                PortSpec { id: 1, name: "false".into(), description: "Rows not matching condition".into() }
+                PortSpec {
+                    id: 0,
+                    name: "true".into(),
+                    description: "Rows matching condition".into(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "false".into(),
+                    description: "Rows not matching condition".into(),
+                },
             ],
             config_schema: serde_json::json!({
                 "type": "object",
@@ -233,11 +317,17 @@ impl NodeBehavior for ConditionNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["condition"].as_str().ok_or_else(|| anyhow!("Condition is required"))?;
+        config["condition"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Condition is required"))?;
         Ok(())
     }
 
-    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
         let condition = config["condition"].as_str().unwrap();
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
@@ -246,7 +336,10 @@ impl NodeBehavior for ConditionNode {
         let true_df = ctx.sql(&sql_true).await?;
         let sql_false = format!("SELECT * FROM cond_input WHERE NOT ({})", condition);
         let false_df = ctx.sql(&sql_false).await?;
-        Ok(vec![true_df.into_optimized_plan()?, false_df.into_optimized_plan()?])
+        Ok(vec![
+            true_df.into_optimized_plan()?,
+            false_df.into_optimized_plan()?,
+        ])
     }
 }
 
@@ -261,7 +354,11 @@ impl NodeBehavior for ForEachNode {
             display_name: "ForEach Loop".to_string(),
             description: "Iterate over a list of values provided in configuration".to_string(),
             input_ports: vec![],
-            output_ports: vec![PortSpec { id: 0, name: "item".into(), description: "Current iteration item (as a table)".to_string() }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "item".into(),
+                description: "Current iteration item (as a table)".to_string(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -273,11 +370,17 @@ impl NodeBehavior for ForEachNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["items"].as_array().ok_or_else(|| anyhow!("Items list is required"))?;
+        config["items"]
+            .as_array()
+            .ok_or_else(|| anyhow!("Items list is required"))?;
         Ok(())
     }
 
-    async fn propose_plan(&self, _inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+    async fn propose_plan(
+        &self,
+        _inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
         let items = config["items"].as_array().unwrap();
         let ctx = SessionContext::new();
         let mut select_parts = Vec::new();
@@ -299,9 +402,19 @@ impl NodeBehavior for ProfilerNode {
         NodeSpec {
             type_id: "core.transform.profiler".to_string(),
             display_name: "Data Profiler".to_string(),
-            description: "Generate statistical profiles (min, max, nulls, unique) for input columns".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data to profile".to_string() }],
-            output_ports: vec![PortSpec { id: 0, name: "profile".into(), description: "Statistical Profile".to_string() }],
+            description:
+                "Generate statistical profiles (min, max, nulls, unique) for input columns"
+                    .to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data to profile".to_string(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "profile".into(),
+                description: "Statistical Profile".to_string(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -315,11 +428,15 @@ impl NodeBehavior for ProfilerNode {
         Ok(())
     }
 
-    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         let schema = df.schema();
-        
+
         let cols: Vec<String> = if let Some(c) = config["columns"].as_array() {
             c.iter().map(|v| v.as_str().unwrap().to_string()).collect()
         } else {
@@ -331,7 +448,10 @@ impl NodeBehavior for ProfilerNode {
             select_parts.push(format!("COUNT(DISTINCT \"{0}\") as \"{0}_unique\"", col));
             select_parts.push(format!("MIN(\"{0}\") as \"{0}_min\"", col));
             select_parts.push(format!("MAX(\"{0}\") as \"{0}_max\"", col));
-            select_parts.push(format!("SUM(CASE WHEN \"{0}\" IS NULL THEN 1 ELSE 0 END) as \"{0}_nulls\"", col));
+            select_parts.push(format!(
+                "SUM(CASE WHEN \"{0}\" IS NULL THEN 1 ELSE 0 END) as \"{0}_nulls\"",
+                col
+            ));
         }
         ctx.register_table("profile_input", df.into_view())?;
         let sql = format!("SELECT {} FROM profile_input", select_parts.join(", "));
@@ -363,11 +483,17 @@ impl NodeBehavior for VariableCreatorNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["variables"].as_object().ok_or_else(|| anyhow!("Variables object is required"))?;
+        config["variables"]
+            .as_object()
+            .ok_or_else(|| anyhow!("Variables object is required"))?;
         Ok(())
     }
 
-    async fn propose_plan(&self, _inputs: Vec<LogicalPlan>, _config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+    async fn propose_plan(
+        &self,
+        _inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
         Ok(vec![])
     }
 }
@@ -382,12 +508,16 @@ impl NodeBehavior for TableToVariableNode {
             type_id: "core.flow.table_to_variable".to_string(),
             display_name: "Table to Variable".to_string(),
             description: "Convert the first row of a table into flow variables".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Source Table".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Source Table".into(),
+            }],
             output_ports: vec![],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "mapping": { 
+                    "mapping": {
                         "type": "object",
                         "description": "Mapping of column name to variable name"
                     }
@@ -396,9 +526,15 @@ impl NodeBehavior for TableToVariableNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
 
-    async fn propose_plan(&self, _inputs: Vec<LogicalPlan>, _config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+    async fn propose_plan(
+        &self,
+        _inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
         Ok(vec![])
     }
 }

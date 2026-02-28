@@ -1,10 +1,10 @@
-use petgraph::stable_graph::{StableGraph, NodeIndex};
+use crate::nodes::NodeState;
+use anyhow::{anyhow, Result};
+use petgraph::stable_graph::{NodeIndex, StableGraph};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use uuid::Uuid;
-use anyhow::{Result, anyhow};
 use std::collections::HashMap;
-use crate::nodes::NodeState;
+use uuid::Uuid;
 
 /// An instance of a node in a workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]

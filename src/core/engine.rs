@@ -1,23 +1,25 @@
-use std::sync::Arc;
-use std::fmt;
-use std::collections::HashMap;
-use tokio::sync::mpsc;
-use datafusion::prelude::*;
-use datafusion::error::Result;
-use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner, DefaultPhysicalPlanner};
-use datafusion::execution::context::{SessionState, QueryPlanner};
-use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion::common::DFSchemaRef;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
+use datafusion::common::DFSchemaRef;
+use datafusion::error::Result;
+use datafusion::execution::context::{QueryPlanner, SessionState};
+use datafusion::execution::session_state::SessionStateBuilder;
+use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
+use datafusion::prelude::*;
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::core::graph::Workflow;
 use crate::core::compiler::WorkflowCompiler;
-use crate::core::observer::{StateProbeLogical, StateProbeExec, MaterializerLogical, MaterializerExec};
-use crate::core::datasource::{ExcelScanLogical, ExcelScanExec, ExcelSinkLogical, ExcelSinkExec};
+use crate::core::datasource::{ExcelScanExec, ExcelScanLogical, ExcelSinkExec, ExcelSinkLogical};
+use crate::core::graph::Workflow;
+use crate::core::observer::{
+    MaterializerExec, MaterializerLogical, StateProbeExec, StateProbeLogical,
+};
 use crate::nodes::registry::NodeRegistry;
 use crate::nodes::NodeEvent;
 
@@ -114,7 +116,7 @@ impl SwanFlowEngine {
     pub async fn infer_metadata(&self, workflow: &Workflow) -> anyhow::Result<WorkflowMetadata> {
         let mut compiler = WorkflowCompiler::new(false);
         compiler.compile(workflow, &self.registry, None).await?;
-        
+
         // TODO: Actually run ProfilerNode on samples to populate profiles field
         Ok(WorkflowMetadata {
             schemas: compiler.inferred_schemas,
@@ -132,14 +134,20 @@ impl SwanFlowEngine {
 
         let mut compiler = WorkflowCompiler::new(true);
         let terminal_outputs = compiler.compile(workflow, &self.registry, None).await?;
-        
-        let final_plan = terminal_outputs.values().next()
+
+        let final_plan = terminal_outputs
+            .values()
+            .next()
             .ok_or_else(|| anyhow::anyhow!("Workflow has no output"))?;
 
-        let planner = SwanFlowPlanner { event_tx: tx.clone() };
-        let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(planner)]));
+        let planner = SwanFlowPlanner {
+            event_tx: tx.clone(),
+        };
+        let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![
+            Arc::new(planner),
+        ]));
         let query_planner = Arc::new(SwanFlowQueryPlanner { physical_planner });
-        
+
         let state = SessionStateBuilder::new_from_existing(self.ctx.state())
             .with_query_planner(query_planner)
             .build();

@@ -1,8 +1,8 @@
+use anyhow::Result;
 use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
 use serde_json::Value as JsonValue;
-use anyhow::Result;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
@@ -36,9 +36,9 @@ impl NodeBehavior for SqlNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["query"].as_str().ok_or_else(|| {
-            anyhow::anyhow!("SQL Query is required")
-        })?;
+        config["query"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("SQL Query is required"))?;
         Ok(())
     }
 
@@ -48,7 +48,7 @@ impl NodeBehavior for SqlNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let query = config["query"].as_str().unwrap();
-        
+
         let ctx = SessionContext::new();
         for (i, plan) in inputs.into_iter().enumerate() {
             let table_name = format!("input_{}", i);

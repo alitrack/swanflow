@@ -1,8 +1,8 @@
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
-use serde_json::Value as JsonValue;
-use anyhow::{Result, anyhow};
 use duckdb::Connection;
+use serde_json::Value as JsonValue;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
@@ -31,9 +31,15 @@ impl NodeBehavior for InputNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
 
-    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, _config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
         Ok(inputs)
     }
 }
@@ -63,9 +69,15 @@ impl NodeBehavior for OutputNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
 
-    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, _config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
         Ok(inputs)
     }
 }
@@ -79,7 +91,8 @@ impl NodeBehavior for DuckDBExtensionNode {
         NodeSpec {
             type_id: "core.flow.extension".to_string(),
             display_name: "DuckDB Extension Loader".to_string(),
-            description: "Install and load an extension (e.g., httpfs, spatial) into DuckDB".to_string(),
+            description: "Install and load an extension (e.g., httpfs, spatial) into DuckDB"
+                .to_string(),
             input_ports: vec![],
             output_ports: vec![],
             config_schema: serde_json::json!({
@@ -94,11 +107,17 @@ impl NodeBehavior for DuckDBExtensionNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["extension"].as_str().ok_or_else(|| anyhow!("Extension name is required"))?;
+        config["extension"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Extension name is required"))?;
         Ok(())
     }
 
-    async fn propose_plan(&self, _inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+    async fn propose_plan(
+        &self,
+        _inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
         let ext = config["extension"].as_str().unwrap();
         let install = config["install"].as_bool().unwrap_or(true);
         let conn = Connection::open_in_memory()?;

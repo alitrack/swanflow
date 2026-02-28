@@ -1,16 +1,19 @@
-use std::sync::Arc;
-use rustflow::core::graph::{Workflow, NodeInstance, EdgeInstance};
 use rustflow::core::engine::SwanFlowEngine;
+use rustflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::{NodeState, NodeEvent};
+use rustflow::nodes::{NodeEvent, NodeState};
 use serde_json::json;
+use std::sync::Arc;
 use uuid::Uuid;
 
 async fn run_and_print_events(engine: &SwanFlowEngine, workflow: &Workflow, title: &str) {
-    println!("
-=== Running Workflow: {} ===", title);
+    println!(
+        "
+=== Running Workflow: {} ===",
+        title
+    );
     let mut rx = engine.execute_workflow(workflow).await.unwrap();
-    
+
     // 我们在这里监听“流量计”传回的实时信号
     while let Some(event) = rx.recv().await {
         match event {
@@ -23,7 +26,10 @@ async fn run_and_print_events(engine: &SwanFlowEngine, workflow: &Workflow, titl
                 };
                 println!("Node[{}] -> {}", node_id, status_icon);
             }
-            NodeEvent::Progress { node_id, percentage } => {
+            NodeEvent::Progress {
+                node_id,
+                percentage,
+            } => {
                 println!("Node[{}] -> Progress: {:.1}%", node_id, percentage);
             }
         }
@@ -34,18 +40,22 @@ async fn run_and_print_events(engine: &SwanFlowEngine, workflow: &Workflow, titl
 async fn demo_standard_etl_pipeline() {
     // 准备测试数据
     let csv_path = "demo_data.csv";
-    std::fs::write(csv_path, "name,salary,dept
+    std::fs::write(
+        csv_path,
+        "name,salary,dept
 alice,5000,IT
 bob,3000,HR
 charlie,7000,IT
-david,4500,Sales").unwrap();
+david,4500,Sales",
+    )
+    .unwrap();
 
     let registry = Arc::new(NodeRegistry::default());
     let engine = SwanFlowEngine::new(registry);
 
     // 构建图：Read -> SQL (加薪) -> Filter (高薪) -> Project (姓名)
     let mut workflow = Workflow::new("Standard ETL");
-    
+
     let n_read = workflow.add_node(NodeInstance {
         id: Uuid::new_v4(),
         type_id: "core.io.csv".into(),
@@ -70,8 +80,26 @@ david,4500,Sales").unwrap();
         sub_workflow: None,
     });
 
-    workflow.add_edge(n_read, n_sql, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    workflow.add_edge(n_sql, n_filter, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    workflow
+        .add_edge(
+            n_read,
+            n_sql,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    workflow
+        .add_edge(
+            n_sql,
+            n_filter,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     run_and_print_events(&engine, &workflow, "ETL Pipeline Demo").await;
     let _ = std::fs::remove_file(csv_path);
@@ -105,8 +133,26 @@ async fn demo_reusable_metanode() {
         state: NodeState::Configured,
         sub_workflow: None,
     });
-    cleaner_sub.add_edge(sub_in, sub_filter, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    cleaner_sub.add_edge(sub_filter, sub_out, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    cleaner_sub
+        .add_edge(
+            sub_in,
+            sub_filter,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    cleaner_sub
+        .add_edge(
+            sub_filter,
+            sub_out,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     // 2. 主流程：生成数据 -> 调用上述 MetaNode
     let mut main_flow = Workflow::new("Main_With_MetaNode");
@@ -124,7 +170,16 @@ async fn demo_reusable_metanode() {
         state: NodeState::Configured,
         sub_workflow: Some(Box::new(cleaner_sub)),
     });
-    main_flow.add_edge(n_gen, n_meta, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    main_flow
+        .add_edge(
+            n_gen,
+            n_meta,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     run_and_print_events(&engine, &main_flow, "MetaNode Reuse Demo").await;
 }

@@ -1,9 +1,9 @@
 use std::any::Any;
 use std::fmt;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::path::PathBuf;
 
 use arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
@@ -12,8 +12,8 @@ use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream, ExecutionPlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
+    RecordBatchStream, SendableRecordBatchStream,
 };
 use futures::Stream;
 use futures::StreamExt;
@@ -300,7 +300,7 @@ impl ExecutionPlan for MaterializerExec {
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let input_stream = self.input.execute(partition, context)?;
-        
+
         // Prepare cache path
         let mut path = PathBuf::from("target/swanflow_cache");
         std::fs::create_dir_all(&path).ok();
@@ -343,7 +343,8 @@ impl Stream for MaterializingStream {
                     // Perform writing in a non-blocking way (simplified for MVP)
                     let schema = batches[0].schema();
                     let file = std::fs::File::create(path).unwrap();
-                    let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+                    let mut writer =
+                        parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
                     for batch in batches {
                         writer.write(&batch).unwrap();
                     }

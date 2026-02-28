@@ -1,10 +1,10 @@
-pub mod providers;
 pub mod mcp;
+pub mod providers;
 
-use std::sync::Arc;
-use anyhow::Result;
-use crate::nodes::NodeSpec;
 use self::providers::LlmProvider;
+use crate::nodes::NodeSpec;
+use anyhow::Result;
+use std::sync::Arc;
 
 pub struct ConfigWizard {
     provider: Arc<dyn LlmProvider>,
@@ -16,7 +16,11 @@ impl ConfigWizard {
     }
 
     /// Generates a configuration for a specific node based on a natural language prompt.
-    pub async fn suggest_config(&self, node_spec: &NodeSpec, prompt: &str) -> Result<serde_json::Value> {
+    pub async fn suggest_config(
+        &self,
+        node_spec: &NodeSpec,
+        prompt: &str,
+    ) -> Result<serde_json::Value> {
         let system_prompt = format!(
             "You are a configuration expert for SwanFlow. Generate a JSON configuration for a node of type '{}'.
 
@@ -30,13 +34,22 @@ impl ConfigWizard {
             node_spec.config_schema
         );
 
-        let full_prompt = format!("{}
-User Request: {}", system_prompt, prompt);
+        let full_prompt = format!(
+            "{}
+User Request: {}",
+            system_prompt, prompt
+        );
         let result = self.provider.complete(&full_prompt).await?;
-        
+
         // Basic extraction of JSON from response
         let json_str = if result.contains("```json") {
-            result.split("```json").nth(1).unwrap().split("```").next().unwrap()
+            result
+                .split("```json")
+                .nth(1)
+                .unwrap()
+                .split("```")
+                .next()
+                .unwrap()
         } else if result.contains("```") {
             result.split("```").nth(1).unwrap()
         } else {

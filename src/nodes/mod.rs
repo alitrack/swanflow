@@ -1,20 +1,20 @@
-use async_trait::async_trait;
-use datafusion::logical_expr::LogicalPlan;
-use datafusion::common::DFSchemaRef;
+use anyhow::Result;
 use arrow::record_batch::RecordBatch;
+use async_trait::async_trait;
+use datafusion::common::DFSchemaRef;
+use datafusion::logical_expr::LogicalPlan;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
-use anyhow::Result;
 
-pub mod registry;
-pub mod common;
-pub mod sql;
-pub mod io;
-pub mod boundary;
-pub mod transform;
 pub mod ai;
+pub mod boundary;
+pub mod common;
+pub mod io;
+pub mod registry;
 pub mod script;
+pub mod sql;
+pub mod transform;
 
 /// Port identification and description.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,14 +48,8 @@ pub enum NodeState {
 /// Event emitted by a node during its lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeEvent {
-    StateChanged {
-        node_id: Uuid,
-        state: NodeState,
-    },
-    Progress {
-        node_id: Uuid,
-        percentage: f32,
-    },
+    StateChanged { node_id: Uuid, state: NodeState },
+    Progress { node_id: Uuid, percentage: f32 },
 }
 
 /// Metadata inferred before full execution.
@@ -90,17 +84,23 @@ pub trait NodeBehavior: Send + Sync {
         config: &JsonValue,
     ) -> Result<InferredMetadata> {
         use datafusion::logical_expr::EmptyRelation;
-        
-        let inputs = input_schemas.into_iter().map(|s| {
-            LogicalPlan::EmptyRelation(EmptyRelation {
-                produce_one_row: false,
-                schema: s,
+
+        let inputs = input_schemas
+            .into_iter()
+            .map(|s| {
+                LogicalPlan::EmptyRelation(EmptyRelation {
+                    produce_one_row: false,
+                    schema: s,
+                })
             })
-        }).collect();
+            .collect();
 
         let output_plans = self.propose_plan(inputs, config).await?;
         Ok(InferredMetadata {
-            schemas: output_plans.into_iter().map(|p| p.schema().clone()).collect(),
+            schemas: output_plans
+                .into_iter()
+                .map(|p| p.schema().clone())
+                .collect(),
             sample_data: None,
         })
     }

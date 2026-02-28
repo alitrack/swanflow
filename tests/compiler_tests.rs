@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use std::collections::HashMap;
-use rustflow::core::graph::{Workflow, NodeInstance, EdgeInstance};
+use datafusion::prelude::*;
 use rustflow::core::compiler::WorkflowCompiler;
+use rustflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use rustflow::nodes::registry::NodeRegistry;
 use rustflow::nodes::sql::SqlNode;
-use rustflow::nodes::{NodeState, NodeBehavior};
+use rustflow::nodes::{NodeBehavior, NodeState};
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
-use datafusion::prelude::*;
 
 #[tokio::test]
 async fn test_topological_sort() {
@@ -34,8 +34,26 @@ async fn test_topological_sort() {
         sub_workflow: None,
     });
 
-    workflow.add_edge(n1, n2, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    workflow.add_edge(n2, n3, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    workflow
+        .add_edge(
+            n1,
+            n2,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    workflow
+        .add_edge(
+            n2,
+            n3,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     let compiler = WorkflowCompiler::new(false);
     let order = compiler.get_execution_order(&workflow).unwrap();
@@ -47,7 +65,7 @@ async fn test_topological_sort() {
 async fn test_metanode_expansion() {
     let mut registry = NodeRegistry::new();
     registry.register_node(Arc::new(SqlNode));
-    
+
     // 1. Create Sub-Workflow (MetaNode content)
     // core.input -> core.sql (Identity)
     let mut sub_workflow = Workflow::new("SubFlow");
@@ -67,7 +85,16 @@ async fn test_metanode_expansion() {
         state: NodeState::Configured,
         sub_workflow: None,
     });
-    sub_workflow.add_edge(si, ss, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    sub_workflow
+        .add_edge(
+            si,
+            ss,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     // 2. Create Main Workflow
     // core.sql (Source) -> MetaNode (SubFlow)
@@ -88,11 +115,23 @@ async fn test_metanode_expansion() {
         state: NodeState::Configured,
         sub_workflow: Some(Box::new(sub_workflow)),
     });
-    main_workflow.add_edge(source_idx, meta_idx, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    main_workflow
+        .add_edge(
+            source_idx,
+            meta_idx,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     // 3. Compile
     let mut compiler = WorkflowCompiler::new(false);
-    let outputs = compiler.compile(&main_workflow, &registry, None).await.unwrap();
+    let outputs = compiler
+        .compile(&main_workflow, &registry, None)
+        .await
+        .unwrap();
 
     assert!(outputs.contains_key(&0));
     // The output should be the result of the SQL inside the MetaNode

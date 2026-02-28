@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use serde_json::Value as JsonValue;
-use anyhow::Result;
+use std::collections::HashMap;
 
 pub struct TemplateEngine;
 
@@ -8,7 +7,7 @@ impl TemplateEngine {
     /// Replaces placeholders like ${context.key} in a string with values from the context.
     pub fn render_string(input: &str, context: &HashMap<String, JsonValue>) -> String {
         let mut output = input.to_string();
-        
+
         for (key, value) in context {
             let placeholder = format!("${{context.{}}}", key);
             let replacement = match value {
@@ -19,7 +18,7 @@ impl TemplateEngine {
             };
             output = output.replace(&placeholder, &replacement);
         }
-        
+
         output
     }
 
@@ -53,7 +52,8 @@ mod tests {
         ctx.insert("dept".to_string(), json!("IT"));
         ctx.insert("min_val".to_string(), json!(100));
 
-        let input = "SELECT * FROM data WHERE dept = '${context.dept}' AND val > ${context.min_val}";
+        let input =
+            "SELECT * FROM data WHERE dept = '${context.dept}' AND val > ${context.min_val}";
         let output = TemplateEngine::render_string(input, &ctx);
         assert_eq!(output, "SELECT * FROM data WHERE dept = 'IT' AND val > 100");
     }

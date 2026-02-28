@@ -1,10 +1,10 @@
-use std::sync::Arc;
-use async_trait::async_trait;
-use rustflow::agent::{AnalystAgent, AgentResponse};
-use rustflow::nodes::ai::providers::{LlmProvider};
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::core::engine::SwanFlowEngine;
 use anyhow::Result;
+use async_trait::async_trait;
+use rustflow::agent::{AgentResponse, AnalystAgent};
+use rustflow::core::engine::SwanFlowEngine;
+use rustflow::nodes::ai::providers::LlmProvider;
+use rustflow::nodes::registry::NodeRegistry;
+use std::sync::Arc;
 
 struct MockAnalystProvider {
     responses: Vec<String>,
@@ -28,13 +28,15 @@ async fn test_agent_reasoning_loop_foundation() {
         "final_answer": "I have drafted the initial node."
     }"#.to_string();
 
-    let provider = Arc::new(MockAnalystProvider { responses: vec![mock_json] });
+    let provider = Arc::new(MockAnalystProvider {
+        responses: vec![mock_json],
+    });
     let registry = Arc::new(NodeRegistry::default());
     let engine = Arc::new(SwanFlowEngine::new(registry.clone()));
-    
+
     let agent = AnalystAgent::new(provider, registry, engine);
-    
+
     let workflow = agent.run_analysis("Read test.csv").await.unwrap();
-    
+
     assert_eq!(workflow.graph.node_count(), 1);
 }

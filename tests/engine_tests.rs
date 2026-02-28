@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use rustflow::core::graph::{Workflow, NodeInstance, EdgeInstance};
 use rustflow::core::engine::SwanFlowEngine;
+use rustflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
+use rustflow::nodes::io::CsvReadNode;
 use rustflow::nodes::registry::NodeRegistry;
 use rustflow::nodes::sql::SqlNode;
-use rustflow::nodes::io::CsvReadNode;
 use rustflow::nodes::transform::FilterNode;
-use rustflow::nodes::{NodeState, NodeEvent};
+use rustflow::nodes::{NodeEvent, NodeState};
 use serde_json::json;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -18,7 +18,7 @@ async fn test_engine_execution_with_events() {
 
     let registry = Arc::new(NodeRegistry::default());
     let mut workflow = Workflow::new("Engine Events Demo");
-    
+
     let read_node_id = Uuid::new_v4();
     let read_idx = workflow.add_node(NodeInstance {
         id: read_node_id,
@@ -39,7 +39,16 @@ async fn test_engine_execution_with_events() {
         sub_workflow: None,
     });
 
-    workflow.add_edge(read_idx, sql_idx, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    workflow
+        .add_edge(
+            read_idx,
+            sql_idx,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     let engine = SwanFlowEngine::new(registry);
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
@@ -82,19 +91,25 @@ async fn test_materialization_and_cache() {
     // Verify cache directory and file exist
     let cache_dir = std::path::Path::new("target/swanflow_cache");
     assert!(cache_dir.exists());
-    
+
     // 2. Second execution: should use cache (short-circuit)
     // We can delete the source CSV to prove it's using the cache
     std::fs::remove_file(csv_path).unwrap();
-    
+
     let mut rx2 = engine.execute_workflow(&workflow).await.unwrap();
     let mut events = Vec::new();
     while let Some(event) = rx2.recv().await {
         events.push(event);
     }
-    
-    assert!(events.iter().any(|e| matches!(e, NodeEvent::StateChanged { node_id: _, state: NodeState::Executed })));
-    
+
+    assert!(events.iter().any(|e| matches!(
+        e,
+        NodeEvent::StateChanged {
+            node_id: _,
+            state: NodeState::Executed
+        }
+    )));
+
     // Cleanup cache
     std::fs::remove_dir_all(cache_dir).ok();
 }
@@ -129,13 +144,22 @@ async fn test_schema_inference() {
         sub_workflow: None,
     });
 
-    workflow.add_edge(read_idx, sql_idx, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    workflow
+        .add_edge(
+            read_idx,
+            sql_idx,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     let schemas = engine.infer_schemas(&workflow).await.unwrap();
-    
+
     let read_schema = &schemas[&read_id][0];
     assert_eq!(read_schema.fields().len(), 3);
-    
+
     let sql_schema = &schemas[&sql_id][0];
     assert_eq!(sql_schema.fields().len(), 2);
     assert!(sql_schema.field_with_name(None, "name").is_ok());

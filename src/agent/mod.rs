@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use anyhow::{Result, Context as _};
-use serde::{Deserialize, Serialize};
-use crate::nodes::ai::providers::LlmProvider;
-use crate::core::graph::{Workflow, NodeInstance, EdgeInstance};
 use crate::core::engine::SwanFlowEngine;
+use crate::core::graph::{EdgeInstance, NodeInstance, Workflow};
+use crate::nodes::ai::providers::LlmProvider;
 use crate::nodes::registry::NodeRegistry;
+use anyhow::{Context as _, Result};
 use petgraph::prelude::NodeIndex;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentToolCall {
@@ -30,11 +30,15 @@ pub struct AnalystAgent {
 
 impl AnalystAgent {
     pub fn new(
-        provider: Arc<dyn LlmProvider>, 
+        provider: Arc<dyn LlmProvider>,
         registry: Arc<NodeRegistry>,
-        engine: Arc<SwanFlowEngine>
+        engine: Arc<SwanFlowEngine>,
     ) -> Self {
-        Self { provider, registry, engine }
+        Self {
+            provider,
+            registry,
+            engine,
+        }
     }
 
     pub async fn run_analysis(&self, user_prompt: &str) -> Result<Workflow> {
@@ -56,22 +60,30 @@ impl AnalystAgent {
                     match tool_result {
                         Ok(msg) => {
                             println!("  ✅ Tool [{}]: {}", tool_call.name, msg);
-                            history.push_str(&format!("\nTool Result ({}): {}\n", tool_call.name, msg));
+                            history.push_str(&format!(
+                                "\nTool Result ({}): {}\n",
+                                tool_call.name, msg
+                            ));
                         }
                         Err(e) => {
                             println!("  ❌ Tool [{}] Error: {}", tool_call.name, e);
-                            history.push_str(&format!("\nTool Error ({}): {}\n", tool_call.name, e));
+                            history
+                                .push_str(&format!("\nTool Error ({}): {}\n", tool_call.name, e));
                         }
                     }
                 }
-                
+
                 match self.engine.infer_metadata(&workflow).await {
                     Ok(metadata) => {
                         let schema_summary = self.summarize_metadata(&metadata);
-                        history.push_str(&format!("\nValidation Success! Schemas:\n{}\n", schema_summary));
+                        history.push_str(&format!(
+                            "\nValidation Success! Schemas:\n{}\n",
+                            schema_summary
+                        ));
                     }
                     Err(e) => {
-                        history.push_str(&format!("\nValidation Error: {}. Fix the workflow.\n", e));
+                        history
+                            .push_str(&format!("\nValidation Error: {}. Fix the workflow.\n", e));
                     }
                 }
             }
@@ -80,9 +92,9 @@ impl AnalystAgent {
                 println!("🎯 Final Answer: {}", answer);
                 return Ok(workflow);
             }
-            
+
             if i > 0 && workflow.graph.node_count() > 0 {
-                 return Ok(workflow);
+                return Ok(workflow);
             }
         }
         Ok(workflow)
@@ -91,20 +103,34 @@ impl AnalystAgent {
     fn normalize_tool_call(&self, val: serde_json::Value) -> Result<AgentToolCall> {
         // AI sometimes nests everything under "config" or "params"
         let mut target = val.clone();
-        if let Some(inner) = target.get("config").filter(|v| v.is_object() && (v.get("type_id").is_some() || v.get("source_idx").is_some())) {
+        if let Some(inner) = target.get("config").filter(|v| {
+            v.is_object() && (v.get("type_id").is_some() || v.get("source_idx").is_some())
+        }) {
             target = inner.clone();
         } else if let Some(inner) = target.get("params").filter(|v| v.is_object()) {
             target = inner.clone();
         }
 
         if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
-            let args = val.get("arguments").cloned().unwrap_or(serde_json::json!({}));
-            Ok(AgentToolCall { name: name.to_string(), arguments: args })
+            let args = val
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            Ok(AgentToolCall {
+                name: name.to_string(),
+                arguments: args,
+            })
         } else if let Some(method) = val.get("method").and_then(|v| v.as_str()) {
             let params = val.get("params").cloned().unwrap_or(serde_json::json!({}));
-            Ok(AgentToolCall { name: method.to_string(), arguments: params })
+            Ok(AgentToolCall {
+                name: method.to_string(),
+                arguments: params,
+            })
         } else if let Some(t) = val.get("type").and_then(|v| v.as_str()) {
-            Ok(AgentToolCall { name: t.to_string(), arguments: target })
+            Ok(AgentToolCall {
+                name: t.to_string(),
+                arguments: target,
+            })
         } else {
             anyhow::bail!("Invalid tool call format: {}", val)
         }
@@ -133,9 +159,15 @@ impl AnalystAgent {
     async fn execute_tool(&self, call: &AgentToolCall, workflow: &mut Workflow) -> Result<String> {
         match call.name.as_str() {
             "add_node" => {
-                let type_id = call.arguments.get("type_id").and_then(|v| v.as_str())
+                let type_id = call
+                    .arguments
+                    .get("type_id")
+                    .and_then(|v| v.as_str())
                     .context(format!("Missing type_id in arguments: {}", call.arguments))?;
-                let config = call.arguments.get("config").cloned()
+                let config = call
+                    .arguments
+                    .get("config")
+                    .cloned()
                     .unwrap_or(serde_json::json!({}));
                 let instance = NodeInstance {
                     id: uuid::Uuid::new_v4(),
@@ -149,15 +181,34 @@ impl AnalystAgent {
                 Ok(format!("Added node {} at index {:?}", type_id, idx.index()))
             }
             "connect" => {
-                let src = call.arguments.get("source_idx").and_then(|v| v.as_u64())
+                let src = call
+                    .arguments
+                    .get("source_idx")
+                    .and_then(|v| v.as_u64())
                     .or_else(|| call.arguments.get("source").and_then(|v| v.as_u64()))
-                    .context(format!("Missing source_idx in arguments: {}", call.arguments))? as usize;
-                let dst = call.arguments.get("target_idx").and_then(|v| v.as_u64())
+                    .context(format!(
+                        "Missing source_idx in arguments: {}",
+                        call.arguments
+                    ))? as usize;
+                let dst = call
+                    .arguments
+                    .get("target_idx")
+                    .and_then(|v| v.as_u64())
                     .or_else(|| call.arguments.get("target").and_then(|v| v.as_u64()))
-                    .context(format!("Missing target_idx in arguments: {}", call.arguments))? as usize;
+                    .context(format!(
+                        "Missing target_idx in arguments: {}",
+                        call.arguments
+                    ))? as usize;
                 let src_p = call.arguments["source_port"].as_u64().unwrap_or(0) as u32;
                 let dst_p = call.arguments["target_port"].as_u64().unwrap_or(0) as u32;
-                workflow.add_edge(NodeIndex::new(src), NodeIndex::new(dst), EdgeInstance { source_port: src_p, target_port: dst_p })?;
+                workflow.add_edge(
+                    NodeIndex::new(src),
+                    NodeIndex::new(dst),
+                    EdgeInstance {
+                        source_port: src_p,
+                        target_port: dst_p,
+                    },
+                )?;
                 Ok(format!("Connected node {} to {}", src, dst))
             }
             _ => anyhow::bail!("Unknown tool: {}", call.name),
@@ -166,20 +217,34 @@ impl AnalystAgent {
 
     fn parse_response(&self, text: &str) -> Result<AgentResponse> {
         let json_str = if text.contains("```json") {
-            text.split("```json").nth(1).unwrap().split("```").next().unwrap()
+            text.split("```json")
+                .nth(1)
+                .unwrap()
+                .split("```")
+                .next()
+                .unwrap()
         } else if text.contains("```") {
             text.split("```").nth(1).unwrap()
         } else {
             text
         };
-        serde_json::from_str(json_str.trim()).map_err(|e| anyhow::anyhow!("JSON Parse Error: {}. Text was: {}", e, text))
+        serde_json::from_str(json_str.trim())
+            .map_err(|e| anyhow::anyhow!("JSON Parse Error: {}. Text was: {}", e, text))
     }
 
     fn summarize_metadata(&self, metadata: &crate::core::engine::WorkflowMetadata) -> String {
         let mut summary = String::new();
         for (id, schemas) in &metadata.schemas {
             if !schemas.is_empty() {
-                summary.push_str(&format!("Node[{}]: {:?}\n", id, schemas[0].fields().iter().map(|f| f.name()).collect::<Vec<_>>()));
+                summary.push_str(&format!(
+                    "Node[{}]: {:?}\n",
+                    id,
+                    schemas[0]
+                        .fields()
+                        .iter()
+                        .map(|f| f.name())
+                        .collect::<Vec<_>>()
+                ));
             }
         }
         summary

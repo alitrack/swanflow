@@ -1,7 +1,7 @@
+use crate::nodes::NodeBehavior;
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use anyhow::{Result, anyhow};
-use crate::nodes::NodeBehavior;
 
 /// A thread-safe registry for node implementations.
 /// Node types are indexed by their unique type_id.
@@ -38,11 +38,17 @@ impl NodeRegistry {
 
     /// Register all fundamental SwanFlow nodes.
     pub fn register_core_nodes(&mut self) {
-        use crate::nodes::sql::SqlNode;
-        use crate::nodes::io::{CsvReadNode, ParquetReadNode, ExcelReadNode, ExcelWriteNode, DuckDBReadNode, DuckDBWriteNode, HttpFetchNode};
-        use crate::nodes::boundary::{InputNode, OutputNode, DuckDBExtensionNode};
-        use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode, ProfilerNode, VariableCreatorNode, TableToVariableNode};
+        use crate::nodes::boundary::{DuckDBExtensionNode, InputNode, OutputNode};
+        use crate::nodes::io::{
+            CsvReadNode, DuckDBReadNode, DuckDBWriteNode, ExcelReadNode, ExcelWriteNode,
+            HttpFetchNode, ParquetReadNode,
+        };
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
+        use crate::nodes::sql::SqlNode;
+        use crate::nodes::transform::{
+            AggregateNode, ConditionNode, FilterNode, ForEachNode, ProfilerNode, ProjectNode,
+            TableToVariableNode, VariableCreatorNode, WindowNode,
+        };
 
         self.register_node(Arc::new(SqlNode));
         self.register_node(Arc::new(CsvReadNode));

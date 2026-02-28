@@ -1,20 +1,19 @@
-use async_trait::async_trait;
-use datafusion::logical_expr::{LogicalPlan, Extension};
-use datafusion::prelude::*;
-use datafusion::common::{DFSchemaRef, DFSchema};
-use arrow::record_batch::RecordBatch;
-use arrow::datatypes::{Schema, Field, DataType};
+use anyhow::{anyhow, Result};
 use arrow::array::{ArrayRef, StringBuilder};
-use arrow::json::ReaderBuilder;
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use async_trait::async_trait;
+use calamine::{open_workbook, Data, Reader, Xlsx};
+use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::logical_expr::{Extension, LogicalPlan};
+use datafusion::prelude::*;
+use duckdb::Connection;
 use serde_json::Value as JsonValue;
-use anyhow::{Result, anyhow};
-use calamine::{Reader, Xlsx, open_workbook, Data};
-use std::sync::Arc;
 use std::path::PathBuf;
-use duckdb::{Connection};
+use std::sync::Arc;
 
-use crate::nodes::{NodeBehavior, NodeSpec, PortSpec, InferredMetadata};
 use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
+use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec};
 
 pub struct ExcelReadNode;
 
@@ -31,11 +30,21 @@ impl NodeBehavior for ExcelReadNode {
         NodeSpec {
             type_id: "core.io.excel_read".to_string(),
             display_name: "Excel Reader".to_string(),
-            description: "Read data from an Excel file with automatic type promotion and a rejects port".to_string(),
+            description:
+                "Read data from an Excel file with automatic type promotion and a rejects port"
+                    .to_string(),
             input_ports: vec![],
             output_ports: vec![
-                PortSpec { id: 0, name: "output".into(), description: "Validated Data".into() },
-                PortSpec { id: 1, name: "rejects".into(), description: "Rows with type errors".into() }
+                PortSpec {
+                    id: 0,
+                    name: "output".into(),
+                    description: "Validated Data".into(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "rejects".into(),
+                    description: "Rows with type errors".into(),
+                },
             ],
             config_schema: serde_json::json!({
                 "type": "object",
@@ -51,7 +60,9 @@ impl NodeBehavior for ExcelReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"].as_str().ok_or_else(|| anyhow!("Excel Path is required"))?;
+        config["path"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Excel Path is required"))?;
         Ok(())
     }
 
@@ -67,9 +78,12 @@ impl NodeBehavior for ExcelReadNode {
 
         let mut workbook: Xlsx<_> = open_workbook(path)?;
         let sheet = if let Some(name) = sheet_name {
-            workbook.worksheet_range(name).map_err(|e| anyhow!("Error reading sheet {}: {}", name, e))?
+            workbook
+                .worksheet_range(name)
+                .map_err(|e| anyhow!("Error reading sheet {}: {}", name, e))?
         } else {
-            workbook.worksheet_range_at(0)
+            workbook
+                .worksheet_range_at(0)
                 .ok_or_else(|| anyhow!("No sheets found"))?
                 .map_err(|e| anyhow!("Error reading first sheet: {}", e))?
         };
@@ -83,14 +97,17 @@ impl NodeBehavior for ExcelReadNode {
             }
         } else {
             let first_row = sheet.rows().next().ok_or_else(|| anyhow!("Empty sheet"))?;
-            (0..first_row.len()).map(|i| format!("column_{}", i)).collect()
+            (0..first_row.len())
+                .map(|i| format!("column_{}", i))
+                .collect()
         };
 
-        let main_fields: Vec<Field> = headers.iter()
+        let main_fields: Vec<Field> = headers
+            .iter()
             .map(|name| Field::new(name, DataType::Utf8, true))
             .collect();
         let main_schema = Arc::new(Schema::new(main_fields));
-        
+
         let rejects_fields = vec![
             Field::new("row_index", DataType::Int64, false),
             Field::new("raw_data", DataType::Utf8, false),
@@ -103,9 +120,11 @@ impl NodeBehavior for ExcelReadNode {
             let mut builders: Vec<StringBuilder> = (0..main_schema.fields().len())
                 .map(|_| StringBuilder::new())
                 .collect();
-            
+
             let mut data_rows = sheet.rows();
-            if has_header { data_rows.next(); } 
+            if has_header {
+                data_rows.next();
+            }
 
             let mut count = 0;
             for row in data_rows.take(sample_limit) {
@@ -116,9 +135,10 @@ impl NodeBehavior for ExcelReadNode {
                     }
                 }
             }
-            
+
             if count > 0 {
-                let columns: Vec<ArrayRef> = builders.into_iter()
+                let columns: Vec<ArrayRef> = builders
+                    .into_iter()
                     .map(|mut b| Arc::new(b.finish()) as ArrayRef)
                     .collect();
                 let batch = RecordBatch::try_new(main_schema.clone(), columns)?;
@@ -152,7 +172,7 @@ impl NodeBehavior for ExcelReadNode {
                 schema: metadata.schemas[0].clone(),
             }),
         });
-        
+
         let rejects_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(ExcelScanLogical {
                 path,
@@ -175,9 +195,11 @@ impl NodeBehavior for ExcelWriteNode {
             type_id: "core.io.excel_write".to_string(),
             display_name: "Excel Writer".to_string(),
             description: "Write data to an Excel file with chart and pivot support".to_string(),
-            input_ports: vec![
-                PortSpec { id: 0, name: "sheet_0".into(), description: "Data to write".into() }
-            ],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "sheet_0".into(),
+                description: "Data to write".into(),
+            }],
             output_ports: vec![],
             config_schema: serde_json::json!({
                 "type": "object",
@@ -201,7 +223,9 @@ impl NodeBehavior for ExcelWriteNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"].as_str().ok_or_else(|| anyhow!("Output Path is required"))?;
+        config["path"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Output Path is required"))?;
         Ok(())
     }
 
@@ -235,7 +259,11 @@ impl NodeBehavior for DuckDBReadNode {
             display_name: "DuckDB Reader".to_string(),
             description: "Read data from a DuckDB database or Parquet via DuckDB".to_string(),
             input_ports: vec![],
-            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Query Result".into() }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Query Result".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -248,7 +276,9 @@ impl NodeBehavior for DuckDBReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["query"].as_str().ok_or_else(|| anyhow!("Query is required"))?;
+        config["query"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Query is required"))?;
         Ok(())
     }
 
@@ -259,13 +289,19 @@ impl NodeBehavior for DuckDBReadNode {
     ) -> Result<Vec<LogicalPlan>> {
         let path = config["path"].as_str().unwrap_or(":memory:");
         let _conn = Connection::open(path)?;
-        let schema = Arc::new(Schema::new(vec![Field::new("placeholder", DataType::Utf8, true)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "placeholder",
+            DataType::Utf8,
+            true,
+        )]));
         let df_schema = datafusion::common::DFSchema::try_from(schema)?;
-        
-        Ok(vec![LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
-            produce_one_row: false,
-            schema: Arc::new(df_schema),
-        })])
+
+        Ok(vec![LogicalPlan::EmptyRelation(
+            datafusion::logical_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(df_schema),
+            },
+        )])
     }
 }
 
@@ -278,7 +314,11 @@ impl NodeBehavior for DuckDBWriteNode {
             type_id: "core.io.duckdb_write".to_string(),
             display_name: "DuckDB Writer".to_string(),
             description: "Write data to a DuckDB table".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data".into(),
+            }],
             output_ports: vec![],
             config_schema: serde_json::json!({
                 "type": "object",
@@ -292,7 +332,9 @@ impl NodeBehavior for DuckDBWriteNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["table"].as_str().ok_or_else(|| anyhow!("Table name is required"))?;
+        config["table"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Table name is required"))?;
         Ok(())
     }
 
@@ -332,7 +374,9 @@ impl NodeBehavior for HttpFetchNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["url"].as_str().ok_or_else(|| anyhow!("URL is required"))?;
+        config["url"]
+            .as_str()
+            .ok_or_else(|| anyhow!("URL is required"))?;
         Ok(())
     }
 
@@ -345,14 +389,20 @@ impl NodeBehavior for HttpFetchNode {
         let client = reqwest::Client::new();
         let response = client.get(url).send().await?;
         let json: JsonValue = response.json().await?;
-        let items = if json.is_array() { json.as_array().unwrap().clone() } else { vec![json] };
-        if items.is_empty() { return Err(anyhow!("Empty JSON response")); }
-        
+        let items = if json.is_array() {
+            json.as_array().unwrap().clone()
+        } else {
+            vec![json]
+        };
+        if items.is_empty() {
+            return Err(anyhow!("Empty JSON response"));
+        }
+
         // We'll use a placeholder schema for now or try to infer it.
         // DataFusion SessionContext can sometimes infer from JSON.
         let schema = Arc::new(Schema::new(vec![Field::new("data", DataType::Utf8, true)]));
         let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
-        
+
         Ok(InferredMetadata {
             schemas: vec![Arc::new(df_schema)],
             sample_data: None,
@@ -365,10 +415,12 @@ impl NodeBehavior for HttpFetchNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let metadata = self.infer_schema(vec![], config).await?;
-        Ok(vec![LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
-            produce_one_row: false,
-            schema: metadata.schemas[0].clone(),
-        })])
+        Ok(vec![LogicalPlan::EmptyRelation(
+            datafusion::logical_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: metadata.schemas[0].clone(),
+            },
+        )])
     }
 }
 
@@ -398,7 +450,9 @@ impl NodeBehavior for ParquetReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"].as_str().ok_or_else(|| anyhow!("Parquet Path is required"))?;
+        config["path"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Parquet Path is required"))?;
         Ok(())
     }
 
@@ -409,7 +463,9 @@ impl NodeBehavior for ParquetReadNode {
     ) -> Result<Vec<LogicalPlan>> {
         let path = config["path"].as_str().unwrap();
         let ctx = SessionContext::new();
-        let df = ctx.read_parquet(path, ParquetReadOptions::default()).await?;
+        let df = ctx
+            .read_parquet(path, ParquetReadOptions::default())
+            .await?;
         Ok(vec![df.into_optimized_plan()?])
     }
 }
@@ -440,7 +496,9 @@ impl NodeBehavior for CsvReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"].as_str().ok_or_else(|| anyhow!("CSV Path is required"))?;
+        config["path"]
+            .as_str()
+            .ok_or_else(|| anyhow!("CSV Path is required"))?;
         Ok(())
     }
 

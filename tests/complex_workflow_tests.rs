@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use rustflow::core::graph::{Workflow, NodeInstance, EdgeInstance};
 use rustflow::core::engine::SwanFlowEngine;
+use rustflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::{NodeState, NodeEvent};
+use rustflow::nodes::{NodeEvent, NodeState};
 use serde_json::json;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -43,8 +43,26 @@ async fn test_complex_metanode_optimization() {
         state: NodeState::Configured,
         sub_workflow: None,
     });
-    sub_workflow.add_edge(sub_in, sub_sql, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    sub_workflow.add_edge(sub_sql, sub_out, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    sub_workflow
+        .add_edge(
+            sub_in,
+            sub_sql,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    sub_workflow
+        .add_edge(
+            sub_sql,
+            sub_out,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     // 4. Build Main Workflow: Read CSV -> MetaNode -> Project (Name only)
     let mut main_workflow = Workflow::new("ComplexMain");
@@ -70,8 +88,26 @@ async fn test_complex_metanode_optimization() {
         sub_workflow: None,
     });
 
-    main_workflow.add_edge(read_idx, meta_idx, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    main_workflow.add_edge(meta_idx, project_idx, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    main_workflow
+        .add_edge(
+            read_idx,
+            meta_idx,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    main_workflow
+        .add_edge(
+            meta_idx,
+            project_idx,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     // 5. Execute
     let engine = SwanFlowEngine::new(registry);
@@ -86,5 +122,8 @@ async fn test_complex_metanode_optimization() {
     // Cleanup
     let _ = std::fs::remove_file(csv_path);
 
-    assert!(event_count >= 6, "Should receive at least Running/Executed events for all nodes");
+    assert!(
+        event_count >= 6,
+        "Should receive at least Running/Executed events for all nodes"
+    );
 }
