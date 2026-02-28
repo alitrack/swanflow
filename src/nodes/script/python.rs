@@ -1,9 +1,200 @@
+use std::any::Any;
+use std::fmt;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::ffi::CString;
+
 use anyhow::{anyhow, Result};
+use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use datafusion::logical_expr::LogicalPlan;
+use datafusion::common::DFSchemaRef;
+use datafusion::error::Result as DFResult;
+use datafusion::execution::context::TaskContext;
+use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream,
+};
+use datafusion::physical_plan::execution_plan::{EmissionType, Boundedness};
+use futures::Stream;
+use futures::StreamExt;
 use serde_json::Value as JsonValue;
+use pyo3::prelude::*;
+use pyo3_arrow::PyRecordBatch;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
+
+/// Logical node for Python script execution.
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct PythonLogical {
+    pub script: String,
+    pub input: LogicalPlan,
+}
+
+impl PartialOrd for PythonLogical {
+    fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+        None
+    }
+}
+
+impl UserDefinedLogicalNodeCore for PythonLogical {
+    fn name(&self) -> &str {
+        "PythonScript"
+    }
+
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+
+    fn schema(&self) -> &DFSchemaRef {
+        self.input.schema()
+    }
+
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "PythonScript(script_len={})", self.script.len())
+    }
+
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DFResult<Self> {
+        Ok(Self {
+            script: self.script.clone(),
+            input: inputs[0].clone(),
+        })
+    }
+}
+
+/// Physical execution plan for Python script execution.
+#[derive(Debug)]
+pub struct PythonExec {
+    pub script: String,
+    pub input: Arc<dyn ExecutionPlan>,
+    cache: PlanProperties,
+}
+
+impl PythonExec {
+    pub fn new(script: String, input: Arc<dyn ExecutionPlan>) -> Self {
+        let cache = PlanProperties::new(
+            EquivalenceProperties::new(input.schema()),
+            input.properties().output_partitioning().clone(),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+        Self {
+            script,
+            input,
+            cache,
+        }
+    }
+}
+
+impl DisplayAs for PythonExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "PythonExec")
+    }
+}
+
+impl ExecutionPlan for PythonExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "PythonExec"
+    }
+
+    fn schema(&self) -> arrow::datatypes::SchemaRef {
+        self.input.schema()
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(Self::new(self.script.clone(), children[0].clone())))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DFResult<SendableRecordBatchStream> {
+        let input_stream = self.input.execute(partition, context)?;
+        
+        // Compile the script once
+        let compiled_fn = Python::with_gil(|py| -> Result<Py<PyAny>> {
+            let full_script = format!(
+                "import pyarrow as pa\n\
+                 def transform(batch):\n\
+                 {}\n\
+                 ",
+                self.script.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("\n")
+            );
+            let code = CString::new(full_script)?;
+            let file_name = CString::new("swanflow_transform.py")?;
+            let mod_name = CString::new("swanflow_transform")?;
+            
+            let module = PyModule::from_code(py, &code, &file_name, &mod_name)?;
+            let fun = module.getattr("transform")?.into();
+            Ok(fun)
+        }).map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+        Ok(Box::pin(PythonStream {
+            input: input_stream,
+            compiled_fn,
+        }))
+    }
+}
+
+struct PythonStream {
+    input: SendableRecordBatchStream,
+    compiled_fn: Py<PyAny>,
+}
+
+impl RecordBatchStream for PythonStream {
+    fn schema(&self) -> arrow::datatypes::SchemaRef {
+        self.input.schema()
+    }
+}
+
+impl Stream for PythonStream {
+    type Item = DFResult<RecordBatch>;
+
+    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.input.poll_next_unpin(cx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                let compiled_fn = &self.compiled_fn;
+                let result = Python::with_gil(|py| -> Result<RecordBatch> {
+                    let py_batch = PyRecordBatch::from(batch);
+                    let result_py_obj = compiled_fn.call1(py, (py_batch,))?;
+                    let result_py_batch: PyRecordBatch = result_py_obj.extract(py)?;
+                    Ok(result_py_batch.into())
+                });
+
+                match result {
+                    Ok(out_batch) => Poll::Ready(Some(Ok(out_batch))),
+                    Err(e) => Poll::Ready(Some(Err(datafusion::error::DataFusionError::Execution(e.to_string())))),
+                }
+            }
+            other => other,
+        }
+    }
+}
 
 /// A node that executes a Python script for data transformation.
 pub struct PythonNode;
@@ -28,7 +219,7 @@ impl NodeBehavior for PythonNode {
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "script": { "type": "string", "description": "Python code: def process(batch): ..." }
+                    "script": { "type": "string", "description": "Python code logic. Variable 'batch' is available." }
                 },
                 "required": ["script"]
             }),
@@ -45,9 +236,15 @@ impl NodeBehavior for PythonNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        Ok(inputs)
+        let script = config["script"].as_str().unwrap().to_string();
+        Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
+            node: Arc::new(PythonLogical {
+                script,
+                input: inputs[0].clone(),
+            }),
+        })])
     }
 }
 
@@ -91,8 +288,6 @@ impl NodeBehavior for PythonUdfNode {
         _inputs: Vec<LogicalPlan>,
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        // In prod, this registers the UDF with the SessionContext.
-        // For MVP, we treat it as a success placeholder.
         Ok(vec![])
     }
 }

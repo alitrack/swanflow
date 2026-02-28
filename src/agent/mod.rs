@@ -147,6 +147,10 @@ impl AnalystAgent {
             Variables are GLOBAL and do NOT require explicit connections or Input nodes.\n\
             For example: \"expr\": \"dept = '${{context.target_dept}}'\"\n\n\
             AVAILABLE NODES:\n{}\n\n\
+            PYTHON CAPABILITIES:\n\
+            The 'core.script.python' node is HIGH PERFORMANCE (zero-copy via Arrow FFI).\n\
+            Use it for complex math, specialized data cleaning, or libraries like Scikit-learn.\n\
+            The input batch is available as 'batch' (convert via pa.record_batch(batch)).\n\n\
             YOUR TOOLS:\n\
             - add_node(type_id, config): Add a node.\n\
             - connect(source_idx, target_idx, source_port, target_port): Connect nodes.\n\n\

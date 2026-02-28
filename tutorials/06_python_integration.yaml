@@ -1,20 +1,28 @@
-name: "Tutorial 06: Python Integration"
-description: "Shows how to include a Python script node in your workflow for custom transformations."
-id: "00000000-0000-0000-0000-000000000006"
+name: "Tutorial 06: Python Integration (Zero-Copy)"
+description: "Demonstrates high-performance data processing using Python and PyArrow with zero-copy exchange."
+id: "00000000-0000-0000-0006-000000000001"
 graph:
   nodes:
-    - id: "source"
+    - id: "00000000-0000-0000-0006-000000000002"
       type_id: "core.io.csv"
       config: { path: "users.csv" }
       state: "Configured"
-    - id: "python_worker"
+    - id: "00000000-0000-0000-0006-000000000003"
       type_id: "core.script.python"
       config:
         script: |
-          def process(batch):
-              # This script is currently a placeholder in the MVP
-              # but demonstrates the configuration schema.
-              return batch
+          import pyarrow as pa
+          import pyarrow.compute as pc
+          # Input 'batch' is an arro3 object, we convert to pyarrow via capsule
+          pa_batch = pa.record_batch(batch)
+          # Perform complex calculation: age * 2
+          age_col = pa_batch.column('age')
+          doubled_age = pc.multiply(age_col, 2)
+          # Return a new batch
+          return pa.RecordBatch.from_arrays(
+              [pa_batch.column('name'), doubled_age], 
+              names=['name', 'age_x2']
+          )
       state: "Configured"
   edges:
     - [0, 1, { source_port: 0, target_port: 0 }]
