@@ -1,10 +1,6 @@
 use async_trait::async_trait;
-use datafusion::logical_expr::{LogicalPlan, Extension, Aggregate};
+use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
-use datafusion::common::{DFSchemaRef, DFSchema};
-use arrow::record_batch::RecordBatch;
-use arrow::datatypes::{Schema, Field, DataType};
-use arrow::array::{ArrayRef, StringBuilder};
 use serde_json::Value as JsonValue;
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
@@ -177,10 +173,8 @@ impl NodeBehavior for WindowNode {
             .map(|v| v.iter().map(|s| format!("\"{}\"", s.as_str().unwrap())).collect())
             .unwrap_or_default();
         let window_exprs = config["window_exprs"].as_object().unwrap();
-        
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
-        
         let mut window_selects = Vec::new();
         for (name, expr) in window_exprs {
             let mut clause = format!("{} OVER (", expr.as_str().unwrap());
@@ -193,11 +187,52 @@ impl NodeBehavior for WindowNode {
             clause.push(')');
             window_selects.push(format!("{} as \"{}\"", clause, name));
         }
-        
         ctx.register_table("window_input", df.into_view())?;
         let sql = format!("SELECT *, {} FROM window_input", window_selects.join(", "));
-        
         let window_df = ctx.sql(&sql).await?;
         Ok(vec![window_df.into_optimized_plan()?])
+    }
+}
+
+/// Branching based on a SQL boolean expression.
+pub struct ConditionNode;
+
+#[async_trait]
+impl NodeBehavior for ConditionNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.flow.condition".to_string(),
+            display_name: "Condition (IF)".to_string(),
+            description: "Route data based on a boolean condition. Port 0 for TRUE, Port 1 for FALSE.".to_string(),
+            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data to check".into() }],
+            output_ports: vec![
+                PortSpec { id: 0, name: "true".into(), description: "Rows matching condition".into() },
+                PortSpec { id: 1, name: "false".into(), description: "Rows not matching condition".into() }
+            ],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "condition": { "type": "string", "description": "SQL boolean expression (e.g., 'salary > 5000')" }
+                },
+                "required": ["condition"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["condition"].as_str().ok_or_else(|| anyhow!("Condition is required"))?;
+        Ok(())
+    }
+
+    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+        let condition = config["condition"].as_str().unwrap();
+        let ctx = SessionContext::new();
+        let df = DataFrame::new(ctx.state(), inputs[0].clone());
+        ctx.register_table("cond_input", df.into_view())?;
+        let sql_true = format!("SELECT * FROM cond_input WHERE {}", condition);
+        let true_df = ctx.sql(&sql_true).await?;
+        let sql_false = format!("SELECT * FROM cond_input WHERE NOT ({})", condition);
+        let false_df = ctx.sql(&sql_false).await?;
+        Ok(vec![true_df.into_optimized_plan()?, false_df.into_optimized_plan()?])
     }
 }
