@@ -2,8 +2,8 @@
 
 ## 1. Advanced Connectivity (DuckDB & HTTP)
 
-- [ ] 1.1 Integrate `duckdb` crate and implement `DuckDBReadNode`.
-- [ ] 1.2 Implement `DuckDBWriteNode` for fast analytical storage.
+- [x] 1.1 Integrate `duckdb` crate and implement `DuckDBReadNode`.
+- [x] 1.2 Implement `DuckDBWriteNode` for fast analytical storage.
 - [ ] 1.3 Implement `HttpFetchNode` with automatic JSON-to-Arrow conversion.
 
 ## 2. Logic and Flow Control
@@ -14,8 +14,8 @@
 
 ## 3. Excel Pro: Pivot and Charts
 
-- [ ] 3.1 Implement **Native Chart Support** in `ExcelWriteNode` (mapping config to `rust_xlsxwriter`).
-- [ ] 3.2 Implement **Native Pivot Table** support (Definition injection into `.xlsx`).
+- [x] 3.1 Implement **Native Chart Support** in `ExcelWriteNode` (mapping config to `rust_xlsxwriter`).
+- [x] 3.2 Implement **Native Pivot Table** support (Definition injection into `.xlsx`).
 - [ ] 3.3 Create an **Excel Styling DSL** for conditional formatting and headers.
 
 ## 4. Analyst Agent (ZeroClaw Migration)

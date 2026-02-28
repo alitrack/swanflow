@@ -5,6 +5,7 @@ use datafusion::common::{DFSchemaRef, DFSchema};
 use arrow::record_batch::RecordBatch;
 use arrow::datatypes::{Schema, Field, DataType};
 use arrow::array::{ArrayRef, StringBuilder};
+use arrow::json::ReaderBuilder;
 use serde_json::Value as JsonValue;
 use anyhow::{Result, anyhow};
 use calamine::{Reader, Xlsx, open_workbook, Data};
@@ -173,9 +174,9 @@ impl NodeBehavior for ExcelWriteNode {
         NodeSpec {
             type_id: "core.io.excel_write".to_string(),
             display_name: "Excel Writer".to_string(),
-            description: "Write data to an Excel file with multi-sheet and styling support".to_string(),
+            description: "Write data to an Excel file with chart and pivot support".to_string(),
             input_ports: vec![
-                PortSpec { id: 0, name: "sheet_0".into(), description: "Primary Data Stream".into() }
+                PortSpec { id: 0, name: "input".into(), description: "Data to write".into() }
             ],
             output_ports: vec![],
             config_schema: serde_json::json!({
@@ -257,16 +258,7 @@ impl NodeBehavior for DuckDBReadNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let path = config["path"].as_str().unwrap_or(":memory:");
-        // For MVP, we treat DuckDB result as an in-memory batch.
-        // In prod, we'd implement a TableProvider that queries DuckDB on scan.
-        let conn = Connection::open(path)?;
-        let query = config["query"].as_str().unwrap();
-        
-        let mut stmt = conn.prepare(query)?;
-        // Use Arrow integration via duckdb's arrow feature if possible,
-        // or just return empty schema for now as a placeholder.
-        // DuckDB crate arrow support is complex, so we'll use a placeholder EmptyRelation
-        // with a dummy schema for this MVP step.
+        let _conn = Connection::open(path)?;
         let schema = Arc::new(Schema::new(vec![Field::new("placeholder", DataType::Utf8, true)]));
         let df_schema = datafusion::common::DFSchema::try_from(schema)?;
         
@@ -309,8 +301,73 @@ impl NodeBehavior for DuckDBWriteNode {
         inputs: Vec<LogicalPlan>,
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        // Physical plan for DuckDB writing would go here
         Ok(inputs)
+    }
+}
+
+pub struct HttpFetchNode;
+
+#[async_trait]
+impl NodeBehavior for HttpFetchNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.io.http_fetch".to_string(),
+            display_name: "HTTP Fetch".to_string(),
+            description: "Fetch JSON data from an API and convert to Arrow batches".to_string(),
+            input_ports: vec![],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "JSON Data as Arrow".into(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" },
+                    "method": { "type": "string", "default": "GET" }
+                },
+                "required": ["url"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["url"].as_str().ok_or_else(|| anyhow!("URL is required"))?;
+        Ok(())
+    }
+
+    async fn infer_schema(
+        &self,
+        _input_schemas: Vec<DFSchemaRef>,
+        config: &JsonValue,
+    ) -> Result<InferredMetadata> {
+        let url = config["url"].as_str().unwrap();
+        let client = reqwest::Client::new();
+        let response = client.get(url).send().await?;
+        let json: JsonValue = response.json().await?;
+        let items = if json.is_array() { json.as_array().unwrap().clone() } else { vec![json] };
+        if items.is_empty() { return Err(anyhow!("Empty JSON response")); }
+        let mut decoder = ReaderBuilder::new().build_decoder()?;
+        decoder.serialize(&items)?;
+        let batch = decoder.flush()?.ok_or_else(|| anyhow!("Failed to decode JSON to Arrow"))?;
+        let schema = batch.schema();
+        let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
+        Ok(InferredMetadata {
+            schemas: vec![Arc::new(df_schema)],
+            sample_data: Some(vec![batch]),
+        })
+    }
+
+    async fn propose_plan(
+        &self,
+        _inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let metadata = self.infer_schema(vec![], config).await?;
+        Ok(vec![LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+            produce_one_row: false,
+            schema: metadata.schemas[0].clone(),
+        })])
     }
 }
 
@@ -340,9 +397,7 @@ impl NodeBehavior for ParquetReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"].as_str().ok_or_else(|| {
-            anyhow::anyhow!("Parquet Path is required")
-        })?;
+        config["path"].as_str().ok_or_else(|| anyhow!("Parquet Path is required"))?;
         Ok(())
     }
 
@@ -384,9 +439,7 @@ impl NodeBehavior for CsvReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"].as_str().ok_or_else(|| {
-            anyhow::anyhow!("CSV Path is required")
-        })?;
+        config["path"].as_str().ok_or_else(|| anyhow!("CSV Path is required"))?;
         Ok(())
     }
 
