@@ -17,10 +17,11 @@ use uuid::Uuid;
 use crate::core::graph::Workflow;
 use crate::core::compiler::WorkflowCompiler;
 use crate::core::observer::{StateProbeLogical, StateProbeExec, MaterializerLogical, MaterializerExec};
+use crate::core::datasource::{ExcelScanLogical, ExcelScanExec};
 use crate::nodes::registry::NodeRegistry;
 use crate::nodes::NodeEvent;
 
-/// Custom planner to handle StateProbe and Materializer translation from logical to physical.
+/// Custom planner to handle StateProbe, Materializer, and Excel translation from logical to physical.
 pub struct SwanFlowPlanner {
     pub event_tx: mpsc::UnboundedSender<NodeEvent>,
 }
@@ -46,6 +47,14 @@ impl ExtensionPlanner for SwanFlowPlanner {
             return Ok(Some(Arc::new(MaterializerExec::new(
                 materializer.cache_key.clone(),
                 physical_inputs[0].clone(),
+            ))));
+        }
+        if let Some(excel) = node.as_any().downcast_ref::<ExcelScanLogical>() {
+            return Ok(Some(Arc::new(ExcelScanExec::new(
+                excel.path.clone(),
+                excel.sheet.clone(),
+                excel.mode.clone(),
+                Arc::new(excel.schema.as_ref().into()),
             ))));
         }
         Ok(None)

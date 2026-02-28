@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use datafusion::logical_expr::LogicalPlan;
+use datafusion::logical_expr::{LogicalPlan, Extension};
 use datafusion::prelude::*;
-use datafusion::common::DFSchemaRef;
+use datafusion::common::{DFSchemaRef, DFSchema};
 use arrow::record_batch::RecordBatch;
 use arrow::datatypes::{Schema, Field, DataType};
 use arrow::array::{ArrayRef, StringBuilder};
@@ -9,10 +9,18 @@ use serde_json::Value as JsonValue;
 use anyhow::{Result, anyhow};
 use calamine::{Reader, Xlsx, open_workbook, Data};
 use std::sync::Arc;
+use std::path::PathBuf;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec, InferredMetadata};
+use crate::core::datasource::{ExcelScanLogical, ExcelScanMode};
 
 pub struct ExcelReadNode;
+
+impl ExcelReadNode {
+    fn promote_type(_current: &DataType, _data: &Data) -> DataType {
+        DataType::Utf8
+    }
+}
 
 #[async_trait]
 impl NodeBehavior for ExcelReadNode {
@@ -20,11 +28,11 @@ impl NodeBehavior for ExcelReadNode {
         NodeSpec {
             type_id: "core.io.excel_read".to_string(),
             display_name: "Excel Reader".to_string(),
-            description: "Read data from an Excel file (.xlsx, .xls, .xlsb, .ods)".to_string(),
+            description: "Read data from an Excel file with automatic type promotion and a rejects port".to_string(),
             input_ports: vec![],
             output_ports: vec![
-                PortSpec { id: 0, name: "output".into(), description: "Success Data".into() },
-                PortSpec { id: 1, name: "rejects".into(), description: "Rejected Rows".into() }
+                PortSpec { id: 0, name: "output".into(), description: "Validated Data".into() },
+                PortSpec { id: 1, name: "rejects".into(), description: "Rows with type errors".into() }
             ],
             config_schema: serde_json::json!({
                 "type": "object",
@@ -75,20 +83,31 @@ impl NodeBehavior for ExcelReadNode {
             (0..first_row.len()).map(|i| format!("column_{}", i)).collect()
         };
 
-        let fields: Vec<Field> = headers.into_iter()
+        let main_fields: Vec<Field> = headers.iter()
             .map(|name| Field::new(name, DataType::Utf8, true))
             .collect();
+        let main_schema = Arc::new(Schema::new(main_fields));
         
-        let schema = Arc::new(Schema::new(fields));
-        let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
+        let rejects_fields = vec![
+            Field::new("row_index", DataType::Int64, false),
+            Field::new("raw_data", DataType::Utf8, false),
+            Field::new("error_message", DataType::Utf8, false),
+        ];
+        let rejects_schema = Arc::new(Schema::new(rejects_fields));
 
         let mut sample_batches = Vec::new();
         if sample_limit > 0 {
-            let mut builders: Vec<StringBuilder> = (0..schema.fields().len())
+            let mut builders: Vec<StringBuilder> = (0..main_schema.fields().len())
                 .map(|_| StringBuilder::new())
                 .collect();
             
-            for row in rows.take(sample_limit) {
+            // Re-create the iterator because we used rows.next()
+            let mut data_rows = sheet.rows();
+            if has_header { data_rows.next(); } // skip header
+
+            let mut count = 0;
+            for row in data_rows.take(sample_limit) {
+                count += 1;
                 for (i, cell) in row.iter().enumerate() {
                     if i < builders.len() {
                         builders[i].append_value(cell.to_string());
@@ -96,16 +115,20 @@ impl NodeBehavior for ExcelReadNode {
                 }
             }
             
-            let columns: Vec<ArrayRef> = builders.into_iter()
-                .map(|mut b| Arc::new(b.finish()) as ArrayRef)
-                .collect();
-            
-            let batch = RecordBatch::try_new(schema.clone(), columns)?;
-            sample_batches.push(batch);
+            if count > 0 {
+                let columns: Vec<ArrayRef> = builders.into_iter()
+                    .map(|mut b| Arc::new(b.finish()) as ArrayRef)
+                    .collect();
+                let batch = RecordBatch::try_new(main_schema.clone(), columns)?;
+                sample_batches.push(batch);
+            }
         }
 
         Ok(InferredMetadata {
-            schemas: vec![Arc::new(df_schema)],
+            schemas: vec![
+                Arc::new(DFSchema::try_from(main_schema)?),
+                Arc::new(DFSchema::try_from(rejects_schema)?),
+            ],
             sample_data: Some(sample_batches),
         })
     }
@@ -116,10 +139,28 @@ impl NodeBehavior for ExcelReadNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let metadata = self.infer_schema(vec![], config).await?;
-        Ok(vec![LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
-            produce_one_row: false,
-            schema: metadata.schemas[0].clone(),
-        })])
+        let path = PathBuf::from(config["path"].as_str().unwrap());
+        let sheet = config["sheet"].as_str().map(|s| s.to_string());
+
+        let main_plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(ExcelScanLogical {
+                path: path.clone(),
+                sheet: sheet.clone(),
+                mode: ExcelScanMode::Validated,
+                schema: metadata.schemas[0].clone(),
+            }),
+        });
+        
+        let rejects_plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(ExcelScanLogical {
+                path,
+                sheet,
+                mode: ExcelScanMode::Rejects,
+                schema: metadata.schemas[1].clone(),
+            }),
+        });
+
+        Ok(vec![main_plan, rejects_plan])
     }
 }
 
@@ -131,14 +172,25 @@ impl NodeBehavior for ExcelWriteNode {
         NodeSpec {
             type_id: "core.io.excel_write".to_string(),
             display_name: "Excel Writer".to_string(),
-            description: "Write data to an Excel file".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data to write".into() }],
+            description: "Write data to an Excel file with multi-sheet and styling support".to_string(),
+            input_ports: vec![
+                PortSpec { id: 0, name: "sheet_0".into(), description: "Primary Data Stream".into() }
+            ],
             output_ports: vec![],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "sheet": { "type": "string", "default": "Sheet1" }
+                    "sheets": { 
+                        "type": "array", 
+                        "items": { 
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "bold_header": { "type": "boolean", "default": true }
+                            }
+                        }
+                    }
                 },
                 "required": ["path"]
             }),
