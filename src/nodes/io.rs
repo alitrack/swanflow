@@ -299,8 +299,15 @@ impl NodeBehavior for ExcelTemplateNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        // TODO: Implement Excel template filling with {{marker}} replacement
+        // This requires:
+        // 1. Read template Excel with markers
+        // 2. Parse markers and replace with data from input
+        // 3. Write filled template to output_path
+        // For now, this is a pass-through stub
+        tracing::warn!("ExcelTemplateNode is a stub - data passes through unchanged");
         Ok(inputs)
     }
 }

@@ -429,12 +429,16 @@ impl ExcelWritingStream {
                 .unwrap_or_else(|| format!("Sheet{}", i + 1));
             
             let worksheet = workbook.add_worksheet();
-            worksheet.set_name(&sheet_name).ok();
+            if let Err(e) = worksheet.set_name(&sheet_name) {
+                tracing::warn!("Failed to set sheet name: {}", e);
+            }
 
             let mut row_offset = 0;
             let schema = sheet_batches[0].schema();
             for (col_idx, field) in schema.fields().iter().enumerate() {
-                worksheet.write_with_format(0, col_idx as u16, field.name(), &header_format).ok();
+                if let Err(e) = worksheet.write_with_format(0, col_idx as u16, field.name(), &header_format) {
+                    tracing::warn!("Failed to write header cell: {}", e);
+                }
             }
             row_offset += 1;
 
@@ -447,28 +451,32 @@ impl ExcelWritingStream {
                                 let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
                                 if !a.is_null(row_idx) {
                                     let val = a.value(row_idx);
-                                    // Check if value fits in f64 without precision loss
-                                    // i64::MAX is ~9.2e18, f64::MAX_PRECISION is ~2^53 (~9e15)
                                     if val > 9_000_000_000_000_000 || val < -9_000_000_000_000_000 {
-                                        // Large integers: write as string to preserve precision
-                                        worksheet.write(row_offset as u32, col_idx as u16, val.to_string()).ok();
+                                        if let Err(e) = worksheet.write(row_offset as u32, col_idx as u16, val.to_string()) {
+                                            tracing::warn!("Failed to write cell: {}", e);
+                                        }
                                     } else {
-                                        // Small integers: safe to write as f64
-                                        worksheet.write(row_offset as u32, col_idx as u16, val as f64).ok();
+                                        if let Err(e) = worksheet.write(row_offset as u32, col_idx as u16, val as f64) {
+                                            tracing::warn!("Failed to write cell: {}", e);
+                                        }
                                     }
                                 }
                             }
                             DataType::Float64 => {
                                 let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
                                 if !a.is_null(row_idx) {
-                                    worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx)).ok();
+                                    if let Err(e) = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx)) {
+                                        tracing::warn!("Failed to write cell: {}", e);
+                                    }
                                 }
                             }
                             _ => {
                                 let val = array.as_any().downcast_ref::<StringArray>()
                                     .map(|a| a.value(row_idx).to_string())
                                     .unwrap_or_else(|| "val".to_string());
-                                worksheet.write(row_offset as u32, col_idx as u16, val).ok();
+                                if let Err(e) = worksheet.write(row_offset as u32, col_idx as u16, val) {
+                                    tracing::warn!("Failed to write cell: {}", e);
+                                }
                             }
                         }
                     }
@@ -486,7 +494,10 @@ impl ExcelWritingStream {
                 
                 let title = format!("{} Analysis", sheet_name_str);
                 chart.title().set_name(&title);
-                worksheet.insert_chart(1, (schema.fields().len() + 1) as u16, &chart).ok();
+                // Chart creation is non-critical, log at debug level
+                if let Err(e) = worksheet.insert_chart(1, (schema.fields().len() + 1) as u16, &chart) {
+                    tracing::debug!("Failed to insert chart (non-critical): {}", e);
+                }
             }
         }
 

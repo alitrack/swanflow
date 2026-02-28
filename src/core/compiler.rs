@@ -27,6 +27,8 @@ pub struct WorkflowCompiler {
     pub node_hashes: HashMap<Uuid, String>,
     inject_probes: bool,
     pub dynamic_context: HashMap<String, JsonValue>,
+    // Cache for serialized config to avoid repeated JSON serialization
+    config_cache: HashMap<Uuid, String>,
 }
 
 impl WorkflowCompiler {
@@ -38,7 +40,18 @@ impl WorkflowCompiler {
             node_hashes: HashMap::new(),
             inject_probes,
             dynamic_context: HashMap::new(),
+            config_cache: HashMap::new(),
         }
+    }
+    
+    /// Get or compute serialized config string for a node.
+    fn get_config_str(&mut self, node: &NodeInstance) -> String {
+        if let Some(cached) = self.config_cache.get(&node.id) {
+            return cached.clone();
+        }
+        let config_str = serde_json::to_string(&node.config).unwrap_or_default();
+        self.config_cache.insert(node.id, config_str.clone());
+        config_str
     }
 
     pub fn get_execution_order(&self, workflow: &Workflow) -> Result<Vec<NodeIndex>> {
@@ -131,16 +144,18 @@ impl WorkflowCompiler {
             .await
             .map_err(|e| anyhow!(e))
     }
-
     fn generate_cache_key(
-        &self,
+        &mut self,
         node: &NodeInstance,
         input_hashes: &HashMap<u32, String>,
     ) -> String {
         let mut hasher = Sha256::new();
         hasher.update(node.type_id.as_bytes());
-        let config_str = serde_json::to_string(&node.config).unwrap_or_default();
+        
+        // Use cached config string to avoid repeated serialization
+        let config_str = self.get_config_str(node);
         hasher.update(config_str.as_bytes());
+        
         let mut input_ports: Vec<_> = input_hashes.keys().cloned().collect();
         input_ports.sort_unstable();
         for port in input_ports {

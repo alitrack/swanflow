@@ -303,7 +303,9 @@ impl ExecutionPlan for MaterializerExec {
 
         // Prepare cache path
         let mut path = PathBuf::from("target/swanflow_cache");
-        std::fs::create_dir_all(&path).ok();
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            tracing::warn!("Failed to create cache directory: {}", e);
+        }
         path.push(format!("{}.parquet", self.cache_key));
 
         Ok(Box::pin(MaterializingStream {
