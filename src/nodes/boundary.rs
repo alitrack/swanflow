@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
 use serde_json::Value as JsonValue;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use duckdb::Connection;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
 /// Input boundary node for sub-workflows.
-/// It acts as a pass-through for plans injected by the parent workflow.
 pub struct InputNode;
 
 #[async_trait]
@@ -16,7 +16,7 @@ impl NodeBehavior for InputNode {
             type_id: "core.input".to_string(),
             display_name: "Input Port".to_string(),
             description: "Entry point for data into a sub-workflow".to_string(),
-            input_ports: vec![], // Injected externally by compiler
+            input_ports: vec![],
             output_ports: vec![PortSpec {
                 id: 0,
                 name: "output".into(),
@@ -31,23 +31,14 @@ impl NodeBehavior for InputNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> {
-        Ok(())
-    }
+    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
 
-    async fn propose_plan(
-        &self,
-        inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
-    ) -> Result<Vec<LogicalPlan>> {
-        // Input nodes usually receive their plan from the 'injected_inputs'
-        // which the compiler passes as 'inputs' here.
+    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, _config: &JsonValue) -> Result<Vec<LogicalPlan>> {
         Ok(inputs)
     }
 }
 
 /// Output boundary node for sub-workflows.
-/// It marks the exit point for data to be returned to the parent workflow.
 pub struct OutputNode;
 
 #[async_trait]
@@ -72,16 +63,49 @@ impl NodeBehavior for OutputNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> {
+    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+
+    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, _config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+        Ok(inputs)
+    }
+}
+
+/// Load an extension into DuckDB.
+pub struct DuckDBExtensionNode;
+
+#[async_trait]
+impl NodeBehavior for DuckDBExtensionNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.flow.extension".to_string(),
+            display_name: "DuckDB Extension Loader".to_string(),
+            description: "Install and load an extension (e.g., httpfs, spatial) into DuckDB".to_string(),
+            input_ports: vec![],
+            output_ports: vec![],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "extension": { "type": "string" },
+                    "install": { "type": "boolean", "default": true }
+                },
+                "required": ["extension"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["extension"].as_str().ok_or_else(|| anyhow!("Extension name is required"))?;
         Ok(())
     }
 
-    async fn propose_plan(
-        &self,
-        inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
-    ) -> Result<Vec<LogicalPlan>> {
-        // Returns the plan to the compiler to be mapped back to MetaNode outputs.
-        Ok(inputs)
+    async fn propose_plan(&self, _inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+        let ext = config["extension"].as_str().unwrap();
+        let install = config["install"].as_bool().unwrap_or(true);
+        let conn = Connection::open_in_memory()?;
+        if install {
+            let _ = conn.execute_batch(&format!("INSTALL {};", ext));
+        }
+        let _ = conn.execute_batch(&format!("LOAD {};", ext));
+        Ok(vec![])
     }
 }

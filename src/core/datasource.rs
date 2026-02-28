@@ -20,7 +20,7 @@ use datafusion::physical_plan::execution_plan::{EmissionType, Boundedness};
 use futures::Stream;
 use futures::StreamExt;
 use calamine::{Reader, Xlsx, open_workbook, Data};
-use rust_xlsxwriter::Workbook;
+use rust_xlsxwriter::{Workbook, Chart, ChartType};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
 pub enum ExcelScanMode {
@@ -293,6 +293,17 @@ impl Stream for ExcelWritingStream {
                             row_offset += 1;
                         }
                     }
+                    
+                    if schema.fields().len() >= 2 && row_offset > 2 {
+                        let mut chart = Chart::new(ChartType::Column);
+                        let sheet_name = self.sheet.as_str();
+                        let row_end = (row_offset - 1) as u32;
+                        chart.add_series()
+                            .set_categories((sheet_name, 1, 0, row_end, 0))
+                            .set_values((sheet_name, 1, 1, row_end, 1));
+                        worksheet.insert_chart(1, (schema.fields().len() + 1) as u16, &chart).ok();
+                    }
+
                     workbook.save(&self.path).ok();
                 }
                 std::task::Poll::Ready(None)

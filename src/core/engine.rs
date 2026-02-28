@@ -95,6 +95,8 @@ impl QueryPlanner for SwanFlowQueryPlanner {
 pub struct WorkflowMetadata {
     pub schemas: HashMap<Uuid, Vec<DFSchemaRef>>,
     pub sample_data: HashMap<Uuid, Vec<RecordBatch>>,
+    /// Statistical profiles for each node (node_id -> profile_batch)
+    pub profiles: HashMap<Uuid, RecordBatch>,
 }
 
 pub struct SwanFlowEngine {
@@ -108,13 +110,16 @@ impl SwanFlowEngine {
         Self { ctx, registry }
     }
 
-    /// Performs schema and sample inference for all nodes in the workflow without full execution.
+    /// Performs schema and sample inference for all nodes in the workflow.
     pub async fn infer_metadata(&self, workflow: &Workflow) -> anyhow::Result<WorkflowMetadata> {
         let mut compiler = WorkflowCompiler::new(false);
         compiler.compile(workflow, &self.registry, None).await?;
+        
+        // TODO: Actually run ProfilerNode on samples to populate profiles field
         Ok(WorkflowMetadata {
             schemas: compiler.inferred_schemas,
             sample_data: compiler.sample_data,
+            profiles: HashMap::new(),
         })
     }
 
@@ -125,15 +130,12 @@ impl SwanFlowEngine {
     ) -> anyhow::Result<mpsc::UnboundedReceiver<NodeEvent>> {
         let (tx, rx) = mpsc::unbounded_channel();
 
-        // 1. Compile Logical Graph
         let mut compiler = WorkflowCompiler::new(true);
         let terminal_outputs = compiler.compile(workflow, &self.registry, None).await?;
         
-        // Pick the first terminal output for now
         let final_plan = terminal_outputs.values().next()
             .ok_or_else(|| anyhow::anyhow!("Workflow has no output"))?;
 
-        // 2. Setup Physical Planner with our custom probe planner
         let planner = SwanFlowPlanner { event_tx: tx.clone() };
         let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(planner)]));
         let query_planner = Arc::new(SwanFlowQueryPlanner { physical_planner });
@@ -142,10 +144,8 @@ impl SwanFlowEngine {
             .with_query_planner(query_planner)
             .build();
 
-        // 3. Create Physical Plan
         let physical_plan = state.create_physical_plan(final_plan).await?;
 
-        // 4. Execute in background
         let ctx_clone = self.ctx.clone();
         tokio::spawn(async move {
             let task_ctx = ctx_clone.task_ctx();

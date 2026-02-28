@@ -40,9 +40,9 @@ impl NodeRegistry {
     pub fn register_core_nodes(&mut self) {
         use crate::nodes::sql::SqlNode;
         use crate::nodes::io::{CsvReadNode, ParquetReadNode, ExcelReadNode, ExcelWriteNode, DuckDBReadNode, DuckDBWriteNode, HttpFetchNode};
-        use crate::nodes::boundary::{InputNode, OutputNode};
-        use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode};
-        use crate::nodes::script::python::PythonNode;
+        use crate::nodes::boundary::{InputNode, OutputNode, DuckDBExtensionNode};
+        use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode, ProfilerNode};
+        use crate::nodes::script::python::{PythonNode, PythonUdfNode};
 
         self.register_node(Arc::new(SqlNode));
         self.register_node(Arc::new(CsvReadNode));
@@ -54,13 +54,16 @@ impl NodeRegistry {
         self.register_node(Arc::new(HttpFetchNode));
         self.register_node(Arc::new(InputNode));
         self.register_node(Arc::new(OutputNode));
+        self.register_node(Arc::new(DuckDBExtensionNode));
         self.register_node(Arc::new(FilterNode));
         self.register_node(Arc::new(ProjectNode));
         self.register_node(Arc::new(AggregateNode));
         self.register_node(Arc::new(WindowNode));
         self.register_node(Arc::new(ConditionNode));
         self.register_node(Arc::new(ForEachNode));
+        self.register_node(Arc::new(ProfilerNode));
         self.register_node(Arc::new(PythonNode));
+        self.register_node(Arc::new(PythonUdfNode));
     }
 }
 

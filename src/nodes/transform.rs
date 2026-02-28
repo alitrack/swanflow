@@ -89,7 +89,8 @@ impl NodeBehavior for AggregateNode {
         NodeSpec {
             type_id: "core.transform.aggregate".to_string(),
             display_name: "Aggregate (GroupBy)".to_string(),
-            description: "Summarize data by grouping columns and applying aggregation functions".to_string(),
+            description: "Summarize data by grouping columns and applying aggregation functions. \
+                          Mapping: { \"output_col_name\": \"AGG_FUNC(input_col)\" }, e.g., { \"total\": \"SUM(val)\" }".to_string(),
             input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data".into() }],
             output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Summarized Data".into() }],
             config_schema: serde_json::json!({
@@ -98,7 +99,7 @@ impl NodeBehavior for AggregateNode {
                     "groupby": { "type": "array", "items": { "type": "string" } },
                     "aggs": { 
                         "type": "object",
-                        "description": "Mapping of column to aggregation function (sum, avg, count, min, max)"
+                        "description": "Mapping of output name to full SQL aggregate expression, e.g., { \"total_price\": \"SUM(price)\" }"
                     }
                 },
                 "required": ["groupby", "aggs"]
@@ -113,19 +114,29 @@ impl NodeBehavior for AggregateNode {
     }
 
     async fn propose_plan(&self, inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
-        let groupby_cols: Vec<&str> = config["groupby"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        let groupby_cols: Vec<String> = config["groupby"].as_array().unwrap().iter()
+            .map(|v| format!("\"{}\"", v.as_str().unwrap())).collect();
         let aggs = config["aggs"].as_object().unwrap();
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
-        let mut select_parts = groupby_cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>();
-        for (col, func) in aggs {
-            select_parts.push(format!("{}(\"{}\") as {}_{}", func.as_str().unwrap(), col, func.as_str().unwrap(), col));
+        
+        let mut select_parts = groupby_cols.clone();
+        for (out_name, agg_expr) in aggs {
+            let expr = agg_expr.as_str().unwrap();
+            // Handle case where AI might pass just the function name or full expr
+            if expr.contains('(') {
+                select_parts.push(format!("{} as \"{}\"", expr, out_name));
+            } else {
+                // If it's just 'sum', we might need more info, but for now assume full expr is provided as per spec
+                select_parts.push(format!("{}(\"{}\") as \"{}\"", expr, out_name, out_name));
+            }
         }
+        
         ctx.register_table("agg_input", df.into_view())?;
         let sql = format!(
             "SELECT {} FROM agg_input GROUP BY {}", 
             select_parts.join(", "), 
-            groupby_cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(", ")
+            groupby_cols.join(", ")
         );
         let agg_df = ctx.sql(&sql).await?;
         Ok(vec![agg_df.into_optimized_plan()?])
@@ -273,5 +284,54 @@ impl NodeBehavior for ForEachNode {
         let sql = select_parts.join(" UNION ALL ");
         let df = ctx.sql(&sql).await?;
         Ok(vec![df.into_optimized_plan()?])
+    }
+}
+
+/// Compute statistical profile of input columns.
+pub struct ProfilerNode;
+
+#[async_trait]
+impl NodeBehavior for ProfilerNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.transform.profiler".to_string(),
+            display_name: "Data Profiler".to_string(),
+            description: "Generate statistical profiles (min, max, nulls, unique) for input columns".to_string(),
+            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data to profile".to_string() }],
+            output_ports: vec![PortSpec { id: 0, name: "profile".into(), description: "Statistical Profile".to_string() }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "columns": { "type": "array", "items": { "type": "string" } }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
+
+    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+        let ctx = SessionContext::new();
+        let df = DataFrame::new(ctx.state(), inputs[0].clone());
+        let schema = df.schema();
+        let cols: Vec<String> = if let Some(c) = config["columns"].as_array() {
+            c.iter().map(|v| v.as_str().unwrap().to_string()).collect()
+        } else {
+            schema.fields().iter().map(|f| f.name().clone()).collect()
+        };
+        let mut select_parts = Vec::new();
+        for col in cols {
+            select_parts.push(format!("COUNT(\"{0}\") as \"{0}_count\"", col));
+            select_parts.push(format!("COUNT(DISTINCT \"{0}\") as \"{0}_unique\"", col));
+            select_parts.push(format!("MIN(\"{0}\") as \"{0}_min\"", col));
+            select_parts.push(format!("MAX(\"{0}\") as \"{0}_max\"", col));
+            select_parts.push(format!("SUM(CASE WHEN \"{0}\" IS NULL THEN 1 ELSE 0 END) as \"{0}_nulls\"", col));
+        }
+        ctx.register_table("profile_input", df.into_view())?;
+        let sql = format!("SELECT {} FROM profile_input", select_parts.join(", "));
+        let profile_df = ctx.sql(&sql).await?;
+        Ok(vec![profile_df.into_optimized_plan()?])
     }
 }

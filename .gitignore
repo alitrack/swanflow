@@ -7,3 +7,5 @@ test_data.csv
 *.a
 *.h
 *.hpp
+.env
+*.xlsx
