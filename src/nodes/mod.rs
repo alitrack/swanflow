@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
+use datafusion::common::DFSchemaRef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
@@ -68,10 +69,29 @@ pub trait NodeBehavior: Send + Sync {
     fn validate(&self, config: &JsonValue) -> Result<()>;
 
     /// Build a DataFusion LogicalPlan based on input plans and configuration.
-    /// This is where the core logic of the node is defined.
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>>;
+
+    /// Predict the output schema(s) without executing data.
+    /// Default implementation uses propose_plan with empty relations.
+    async fn infer_schema(
+        &self,
+        input_schemas: Vec<DFSchemaRef>,
+        config: &JsonValue,
+    ) -> Result<Vec<DFSchemaRef>> {
+        use datafusion::logical_expr::EmptyRelation;
+        
+        let inputs = input_schemas.into_iter().map(|s| {
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: s,
+            })
+        }).collect();
+
+        let output_plans = self.propose_plan(inputs, config).await?;
+        Ok(output_plans.into_iter().map(|p| p.schema().clone()).collect())
+    }
 }

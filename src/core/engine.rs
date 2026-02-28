@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::fmt;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use datafusion::prelude::*;
 use datafusion::error::Result;
@@ -8,15 +9,17 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner, DefaultPhysicalPlanner};
 use datafusion::execution::context::{SessionState, QueryPlanner};
 use datafusion::execution::session_state::SessionStateBuilder;
+use datafusion::common::DFSchemaRef;
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::core::graph::Workflow;
 use crate::core::compiler::WorkflowCompiler;
-use crate::core::observer::{StateProbeLogical, StateProbeExec};
+use crate::core::observer::{StateProbeLogical, StateProbeExec, MaterializerLogical, MaterializerExec};
 use crate::nodes::registry::NodeRegistry;
 use crate::nodes::NodeEvent;
 
-/// Custom planner to handle StateProbe translation from logical to physical.
+/// Custom planner to handle StateProbe and Materializer translation from logical to physical.
 pub struct SwanFlowPlanner {
     pub event_tx: mpsc::UnboundedSender<NodeEvent>,
 }
@@ -36,6 +39,12 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 probe.node_id,
                 physical_inputs[0].clone(),
                 self.event_tx.clone(),
+            ))));
+        }
+        if let Some(materializer) = node.as_any().downcast_ref::<MaterializerLogical>() {
+            return Ok(Some(Arc::new(MaterializerExec::new(
+                materializer.cache_key.clone(),
+                physical_inputs[0].clone(),
             ))));
         }
         Ok(None)
@@ -76,6 +85,13 @@ impl SwanFlowEngine {
         Self { ctx, registry }
     }
 
+    /// Performs schema inference for all nodes in the workflow without execution.
+    pub async fn infer_schemas(&self, workflow: &Workflow) -> anyhow::Result<HashMap<Uuid, Vec<DFSchemaRef>>> {
+        let mut compiler = WorkflowCompiler::new(false);
+        compiler.compile(workflow, &self.registry, None).await?;
+        Ok(compiler.inferred_schemas)
+    }
+
     /// Executes a workflow DAG and returns a stream of node events.
     pub async fn execute_workflow(
         &self,
@@ -107,8 +123,6 @@ impl SwanFlowEngine {
         let ctx_clone = self.ctx.clone();
         tokio::spawn(async move {
             let task_ctx = ctx_clone.task_ctx();
-            // DataFusion physical plans are executed per partition.
-            // We'll collect all results to trigger the probes.
             let result = datafusion::physical_plan::collect(physical_plan, task_ctx).await;
             if let Err(e) = result {
                 eprintln!("Workflow execution error: {}", e);

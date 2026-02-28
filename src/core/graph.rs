@@ -12,6 +12,9 @@ pub struct NodeInstance {
     pub type_id: String,
     pub config: JsonValue,
     pub state: NodeState,
+    /// Whether this node's output should be materialized/cached.
+    #[serde(default)]
+    pub materialize: bool,
     /// For MetaNodes, this holds the internal subgraph.
     pub sub_workflow: Option<Box<Workflow>>,
 }

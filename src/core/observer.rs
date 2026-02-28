@@ -3,6 +3,7 @@ use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::path::PathBuf;
 
 use arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
@@ -12,7 +13,7 @@ use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream,
+    SendableRecordBatchStream, ExecutionPlanProperties,
 };
 use futures::Stream;
 use futures::StreamExt;
@@ -76,7 +77,6 @@ impl StateProbeExec {
         input: Arc<dyn ExecutionPlan>,
         event_tx: mpsc::UnboundedSender<NodeEvent>,
     ) -> Self {
-        // Use the properties method from the ExecutionPlan trait
         let input_props = input.properties();
         let cache = PlanProperties::new(
             EquivalenceProperties::new(input.schema()),
@@ -187,11 +187,171 @@ impl Stream for ObservedStream {
                 });
                 Poll::Ready(Some(Err(e)))
             }
-            other => result_to_poll(other),
+            other => other,
         }
     }
 }
 
-fn result_to_poll<T>(res: Poll<Option<T>>) -> Poll<Option<T>> {
-    res
+/// A custom logical node that represents a materialization point.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, PartialOrd)]
+pub struct MaterializerLogical {
+    pub cache_key: String,
+    pub input: LogicalPlan,
+}
+
+impl UserDefinedLogicalNodeCore for MaterializerLogical {
+    fn name(&self) -> &str {
+        "Materializer"
+    }
+
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+
+    fn schema(&self) -> &DFSchemaRef {
+        self.input.schema()
+    }
+
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Materializer(cache_key={})", self.cache_key)
+    }
+
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        Ok(Self {
+            cache_key: self.cache_key.clone(),
+            input: inputs[0].clone(),
+        })
+    }
+}
+
+/// A physical execution plan that writes data to Parquet while passing it through.
+#[derive(Debug)]
+pub struct MaterializerExec {
+    pub cache_key: String,
+    pub input: Arc<dyn ExecutionPlan>,
+    cache: PlanProperties,
+}
+
+impl MaterializerExec {
+    pub fn new(cache_key: String, input: Arc<dyn ExecutionPlan>) -> Self {
+        let input_props = input.properties();
+        let cache = PlanProperties::new(
+            EquivalenceProperties::new(input.schema()),
+            input_props.output_partitioning().clone(),
+            input_props.emission_type,
+            input_props.boundedness,
+        );
+        Self {
+            cache_key,
+            input,
+            cache,
+        }
+    }
+}
+
+impl DisplayAs for MaterializerExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "MaterializerExec(cache_key={})", self.cache_key)
+    }
+}
+
+impl ExecutionPlan for MaterializerExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "MaterializerExec"
+    }
+
+    fn schema(&self) -> arrow::datatypes::SchemaRef {
+        self.input.schema()
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(Self::new(
+            self.cache_key.clone(),
+            children[0].clone(),
+        )))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let input_stream = self.input.execute(partition, context)?;
+        
+        // Prepare cache path
+        let mut path = PathBuf::from("target/swanflow_cache");
+        std::fs::create_dir_all(&path).ok();
+        path.push(format!("{}.parquet", self.cache_key));
+
+        Ok(Box::pin(MaterializingStream {
+            input: input_stream,
+            path,
+            batches: Vec::new(),
+        }))
+    }
+}
+
+struct MaterializingStream {
+    input: SendableRecordBatchStream,
+    path: PathBuf,
+    batches: Vec<RecordBatch>,
+}
+
+impl RecordBatchStream for MaterializingStream {
+    fn schema(&self) -> arrow::datatypes::SchemaRef {
+        self.input.schema()
+    }
+}
+
+impl Stream for MaterializingStream {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.input.poll_next_unpin(cx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                self.batches.push(batch.clone());
+                Poll::Ready(Some(Ok(batch)))
+            }
+            Poll::Ready(None) => {
+                // End of stream, write to file if we have batches
+                if !self.batches.is_empty() {
+                    let batches = std::mem::take(&mut self.batches);
+                    let path = self.path.clone();
+                    // Perform writing in a non-blocking way (simplified for MVP)
+                    let schema = batches[0].schema();
+                    let file = std::fs::File::create(path).unwrap();
+                    let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None).unwrap();
+                    for batch in batches {
+                        writer.write(&batch).unwrap();
+                    }
+                    writer.close().unwrap();
+                }
+                Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
 }
