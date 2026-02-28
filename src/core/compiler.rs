@@ -58,21 +58,29 @@ impl WorkflowCompiler {
                 let mut sub_compiler = WorkflowCompiler::new(self.inject_probes);
                 sub_compiler.compile(sub_workflow, registry, Some(inputs)).await?
             } else if node.type_id == "core.input" {
-                // Special handling for boundary nodes inside sub-workflows
+                // Map parent input port to this input node's output
+                let port_idx = node.config["port_index"].as_u64().unwrap_or(0) as u32;
+                let mut map = HashMap::new();
+                if let Some(ref injected) = injected_inputs {
+                    if let Some(plan) = injected.get(&port_idx) {
+                        map.insert(0, plan.clone());
+                    }
+                }
+                map
+            } else if node.type_id == "core.output" {
+                // Pass-through the input to the output, to be collected by parent
                 inputs
             } else {
                 // Standard Node Logic
                 let behavior = registry.get_node(&node.type_id)?;
                 behavior.validate(&node.config)?;
                 
-                // Convert HashMap<u32, LogicalPlan> to Vec<LogicalPlan> sorted by port ID
                 let mut input_vec: Vec<(u32, LogicalPlan)> = inputs.into_iter().collect();
                 input_vec.sort_by_key(|(port, _)| *port);
                 let ordered_inputs: Vec<LogicalPlan> = input_vec.into_iter().map(|(_, p)| p).collect();
 
                 let output_plans = behavior.propose_plan(ordered_inputs, &node.config).await?;
                 
-                // Map Vec back to HashMap based on NodeSpec (assume 0..N ports)
                 let mut output_map = HashMap::new();
                 for (i, plan) in output_plans.into_iter().enumerate() {
                     output_map.insert(i as u32, plan);
@@ -80,8 +88,8 @@ impl WorkflowCompiler {
                 output_map
             };
 
-            // 3. Inject Probes if enabled
-            if self.inject_probes {
+            // 3. Inject Probes if enabled (don't probe boundary nodes)
+            if self.inject_probes && node.type_id != "core.input" && node.type_id != "core.output" {
                 for plan in outputs.values_mut() {
                     let probe = StateProbeLogical {
                         node_id: node.id,
@@ -97,9 +105,35 @@ impl WorkflowCompiler {
             self.compiled_outputs.insert(node.id, outputs);
         }
 
-        // Return the terminal nodes' outputs
-        let last_node_id = workflow.graph[order.last().cloned().ok_or_else(|| anyhow!("Empty workflow"))?].id;
-        Ok(self.compiled_outputs.get(&last_node_id).cloned().unwrap_or_default())
+        // 5. Final Result Collection
+        // If this is a sub-workflow, we look for all 'core.output' nodes and map them to ports.
+        let mut final_outputs = HashMap::new();
+        let mut has_output_nodes = false;
+
+        for &node_idx in &order {
+            let node = &workflow.graph[node_idx];
+            if node.type_id == "core.output" {
+                has_output_nodes = true;
+                let port_idx = node.config["port_index"].as_u64().unwrap_or(0) as u32;
+                if let Some(node_outputs) = self.compiled_outputs.get(&node.id) {
+                    if let Some(plan) = node_outputs.get(&0) {
+                        final_outputs.insert(port_idx, plan.clone());
+                    }
+                }
+            }
+        }
+
+        if !has_output_nodes {
+            // Fallback for simple workflows: return last node's output at port 0
+            if let Some(&last_idx) = order.last() {
+                let last_id = workflow.graph[last_idx].id;
+                if let Some(node_outputs) = self.compiled_outputs.get(&last_id) {
+                    return Ok(node_outputs.clone());
+                }
+            }
+        }
+
+        Ok(final_outputs)
     }
 
     /// Collects LogicalPlans from upstream nodes based on graph edges.
@@ -107,17 +141,9 @@ impl WorkflowCompiler {
         &self, 
         node_idx: NodeIndex, 
         workflow: &Workflow,
-        injected_inputs: &Option<HashMap<u32, LogicalPlan>>
+        _injected_inputs: &Option<HashMap<u32, LogicalPlan>>
     ) -> Result<HashMap<u32, LogicalPlan>> {
         let mut inputs = HashMap::new();
-
-        // If this is a root node and we have injected inputs (e.g. inside a MetaNode), use them.
-        let incoming_count = workflow.graph.edges_directed(node_idx, Incoming).count();
-        if incoming_count == 0 {
-            if let Some(ref injected) = injected_inputs {
-                return Ok(injected.clone());
-            }
-        }
 
         for edge_ref in workflow.graph.edges_directed(node_idx, Incoming) {
             let source_idx = edge_ref.source();

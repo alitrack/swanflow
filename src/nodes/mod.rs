@@ -9,6 +9,8 @@ pub mod registry;
 pub mod common;
 pub mod sql;
 pub mod io;
+pub mod boundary;
+pub mod transform;
 
 /// Port identification and description.
 #[derive(Debug, Clone, Serialize, Deserialize)]

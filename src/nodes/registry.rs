@@ -35,10 +35,28 @@ impl NodeRegistry {
     pub fn list_specs(&self) -> Vec<crate::nodes::NodeSpec> {
         self.nodes.values().map(|n| n.spec()).collect()
     }
+
+    /// Register all fundamental SwanFlow nodes.
+    pub fn register_core_nodes(&mut self) {
+        use crate::nodes::sql::SqlNode;
+        use crate::nodes::io::{CsvReadNode, ParquetReadNode};
+        use crate::nodes::boundary::{InputNode, OutputNode};
+        use crate::nodes::transform::{FilterNode, ProjectNode};
+
+        self.register_node(Arc::new(SqlNode));
+        self.register_node(Arc::new(CsvReadNode));
+        self.register_node(Arc::new(ParquetReadNode));
+        self.register_node(Arc::new(InputNode));
+        self.register_node(Arc::new(OutputNode));
+        self.register_node(Arc::new(FilterNode));
+        self.register_node(Arc::new(ProjectNode));
+    }
 }
 
 impl Default for NodeRegistry {
     fn default() -> Self {
-        Self::new()
+        let mut registry = Self::new();
+        registry.register_core_nodes();
+        registry
     }
 }
