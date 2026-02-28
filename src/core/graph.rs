@@ -92,3 +92,75 @@ impl Workflow {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nodes::NodeState;
+    use serde_json::json;
+
+    #[test]
+    fn test_workflow_new() {
+        let workflow = Workflow::new("Test Workflow");
+        assert_eq!(workflow.name, "Test Workflow");
+        assert_eq!(workflow.graph.node_count(), 0);
+        assert_eq!(workflow.graph.edge_count(), 0);
+    }
+    
+    #[test]
+    fn test_add_node() {
+        let mut workflow = Workflow::new("Test");
+        let node = NodeInstance {
+            id: Uuid::new_v4(),
+            type_id: "test.node".into(),
+            config: json!({"key": "value"}),
+            state: NodeState::Configured,
+            materialize: false,
+            sub_workflow: None,
+        };
+        
+        let idx = workflow.add_node(node);
+        assert_eq!(workflow.graph.node_count(), 1);
+        assert!(workflow.get_node(idx).is_some());
+    }
+    
+    #[test]
+    fn test_remove_node() {
+        let mut workflow = Workflow::new("Test");
+        let node = NodeInstance {
+            id: Uuid::new_v4(),
+            type_id: "test.node".into(),
+            config: json!({}),
+            state: NodeState::Configured,
+            materialize: false,
+            sub_workflow: None,
+        };
+        
+        let idx = workflow.add_node(node);
+        let removed = workflow.remove_node(idx);
+        
+        assert!(removed.is_some());
+        assert_eq!(workflow.graph.node_count(), 0);
+    }
+    
+    #[test]
+    fn test_update_config() {
+        let mut workflow = Workflow::new("Test");
+        let node = NodeInstance {
+            id: Uuid::new_v4(),
+            type_id: "test.node".into(),
+            config: json!({}),
+            state: NodeState::Configured,
+            materialize: false,
+            sub_workflow: None,
+        };
+        
+        let idx = workflow.add_node(node);
+        let result = workflow.update_config(idx, json!({"new": "config"}));
+        
+        assert!(result.is_ok());
+        let updated = workflow.get_node(idx).unwrap();
+        assert_eq!(updated.config["new"], "config");
+        assert_eq!(updated.state, NodeState::Unconfigured);
+    }
+}

@@ -50,6 +50,8 @@ User Request: {}",
     }
     
     /// Safely extracts JSON from LLM response, handling various markdown formats.
+    /// Made pub for testing.
+    pub fn extract_json_from_response(response: &str) -> Result<&str> {
     fn extract_json_from_response(response: &str) -> Result<&str> {
         // Try ```json ... ``` format first
         if let Some(start) = response.find("```json") {
@@ -95,5 +97,43 @@ User Request: {}",
         
         // Fallback: return as-is
         Ok(response.trim())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_extract_json_from_response_with_json_block() {
+        let response = r#"```json
+{"key": "value"}
+```"#;
+        let result = ConfigWizard::extract_json_from_response(response).unwrap();
+        assert!(result.contains("key"));
+    }
+    
+    #[test]
+    fn test_extract_json_from_response_with_generic_block() {
+        let response = r#"```
+{"key": "value"}
+```"#;
+        let result = ConfigWizard::extract_json_from_response(response).unwrap();
+        assert!(result.contains("key"));
+    }
+    
+    #[test]
+    fn test_extract_json_from_response_no_block() {
+        let response = r#"{"key": "value"}"#;
+        let result = ConfigWizard::extract_json_from_response(response).unwrap();
+        assert!(result.contains("key"));
+    }
+    
+    #[test]
+    fn test_extract_json_from_response_invalid_json() {
+        let response = "not json at all";
+        // Should return trimmed response as fallback
+        let result = ConfigWizard::extract_json_from_response(response).unwrap();
+        assert_eq!(result, "not json at all");
     }
 }
