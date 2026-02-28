@@ -236,3 +236,46 @@ impl NodeBehavior for ConditionNode {
         Ok(vec![true_df.into_optimized_plan()?, false_df.into_optimized_plan()?])
     }
 }
+
+/// Loop over a list of items (ForEach).
+pub struct ForEachNode;
+
+#[async_trait]
+impl NodeBehavior for ForEachNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.flow.foreach".to_string(),
+            display_name: "ForEach Loop".to_string(),
+            description: "Iterate over a list of values provided in configuration".to_string(),
+            input_ports: vec![],
+            output_ports: vec![PortSpec { id: 0, name: "item".into(), description: "Current iteration item (as a table)" }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "items": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["items"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["items"].as_array().ok_or_else(|| anyhow!("Items list is required"))?;
+        Ok(())
+    }
+
+    async fn propose_plan(&self, _inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+        let items = config["items"].as_array().unwrap();
+        let ctx = SessionContext::new();
+        
+        // In a real loop, the compiler would handle this by unrolling or iterating.
+        // For MVP, we return a single plan representing the union of all items as rows.
+        let mut select_parts = Vec::new();
+        for item in items {
+            select_parts.push(format!("SELECT '{}' as item", item.as_str().unwrap()));
+        }
+        let sql = select_parts.join(" UNION ALL ");
+        let df = ctx.sql(&sql).await?;
+        Ok(vec![df.into_optimized_plan()?])
+    }
+}
