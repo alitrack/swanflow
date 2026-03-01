@@ -269,6 +269,28 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 physical_inputs[0].clone(),
             ))));
         }
+        if let Some(duck_scan) = node.as_any().downcast_ref::<DuckDBScanLogical>() {
+            let arrow_schema = datafusion::arrow::datatypes::Schema::new(
+                duck_scan.schema.fields().iter().map(|f| f.as_ref().clone().into()).collect::<Vec<datafusion::arrow::datatypes::Field>>()
+            );
+            return Ok(Some(Arc::new(DuckDBScanExec::new(
+                duck_scan.connection_path.clone(),
+                duck_scan.extensions.clone(),
+                duck_scan.attach_sql.clone(),
+                duck_scan.query.clone(),
+                Arc::new(arrow_schema),
+            ))));
+        }
+        if let Some(sqlx_scan) = node.as_any().downcast_ref::<SqlxScanLogical>() {
+            let arrow_schema = datafusion::arrow::datatypes::Schema::new(
+                sqlx_scan.schema.fields().iter().map(|f| f.as_ref().clone().into()).collect::<Vec<datafusion::arrow::datatypes::Field>>()
+            );
+            return Ok(Some(Arc::new(SqlxScanExec::new(
+                sqlx_scan.url.clone(),
+                sqlx_scan.query.clone(),
+                Arc::new(arrow_schema),
+            ))));
+        }
         Ok(None)
     }
 }

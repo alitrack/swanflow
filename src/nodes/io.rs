@@ -512,6 +512,30 @@ impl NodeBehavior for ExcelReportNode {
     }
 }
 
+pub struct DuckDBHelper;
+
+impl DuckDBHelper {
+    pub fn open_connection(path: &str) -> Result<Connection> {
+        Connection::open(path).map_err(|e| anyhow!("Failed to open DuckDB: {}", e))
+    }
+
+    pub fn prepare_connection(conn: &Connection, extensions: &[&str]) -> Result<()> {
+        for ext in extensions {
+            conn.execute(&format!("INSTALL {};", ext), []).ok();
+            conn.execute(&format!("LOAD {};", ext), [])
+                .map_err(|e| anyhow!("Failed to load DuckDB extension {}: {}", ext, e))?;
+        }
+        Ok(())
+    }
+
+    pub fn query_arrow(conn: &Connection, query: &str) -> Result<Vec<RecordBatch>> {
+        let mut stmt = conn.prepare(query)?;
+        let arrow_results = stmt.query_arrow([])?;
+        let batches: Vec<RecordBatch> = arrow_results.collect();
+        Ok(batches)
+    }
+}
+
 pub struct DuckDBReadNode;
 
 #[async_trait]
@@ -1032,6 +1056,27 @@ impl NodeBehavior for UniversalReadNode {
                     let df = ctx.read_table(table)?;
                     Ok(vec![df.into_optimized_plan()?])
                 }
+                FileFormat::Json => {
+                    let abs_path = std::fs::canonicalize(path)?;
+                    let query = format!("SELECT * FROM read_json_auto('{}/**/*.json')", abs_path.to_str().unwrap());
+                    
+                    let conn = DuckDBHelper::open_connection(":memory:")?;
+                    let batches = DuckDBHelper::query_arrow(&conn, &query)?;
+                    if batches.is_empty() { return Err(anyhow!("No JSON data found in {}", path)); }
+                    
+                    let schema = batches[0].schema();
+                    let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
+
+                    Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
+                        node: Arc::new(crate::core::datasource::DuckDBScanLogical {
+                            connection_path: ":memory:".to_string(),
+                            extensions: vec![],
+                            attach_sql: None,
+                            query,
+                            schema: Arc::new(df_schema),
+                        }),
+                    })])
+                }
                 _ => Err(anyhow!("Directory scanning not yet supported for {:?}", format)),
             }
         } else {
@@ -1063,10 +1108,170 @@ impl NodeBehavior for UniversalReadNode {
                     Ok(vec![df.into_optimized_plan()?])
                 }
                 FileFormat::Json => {
-                    let df = ctx.read_json(path, NdJsonReadOptions::default()).await?;
-                    Ok(vec![df.into_optimized_plan()?])
+                    let abs_path = std::fs::canonicalize(path)?;
+                    let query = format!("SELECT * FROM read_json_auto('{}')", abs_path.to_str().unwrap());
+                    
+                    let conn = DuckDBHelper::open_connection(":memory:")?;
+                    let batches = DuckDBHelper::query_arrow(&conn, &query)?;
+                    if batches.is_empty() { return Err(anyhow!("JSON file is empty or invalid: {}", path)); }
+                    
+                    let schema = batches[0].schema();
+                    let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
+
+                    Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
+                        node: Arc::new(crate::core::datasource::DuckDBScanLogical {
+                            connection_path: ":memory:".to_string(),
+                            extensions: vec![],
+                            attach_sql: None,
+                            query,
+                            schema: Arc::new(df_schema),
+                        }),
+                    })])
                 }
                 _ => Err(anyhow!("Format {:?} not supported in propose_plan", format)),
+            }
+        }
+    }
+}
+
+pub struct DbConnectorNode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DbDriver {
+    DuckDBPostgres,
+    DuckDBSqlite,
+    SqlxAny,
+}
+
+impl DbConnectorNode {
+    fn select_driver(url: &str) -> DbDriver {
+        if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+            DbDriver::DuckDBPostgres
+        } else if url.starts_with("sqlite://") {
+            DbDriver::DuckDBSqlite
+        } else {
+            DbDriver::SqlxAny
+        }
+    }
+}
+
+#[async_trait]
+impl NodeBehavior for DbConnectorNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.io.db_connector".to_string(),
+            display_name: "Database Connector".to_string(),
+            description: "Connect to external databases using DuckDB scanners or SQLx.".to_string(),
+            input_ports: vec![],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Table Data".into(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" },
+                    "query": { "type": "string" }
+                },
+                "required": ["url", "query"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["url"].as_str().ok_or_else(|| anyhow!("Database URL is required"))?;
+        config["query"].as_str().ok_or_else(|| anyhow!("SQL query is required"))?;
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        _inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let url = config["url"].as_str().unwrap();
+        let query = config["query"].as_str().unwrap();
+        let driver = Self::select_driver(url);
+        
+        let ctx = SessionContext::new();
+        
+        match driver {
+            DbDriver::DuckDBPostgres | DbDriver::DuckDBSqlite => {
+                let conn = DuckDBHelper::open_connection(":memory:")?;
+                let ext = if driver == DbDriver::DuckDBPostgres { "postgres" } else { "sqlite" };
+                DuckDBHelper::prepare_connection(&conn, &[ext])?;
+                
+                // For Postgres, we need to ATTACH. 
+                // For SQLite, we can just ATTACH.
+                if driver == DbDriver::DuckDBPostgres {
+                    conn.execute(&format!("ATTACH '{}' AS ext_db (TYPE postgres);", url), [])?;
+                } else {
+                    // url is sqlite:///path/to/db.sqlite, DuckDB needs the path
+                    let path = url.trim_start_matches("sqlite://");
+                    conn.execute(&format!("ATTACH '{}' AS ext_db (TYPE sqlite);", path), [])?;
+                }
+                
+                // Run a sample to get the schema
+                let mut stmt = conn.prepare(query)?;
+                let column_count = stmt.column_count();
+                let mut fields = Vec::new();
+                for i in 0..column_count {
+                    let duckdb_type = stmt.column_type(i);
+                    let arrow_type = match format!("{:?}", duckdb_type).as_str() {
+                        "Int64" | "BigInt" => DataType::Int64,
+                        "Float64" | "Double" => DataType::Float64,
+                        "Boolean" | "Bool" => DataType::Boolean,
+                        _ => DataType::Utf8,
+                    };
+                    fields.push(Field::new(stmt.column_name(i)?, arrow_type, true));
+                }
+                
+                let schema = Arc::new(Schema::new(fields));
+                let df_schema = datafusion::common::DFSchema::try_from(schema)?;
+                
+                let attach_sql = if driver == DbDriver::DuckDBPostgres {
+                    Some(format!("ATTACH '{}' AS ext_db (TYPE postgres);", url))
+                } else {
+                    let path = url.trim_start_matches("sqlite://");
+                    Some(format!("ATTACH '{}' AS ext_db (TYPE sqlite);", path))
+                };
+
+                Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
+                    node: Arc::new(crate::core::datasource::DuckDBScanLogical {
+                        connection_path: ":memory:".to_string(),
+                        extensions: vec![ext.to_string()],
+                        attach_sql,
+                        query: query.to_string(),
+                        schema: Arc::new(df_schema),
+                    }),
+                })])
+            }
+            DbDriver::SqlxAny => {
+                // SQLx path: dynamic schema discovery
+                sqlx::any::install_default_drivers();
+                let pool = futures::executor::block_on(sqlx::AnyPool::connect(url))
+                    .map_err(|e| anyhow!("SQLx connection failed: {}", e))?;
+                
+                let query_obj = sqlx::query(query);
+                let first_row = futures::executor::block_on(query_obj.fetch_one(&pool))
+                    .map_err(|e| anyhow!("SQLx query failed for schema inference: {}", e))?;
+                
+                let mut fields = Vec::new();
+                for col in first_row.columns() {
+                    fields.push(Field::new(col.name(), DataType::Utf8, true));
+                }
+                
+                let schema = Arc::new(Schema::new(fields));
+                let df_schema = datafusion::common::DFSchema::try_from(schema)?;
+
+                Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
+                    node: Arc::new(crate::core::datasource::SqlxScanLogical {
+                        url: url.to_string(),
+                        query: query.to_string(),
+                        schema: Arc::new(df_schema),
+                    }),
+                })])
             }
         }
     }

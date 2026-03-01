@@ -23,6 +23,310 @@ use futures::Stream;
 use futures::StreamExt;
 use rust_xlsxwriter::{Chart, ChartType, Workbook, Format, Color};
 use std::collections::HashMap;
+use sqlx::{Column, Executor, Row, TypeInfo};
+
+/// Logical node for SQLx-based generic database scanning.
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct SqlxScanLogical {
+    pub url: String,
+    pub query: String,
+    pub schema: DFSchemaRef,
+}
+
+impl PartialOrd for SqlxScanLogical {
+    fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+        None
+    }
+}
+
+impl UserDefinedLogicalNodeCore for SqlxScanLogical {
+    fn name(&self) -> &str {
+        "SqlxScan"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        &self.schema
+    }
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SqlxScan(query={})", self.query)
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        _inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        Ok(self.clone())
+    }
+}
+
+/// Physical execution plan for SQLx generic database scanning.
+#[derive(Debug)]
+pub struct SqlxScanExec {
+    pub url: String,
+    pub query: String,
+    pub project_schema: SchemaRef,
+    cache: PlanProperties,
+}
+
+impl SqlxScanExec {
+    pub fn new(url: String, query: String, project_schema: SchemaRef) -> Self {
+        let cache = PlanProperties::new(
+            EquivalenceProperties::new(project_schema.clone()),
+            datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+        Self {
+            url,
+            query,
+            project_schema,
+            cache,
+        }
+    }
+}
+
+impl DisplayAs for SqlxScanExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SqlxScanExec(query={})", self.query)
+    }
+}
+
+impl ExecutionPlan for SqlxScanExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "SqlxScanExec"
+    }
+    fn schema(&self) -> SchemaRef {
+        self.project_schema.clone()
+    }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let url = self.url.clone();
+        let query = self.query.clone();
+        let schema = self.project_schema.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+
+        tokio::spawn(async move {
+            let res = async {
+                sqlx::any::install_default_drivers();
+                let pool = sqlx::AnyPool::connect(&url).await.map_err(|e| anyhow::anyhow!(e))?;
+                let mut rows = sqlx::query(&query).fetch(&pool);
+
+                let mut builders: Vec<StringBuilder> = (0..schema.fields().len())
+                    .map(|_| StringBuilder::new())
+                    .collect();
+
+                let mut count = 0;
+                while let Some(row_res) = rows.next().await {
+                    let row = row_res.map_err(|e| anyhow::anyhow!(e))?;
+                    for i in 0..schema.fields().len() {
+                        // Very simplified: convert everything to string for this MVP
+                        // Better approach: dynamic mapping based on sqlx column types
+                        let val: String = match row.try_get_raw(i) {
+                            Ok(v) if !v.is_null() => {
+                                // This is a bit tricky with sqlx::Any
+                                // For now, we'll try common types or fallback to string
+                                row.try_get::<String, _>(i).unwrap_or_else(|_| "complex_type".to_string())
+                            }
+                            _ => "".to_string(),
+                        };
+                        builders[i].append_value(val);
+                    }
+                    count += 1;
+                    if count >= 1000 {
+                        let columns: Vec<ArrayRef> = builders.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef).collect();
+                        let batch = RecordBatch::try_new(schema.clone(), columns)?;
+                        tx.send(Ok(batch)).await.ok();
+                        builders = (0..schema.fields().len()).map(|_| StringBuilder::new()).collect();
+                        count = 0;
+                    }
+                }
+
+                if count > 0 {
+                    let columns: Vec<ArrayRef> = builders.into_iter().map(|mut b| Arc::new(b.finish()) as ArrayRef).collect();
+                    let batch = RecordBatch::try_new(schema.clone(), columns)?;
+                    tx.send(Ok(batch)).await.ok();
+                }
+                Ok::<(), anyhow::Error>(())
+            }.await;
+
+            if let Err(e) = res {
+                tx.send(Err(datafusion::error::DataFusionError::External(e.into()))).await.ok();
+            }
+        });
+
+        Ok(Box::pin(datafusion::physical_plan::stream::RecordBatchReceiverStream::create(&schema, rx)))
+    }
+}
+
+/// Logical node for DuckDB-based external scanning (Postgres, SQLite).
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct DuckDBScanLogical {
+    pub connection_path: String,
+    pub extensions: Vec<String>,
+    pub attach_sql: Option<String>,
+    pub query: String,
+    pub schema: DFSchemaRef,
+}
+
+impl PartialOrd for DuckDBScanLogical {
+    fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+        None
+    }
+}
+
+impl UserDefinedLogicalNodeCore for DuckDBScanLogical {
+    fn name(&self) -> &str {
+        "DuckDBScan"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        &self.schema
+    }
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "DuckDBScan(query={})", self.query)
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        _inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        Ok(self.clone())
+    }
+}
+
+/// Physical execution plan for DuckDB external scanning.
+#[derive(Debug)]
+pub struct DuckDBScanExec {
+    pub connection_path: String,
+    pub extensions: Vec<String>,
+    pub attach_sql: Option<String>,
+    pub query: String,
+    pub project_schema: SchemaRef,
+    cache: PlanProperties,
+}
+
+impl DuckDBScanExec {
+    pub fn new(
+        connection_path: String,
+        extensions: Vec<String>,
+        attach_sql: Option<String>,
+        query: String,
+        project_schema: SchemaRef,
+    ) -> Self {
+        let cache = PlanProperties::new(
+            EquivalenceProperties::new(project_schema.clone()),
+            datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+        Self {
+            connection_path,
+            extensions,
+            attach_sql,
+            query,
+            project_schema,
+            cache,
+        }
+    }
+}
+
+impl DisplayAs for DuckDBScanExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "DuckDBScanExec(query={})", self.query)
+    }
+}
+
+impl ExecutionPlan for DuckDBScanExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "DuckDBScanExec"
+    }
+    fn schema(&self) -> SchemaRef {
+        self.project_schema.clone()
+    }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        // Implementation will fetch all data into memory for this simple version
+        // Future: implement a streaming DuckDB query result
+        let conn = duckdb::Connection::open(&self.connection_path)
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        
+        for ext in &self.extensions {
+            conn.execute(&format!("INSTALL {};", ext), []).ok();
+            conn.execute(&format!("LOAD {};", ext), [])
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        }
+
+        if let Some(ref attach) = self.attach_sql {
+            conn.execute(attach, [])
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        }
+
+        let mut stmt = conn.prepare(&self.query)
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        
+        let arrow_results = stmt.query_arrow([])
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        
+        let batches: Vec<RecordBatch> = arrow_results.collect();
+        
+        Ok(Box::pin(datafusion::physical_plan::memory::MemoryStream::try_new(
+            batches,
+            self.project_schema.clone(),
+            None,
+        )?))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExcelTemplateSinkLogical {
