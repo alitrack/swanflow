@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use arrow::record_batch::RecordBatch;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
 use datafusion::error::Result;
 use datafusion::execution::context::TaskContext;

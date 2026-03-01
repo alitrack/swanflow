@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 use std::ffi::CString;
 
 use anyhow::{anyhow, Result};
-use arrow::record_batch::RecordBatch;
+use datafusion::arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::common::DFSchemaRef;
 use datafusion::error::Result as DFResult;

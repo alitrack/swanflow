@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
-use arrow::array::{ArrayRef, StringBuilder};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use datafusion::arrow::array::{ArrayRef, StringBuilder};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use calamine::{open_workbook, Data, Reader, Xlsx};
 use datafusion::common::{DFSchema, DFSchemaRef};
@@ -228,6 +228,39 @@ impl NodeBehavior for ExcelWriteNode {
                         "type": "array", 
                         "items": { "type": "string" },
                         "default": ["Sheet1"]
+                    },
+                    "styles": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "column": { "type": "string" },
+                                "format": {
+                                    "type": "object",
+                                    "properties": {
+                                        "bold": { "type": "boolean" },
+                                        "font_color": { "type": "string" },
+                                        "bg_color": { "type": "string" },
+                                        "num_format": { "type": "string" }
+                                    }
+                                }
+                            },
+                            "required": ["column", "format"]
+                        }
+                    },
+                    "convert_to_table": { "type": "boolean", "default": false },
+                    "conditional_formatting": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "column": { "type": "string" },
+                                "type": { "type": "string", "enum": ["cell", "average", "duplicate", "unique"] },
+                                "criteria": { "type": "string" },
+                                "value": { "type": "number" },
+                                "format": { "type": "object" }
+                            }
+                        }
                     }
                 },
                 "required": ["path"]
@@ -258,6 +291,9 @@ impl NodeBehavior for ExcelWriteNode {
             node: Arc::new(ExcelSinkLogical {
                 path,
                 sheets,
+                styles: config["styles"].clone(),
+                convert_to_table: config["convert_to_table"].as_bool().unwrap_or(false),
+                conditional_formatting: config["conditional_formatting"].clone(),
                 inputs,
             }),
         });
@@ -274,7 +310,7 @@ impl NodeBehavior for ExcelTemplateNode {
         NodeSpec {
             type_id: "core.io.excel_template".to_string(),
             display_name: "Excel Template Filler".to_string(),
-            description: "Fill a pre-styled Excel template with data based on markers like {{name}}".to_string(),
+            description: "Fill a pre-styled Excel template with data based on markers like {{name}} or table injections.".to_string(),
             input_ports: vec![
                 PortSpec { id: 0, name: "input".into(), description: "Data to inject".into() },
             ],
@@ -283,7 +319,17 @@ impl NodeBehavior for ExcelTemplateNode {
                 "type": "object",
                 "properties": {
                     "template_path": { "type": "string" },
-                    "output_path": { "type": "string" }
+                    "output_path": { "type": "string" },
+                    "sheet": { "type": "string", "default": "Sheet1" },
+                    "markers": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "Map of field names to markers in the template"
+                    },
+                    "table_start": {
+                        "type": "string",
+                        "description": "Starting cell for table injection (e.g., 'A10')"
+                    }
                 },
                 "required": ["template_path", "output_path"]
             }),
@@ -301,14 +347,165 @@ impl NodeBehavior for ExcelTemplateNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        // TODO: Implement Excel template filling with {{marker}} replacement
-        // This requires:
-        // 1. Read template Excel with markers
-        // 2. Parse markers and replace with data from input
-        // 3. Write filled template to output_path
-        // For now, this is a pass-through stub
-        tracing::warn!("ExcelTemplateNode is a stub - data passes through unchanged");
-        Ok(inputs)
+        let template_path = PathBuf::from(config["template_path"].as_str().unwrap());
+        let output_path = PathBuf::from(config["output_path"].as_str().unwrap());
+        let sheet = config["sheet"].as_str().unwrap_or("Sheet1").to_string();
+        let table_start = config["table_start"].as_str().map(|s| s.to_string());
+        
+        let mut markers = std::collections::HashMap::new();
+        if let Some(obj) = config["markers"].as_object() {
+            for (k, v) in obj {
+                if let Some(marker) = v.as_str() {
+                    markers.insert(k.clone(), marker.to_string());
+                }
+            }
+        }
+
+        let sink_plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(crate::core::datasource::ExcelTemplateSinkLogical {
+                template_path,
+                output_path,
+                sheet,
+                markers,
+                table_start,
+                inputs,
+            }),
+        });
+
+        Ok(vec![sink_plan])
+    }
+}
+
+pub struct ExcelSheetNamesNode;
+
+#[async_trait]
+impl NodeBehavior for ExcelSheetNamesNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.io.excel_sheet_names".to_string(),
+            display_name: "Excel Sheet Names".to_string(),
+            description: "List all worksheet names in an Excel file.".to_string(),
+            input_ports: vec![],
+            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Sheet Names".into() }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["path"].as_str().ok_or_else(|| anyhow!("path is required"))?;
+        Ok(())
+    }
+
+    async fn infer_schema(
+        &self,
+        _input_schemas: Vec<DFSchemaRef>,
+        _config: &JsonValue,
+    ) -> Result<InferredMetadata> {
+        let schema = Arc::new(Schema::new(vec![Field::new("sheet_name", DataType::Utf8, false)]));
+        Ok(InferredMetadata {
+            schemas: vec![Arc::new(DFSchema::try_from(schema)?)],
+            sample_data: None,
+        })
+    }
+
+    async fn propose_plan(
+        &self,
+        _inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let path = config["path"].as_str().unwrap().to_string();
+        let mut workbook: Xlsx<_> = open_workbook(&path)?;
+        let names = workbook.sheet_names();
+        
+        let schema = Arc::new(Schema::new(vec![Field::new("sheet_name", DataType::Utf8, false)]));
+        let mut values = Vec::new();
+        
+        for name in names {
+            values.push(vec![datafusion::logical_expr::Expr::Literal(datafusion::scalar::ScalarValue::Utf8(Some(name)), None)]);
+        }
+        
+        let df_schema = Arc::new(datafusion::common::DFSchema::try_from(schema.clone())?);
+        
+        Ok(vec![LogicalPlan::Values(datafusion::logical_expr::Values {
+            schema: df_schema,
+            values,
+        })])
+    }
+}
+
+pub struct ExcelReportNode;
+
+#[async_trait]
+impl NodeBehavior for ExcelReportNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.io.excel_report".to_string(),
+            display_name: "Excel Report Builder".to_string(),
+            description: "Build a multi-sheet Excel report with automated charts.".to_string(),
+            input_ports: vec![
+                PortSpec { id: 0, name: "data".into(), description: "Data for the report".into() },
+            ],
+            output_ports: vec![],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "title": { "type": "string", "default": "Automated Report" },
+                    "charts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": { "type": "string", "enum": ["column", "line", "pie"] },
+                                "title": { "type": "string" },
+                                "data_range": { "type": "string" },
+                                "label_range": { "type": "string" },
+                                "x_axis": { "type": "string" },
+                                "y_axis": { "type": "string" },
+                                "offset": {
+                                    "type": "object",
+                                    "properties": {
+                                        "row": { "type": "integer" },
+                                        "col": { "type": "integer" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["path"].as_str().ok_or_else(|| anyhow!("path is required"))?;
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let path = PathBuf::from(config["path"].as_str().unwrap());
+        let charts = config["charts"].clone();
+        
+        let sink_plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(crate::core::datasource::ExcelReportSinkLogical {
+                path,
+                charts,
+                inputs,
+            }),
+        });
+
+        Ok(vec![sink_plan])
     }
 }
 

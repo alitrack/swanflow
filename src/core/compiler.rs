@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
-use arrow::array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
-use arrow::record_batch::RecordBatch;
+use datafusion::arrow::array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
+use datafusion::arrow::record_batch::RecordBatch;
 use async_recursion::async_recursion;
 use datafusion::common::DFSchemaRef;
 use datafusion::logical_expr::{Extension, LogicalPlan};
@@ -231,7 +231,7 @@ impl WorkflowCompiler {
                                     JsonValue::Null
                                 } else {
                                     match array.data_type() {
-                                        arrow::datatypes::DataType::Utf8 => JsonValue::String(
+                                        datafusion::arrow::datatypes::DataType::Utf8 => JsonValue::String(
                                             array
                                                 .as_any()
                                                 .downcast_ref::<StringArray>()
@@ -239,7 +239,7 @@ impl WorkflowCompiler {
                                                 .value(0)
                                                 .to_string(),
                                         ),
-                                        arrow::datatypes::DataType::Int64 => JsonValue::Number(
+                                        datafusion::arrow::datatypes::DataType::Int64 => JsonValue::Number(
                                             array
                                                 .as_any()
                                                 .downcast_ref::<Int64Array>()
@@ -247,7 +247,7 @@ impl WorkflowCompiler {
                                                 .value(0)
                                                 .into(),
                                         ),
-                                        arrow::datatypes::DataType::Float64 => {
+                                        datafusion::arrow::datatypes::DataType::Float64 => {
                                             serde_json::Number::from_f64(
                                                 array
                                                     .as_any()
@@ -258,7 +258,7 @@ impl WorkflowCompiler {
                                             .map(JsonValue::Number)
                                             .unwrap_or(JsonValue::Null)
                                         }
-                                        arrow::datatypes::DataType::Boolean => JsonValue::Bool(
+                                        datafusion::arrow::datatypes::DataType::Boolean => JsonValue::Bool(
                                             array
                                                 .as_any()
                                                 .downcast_ref::<BooleanArray>()

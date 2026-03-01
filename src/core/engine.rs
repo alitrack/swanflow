@@ -10,14 +10,15 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner, DefaultPhy
 use datafusion::execution::context::{SessionState, QueryPlanner};
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::common::DFSchemaRef;
-use arrow::record_batch::RecordBatch;
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::datatypes::Schema;
 use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::core::graph::Workflow;
 use crate::core::compiler::WorkflowCompiler;
 use crate::core::observer::{StateProbeLogical, StateProbeExec, MaterializerLogical, MaterializerExec};
-use crate::core::datasource::{ExcelScanLogical, ExcelScanExec, ExcelSinkLogical, ExcelSinkExec};
+use crate::core::datasource::{ExcelScanLogical, ExcelScanExec, ExcelSinkLogical, ExcelSinkExec, ExcelTemplateSinkLogical, ExcelTemplateExec, ExcelReportSinkLogical, ExcelReportExec};
 use crate::nodes::script::python::{PythonLogical, PythonExec};
 use crate::nodes::registry::NodeRegistry;
 use crate::nodes::NodeEvent;
@@ -51,17 +52,41 @@ impl ExtensionPlanner for SwanFlowPlanner {
             ))));
         }
         if let Some(excel) = node.as_any().downcast_ref::<ExcelScanLogical>() {
+            let schema = excel.schema.as_ref();
+            let arrow_schema = datafusion::arrow::datatypes::Schema::new(
+                schema.fields().iter().map(|f| f.as_ref().clone().into()).collect::<Vec<datafusion::arrow::datatypes::Field>>()
+            );
             return Ok(Some(Arc::new(ExcelScanExec::new(
                 excel.path.clone(),
                 excel.sheet.clone(),
                 excel.mode.clone(),
-                Arc::new(excel.schema.as_ref().into()),
+                Arc::new(arrow_schema),
             ))));
         }
         if let Some(sink) = node.as_any().downcast_ref::<ExcelSinkLogical>() {
             return Ok(Some(Arc::new(ExcelSinkExec::new(
                 sink.path.clone(),
                 sink.sheets.clone(),
+                sink.styles.clone(),
+                sink.convert_to_table,
+                sink.conditional_formatting.clone(),
+                physical_inputs.to_vec(),
+            ))));
+        }
+        if let Some(template_sink) = node.as_any().downcast_ref::<ExcelTemplateSinkLogical>() {
+            return Ok(Some(Arc::new(ExcelTemplateExec::new(
+                template_sink.template_path.clone(),
+                template_sink.output_path.clone(),
+                template_sink.sheet.clone(),
+                template_sink.markers.clone(),
+                template_sink.table_start.clone(),
+                physical_inputs.to_vec(),
+            ))));
+        }
+        if let Some(report_sink) = node.as_any().downcast_ref::<ExcelReportSinkLogical>() {
+            return Ok(Some(Arc::new(ExcelReportExec::new(
+                report_sink.path.clone(),
+                report_sink.charts.clone(),
                 physical_inputs.to_vec(),
             ))));
         }

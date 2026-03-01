@@ -1,0 +1,40 @@
+name: "Professional Excel Reporting"
+id: "f3a2b1c0-d9e8-4a7b-b6c5-d4e3f2a1b0c9"
+graph:
+  nodes:
+    - id: "00000000-0000-0000-0000-000000000001"
+      type_id: "core.io.csv"
+      config:
+        path: "sales_data.csv"
+      state: "Configured"
+      materialize: false
+      sub_workflow: null
+    - id: "00000000-0000-0000-0000-000000000002"
+      type_id: "core.io.excel_template"
+      config:
+        template_path: "brand_template.xlsx"
+        output_path: "monthly_report.xlsx"
+        markers:
+          "Region": "{{RegionName}}"
+        table_start: "A10"
+      state: "Configured"
+      materialize: false
+      sub_workflow: null
+    - id: "00000000-0000-0000-0000-000000000003"
+      type_id: "core.io.excel_report"
+      config:
+        path: "automated_dashboard.xlsx"
+        charts:
+          - type: "column"
+            title: "Revenue Trend"
+            data_range: "Data!$B$2:$B$13"
+            label_range: "Data!$A$2:$A$13"
+            offset: { "row": 2, "col": 5 }
+      state: "Configured"
+      materialize: false
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [0, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
