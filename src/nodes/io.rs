@@ -6,6 +6,9 @@ use async_trait::async_trait;
 use calamine::{open_workbook, Data, Reader, Xlsx};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::logical_expr::{Extension, LogicalPlan};
+use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl, ListingTableConfigExt};
+use datafusion::datasource::file_format::parquet::ParquetFormat;
+use datafusion::datasource::file_format::csv::CsvFormat;
 use datafusion::prelude::*;
 use duckdb::Connection;
 use serde_json::Value as JsonValue;
@@ -793,5 +796,278 @@ impl NodeBehavior for CsvReadNode {
         let ctx = SessionContext::new();
         let df = ctx.read_csv(path, CsvReadOptions::new()).await?;
         Ok(vec![df.into_optimized_plan()?])
+    }
+}
+
+pub struct UniversalReadNode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileFormat {
+    Parquet,
+    Csv,
+    Json,
+    Avro,
+    Arrow,
+}
+
+impl UniversalReadNode {
+    fn detect_format(path: &str) -> Option<FileFormat> {
+        let path_lower = path.to_lowercase();
+        if path_lower.ends_with(".parquet") {
+            return Some(FileFormat::Parquet);
+        }
+        if path_lower.ends_with(".csv") {
+            return Some(FileFormat::Csv);
+        }
+        if path_lower.ends_with(".json") || path_lower.ends_with(".ndjson") {
+            return Some(FileFormat::Json);
+        }
+        if path_lower.ends_with(".avro") {
+            return Some(FileFormat::Avro);
+        }
+        if path_lower.ends_with(".arrow") {
+            return Some(FileFormat::Arrow);
+        }
+        
+        // Basic magic number detection could be added here if needed
+        None
+    }
+
+    fn discover_partitions(path: &str) -> Vec<(String, DataType)> {
+        let mut partitions = std::collections::BTreeMap::new();
+        Self::discover_partitions_recursive(std::path::Path::new(path), &mut partitions);
+        partitions.into_iter().map(|(k, v)| (k, v)).collect()
+    }
+
+    fn discover_partitions_recursive(path: &std::path::Path, partitions: &mut std::collections::BTreeMap<String, DataType>) {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.contains('=') {
+                        let parts: Vec<&str> = name.splitn(2, '=').collect();
+                        if parts.len() == 2 {
+                            let key = parts[0].to_string();
+                            let val = parts[1];
+                            let dt = if val.parse::<i64>().is_ok() {
+                                DataType::Int64
+                            } else if val.parse::<f64>().is_ok() {
+                                DataType::Float64
+                            } else {
+                                DataType::Utf8
+                            };
+                            partitions.entry(key).or_insert(dt);
+                        }
+                    }
+                    // Recurse to find nested partitions
+                    Self::discover_partitions_recursive(&entry.path(), partitions);
+                }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl NodeBehavior for UniversalReadNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.io.universal_read".to_string(),
+            display_name: "Universal Reader".to_string(),
+            description: "Intelligent reader that automatically detects format and supports directory scanning.".to_string(),
+            input_ports: vec![],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Table Data".into(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "format": { "type": "string", "default": "auto", "enum": ["auto", "parquet", "csv", "json", "avro", "arrow"] },
+                    "recursive": { "type": "boolean", "default": false },
+                    "has_header": { "type": "boolean", "default": true },
+                    "delimiter": { "type": "string", "default": "," },
+                    "multi_line": { "type": "boolean", "default": false }
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["path"].as_str().ok_or_else(|| anyhow!("Path is required"))?;
+        Ok(())
+    }
+
+    async fn infer_schema(
+        &self,
+        _input_schemas: Vec<DFSchemaRef>,
+        config: &JsonValue,
+    ) -> Result<InferredMetadata> {
+        let path = config["path"].as_str().unwrap();
+        let format_str = config["format"].as_str().unwrap_or("auto");
+        
+        let format = if format_str == "auto" {
+            Self::detect_format(path).ok_or_else(|| anyhow!("Could not detect format for {}", path))?
+        } else {
+            match format_str {
+                "parquet" => FileFormat::Parquet,
+                "csv" => FileFormat::Csv,
+                "json" => FileFormat::Json,
+                _ => return Err(anyhow!("Unsupported format override: {}", format_str)),
+            }
+        };
+
+        let mut sess_config = SessionConfig::new().with_target_partitions(1);
+        let ctx = SessionContext::new_with_config(sess_config);
+        let is_dir = std::path::Path::new(path).is_dir();
+
+        match format {
+            FileFormat::Parquet => {
+                let mut opts = ParquetReadOptions::default();
+                if is_dir {
+                    let abs_path = std::fs::canonicalize(path)?;
+                    let partitions = Self::discover_partitions(abs_path.to_str().unwrap());
+                    if !partitions.is_empty() {
+                        opts.table_partition_cols = partitions;
+                    }
+                }
+                let df = ctx.read_parquet(path, opts).await?;
+                Ok(InferredMetadata {
+                    schemas: vec![Arc::new(df.schema().clone())],
+                    sample_data: None,
+                })
+            }
+            FileFormat::Csv => {
+                let has_header = config["has_header"].as_bool().unwrap_or(true);
+                let delimiter = config["delimiter"].as_str().unwrap_or(",").as_bytes()[0];
+                let opts = CsvReadOptions::new().has_header(has_header).delimiter(delimiter);
+                let df = ctx.read_csv(path, opts).await?;
+                Ok(InferredMetadata {
+                    schemas: vec![Arc::new(df.schema().clone())],
+                    sample_data: None,
+                })
+            }
+            FileFormat::Json => {
+                let df = ctx.read_json(path, NdJsonReadOptions::default()).await?;
+                Ok(InferredMetadata {
+                    schemas: vec![Arc::new(df.schema().clone())],
+                    sample_data: None,
+                })
+            }
+            _ => Err(anyhow!("Schema inference not yet fully implemented for {:?}", format)),
+        }
+    }
+
+    async fn propose_plan(
+        &self,
+        _inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let path = config["path"].as_str().unwrap();
+        let format_str = config["format"].as_str().unwrap_or("auto");
+        let _recursive = config["recursive"].as_bool().unwrap_or(false);
+        
+        let format = if format_str == "auto" {
+            Self::detect_format(path).ok_or_else(|| anyhow!("Could not detect format for {}", path))?
+        } else {
+            match format_str {
+                "parquet" => FileFormat::Parquet,
+                "csv" => FileFormat::Csv,
+                "json" => FileFormat::Json,
+                _ => return Err(anyhow!("Unsupported format override: {}", format_str)),
+            }
+        };
+
+        let mut sess_config = SessionConfig::new().with_target_partitions(1);
+        let ctx = SessionContext::new_with_config(sess_config);
+        
+        // Handle directory vs file
+        let is_dir = std::path::Path::new(path).is_dir();
+        
+        if is_dir {
+            match format {
+                FileFormat::Parquet => {
+                    let abs_path = std::fs::canonicalize(path)?;
+                    let table_url = ListingTableUrl::parse(abs_path.to_str().unwrap())?;
+                    
+                    let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
+                        .with_collect_stat(true)
+                        .with_file_extension(".parquet")
+                        .with_target_partitions(1);
+                    
+                    let config = ListingTableConfig::new(table_url)
+                        .with_listing_options(listing_options);
+                    
+                    let config = config.infer(&ctx.state()).await?;
+                    let table = Arc::new(ListingTable::try_new(config)?);
+                    
+                    let df = ctx.read_table(table)?;
+                    let df = df.repartition(datafusion::logical_expr::Partitioning::RoundRobinBatch(1))?;
+                    Ok(vec![df.into_optimized_plan()?])
+                }
+                FileFormat::Csv => {
+                    let abs_path = std::fs::canonicalize(path)?;
+                    let glob_path = format!("file://{}/**/*.csv", abs_path.to_str().unwrap());
+                    let table_url = ListingTableUrl::parse(glob_path)?;
+                    
+                    let has_header = config["has_header"].as_bool().unwrap_or(true);
+                    let delimiter = config["delimiter"].as_str().unwrap_or(",").as_bytes()[0];
+                    
+                    let csv_format = datafusion::datasource::file_format::csv::CsvFormat::default()
+                        .with_has_header(has_header)
+                        .with_delimiter(delimiter);
+                    
+                    let listing_options = ListingOptions::new(Arc::new(csv_format))
+                        .with_collect_stat(true)
+                        .with_target_partitions(1);
+                    
+                    let config = ListingTableConfig::new(table_url)
+                        .with_listing_options(listing_options);
+                    
+                    let config = config.infer(&ctx.state()).await?;
+                    let table = Arc::new(ListingTable::try_new(config)?);
+                    
+                    let df = ctx.read_table(table)?;
+                    Ok(vec![df.into_optimized_plan()?])
+                }
+                _ => Err(anyhow!("Directory scanning not yet supported for {:?}", format)),
+            }
+        } else {
+            match format {
+                FileFormat::Parquet => {
+                    let abs_path = std::fs::canonicalize(path)?;
+                    let table_url = ListingTableUrl::parse(abs_path.to_str().unwrap())?;
+                    
+                    let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
+                        .with_collect_stat(true)
+                        .with_file_extension(".parquet")
+                        .with_target_partitions(1);
+                    
+                    let config = ListingTableConfig::new(table_url)
+                        .with_listing_options(listing_options);
+                    
+                    let config = config.infer(&ctx.state()).await?;
+                    let table = Arc::new(ListingTable::try_new(config)?);
+                    
+                    let df = ctx.read_table(table)?;
+                    let df = df.repartition(datafusion::logical_expr::Partitioning::RoundRobinBatch(1))?;
+                    Ok(vec![df.into_optimized_plan()?])
+                }
+                FileFormat::Csv => {
+                    let has_header = config["has_header"].as_bool().unwrap_or(true);
+                    let delimiter = config["delimiter"].as_str().unwrap_or(",").as_bytes()[0];
+                    let opts = CsvReadOptions::new().has_header(has_header).delimiter(delimiter);
+                    let df = ctx.read_csv(path, opts).await?;
+                    Ok(vec![df.into_optimized_plan()?])
+                }
+                FileFormat::Json => {
+                    let df = ctx.read_json(path, NdJsonReadOptions::default()).await?;
+                    Ok(vec![df.into_optimized_plan()?])
+                }
+                _ => Err(anyhow!("Format {:?} not supported in propose_plan", format)),
+            }
+        }
     }
 }

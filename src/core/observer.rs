@@ -155,7 +155,7 @@ impl MaterializerExec {
         let input_props = input.properties();
         let cache = PlanProperties::new(
             EquivalenceProperties::new(input.schema()),
-            input_props.output_partitioning().clone(),
+            datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
             input_props.emission_type,
             input_props.boundedness,
         );

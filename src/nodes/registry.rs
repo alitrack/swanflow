@@ -43,7 +43,7 @@ impl NodeRegistry {
     /// helpers rather than direct workflow nodes.
     pub fn register_core_nodes(&mut self) {
         use crate::nodes::sql::SqlNode;
-        use crate::nodes::io::{CsvReadNode, ParquetReadNode, ExcelReadNode, ExcelWriteNode, ExcelTemplateNode, ExcelReportNode, ExcelSheetNamesNode, DuckDBReadNode, DuckDBWriteNode, HttpFetchNode};
+        use crate::nodes::io::{CsvReadNode, ParquetReadNode, UniversalReadNode, ExcelReadNode, ExcelWriteNode, ExcelTemplateNode, ExcelReportNode, ExcelSheetNamesNode, DuckDBReadNode, DuckDBWriteNode, HttpFetchNode};
         use crate::nodes::boundary::{InputNode, OutputNode, DuckDBExtensionNode};
         use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode, ProfilerNode, VariableCreatorNode, TableToVariableNode};
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
@@ -52,6 +52,7 @@ impl NodeRegistry {
         self.register_node(Arc::new(SqlNode));
         self.register_node(Arc::new(CsvReadNode));
         self.register_node(Arc::new(ParquetReadNode));
+        self.register_node(Arc::new(UniversalReadNode));
         self.register_node(Arc::new(ExcelReadNode));
         self.register_node(Arc::new(ExcelWriteNode));
         self.register_node(Arc::new(ExcelTemplateNode));
