@@ -68,10 +68,15 @@ impl WorkflowCompiler {
         let mut aug_graph = workflow.graph.clone();
         let node_indices: Vec<NodeIndex> = workflow.graph.node_indices().collect();
 
-        // Step 1: Pre-index variable producers (which variables does each node produce?)
+        // Step 1: Pre-index variable producers and materialized table names
         let mut variable_producers: HashMap<String, NodeIndex> = HashMap::new();
+        let mut table_producers: HashMap<String, NodeIndex> = HashMap::new();
         for &idx in &node_indices {
             let node = &workflow.graph[idx];
+            if node.materialize {
+                let table_name = format!("node_{}", &node.id.to_string()[..8]);
+                table_producers.insert(table_name, idx);
+            }
             if node.type_id == "core.flow.table_to_variable" {
                 // table_to_variable produces variables based on input schema mapping
                 // For order inference, we treat it as a general variable producer
@@ -87,11 +92,29 @@ impl WorkflowCompiler {
             }
         }
 
-        // Step 2: Add implicit edges for variable dependencies
+        // Step 2: Add implicit edges for variable and SQL table dependencies
         for &consumer_idx in &node_indices {
             let consumer = &workflow.graph[consumer_idx];
             let config_str = self.get_config_str(consumer);
             
+            // Check for node_xxx table references in SQL nodes
+            if consumer.type_id == "core.sql" {
+                if let Some(query) = consumer.config["query"].as_str() {
+                    for (table_name, &producer_idx) in &table_producers {
+                        if consumer_idx != producer_idx && query.contains(table_name) {
+                            aug_graph.add_edge(
+                                producer_idx,
+                                consumer_idx,
+                                crate::core::graph::EdgeInstance {
+                                    source_port: 0,
+                                    target_port: 888, // Special port for SQL table dependency
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
             // Check for ${context.*} dependencies
             if config_str.contains("${context.") {
                 // If consumer uses ${context.VAR}, add edge from producer of VAR
@@ -132,6 +155,7 @@ impl WorkflowCompiler {
         let ctx = SessionContext::new();
         let planner = crate::core::engine::SwanFlowPlanner {
             event_tx: tokio::sync::mpsc::unbounded_channel().0,
+            ctx: ctx.clone(),
         };
         let physical_planner = Arc::new(
             datafusion::physical_planner::DefaultPhysicalPlanner::with_extension_planners(vec![
@@ -341,9 +365,12 @@ impl WorkflowCompiler {
 
                 let mut wrapped_outputs = compiled_node_outputs;
                 if node.materialize && !wrapped_outputs.is_empty() {
+                    let table_name = format!("node_{}", &node.id.to_string()[..8]);
                     for plan in wrapped_outputs.values_mut() {
                         *plan = LogicalPlan::Extension(Extension {
                             node: Arc::new(MaterializerLogical {
+                                node_id: node.id,
+                                table_name: table_name.clone(),
                                 cache_key: cache_key.clone(),
                                 input: plan.clone(),
                             }),
@@ -390,12 +417,14 @@ impl WorkflowCompiler {
         }
 
         if !has_output_nodes {
-            // Collect all terminal nodes (nodes with no outgoing edges)
+            // Collect all terminal nodes (nodes with no outgoing edges or explicitly materialized)
             let mut port_counter = 0;
             for &node_idx in &order {
-                if workflow.graph.edges_directed(node_idx, Outgoing).count() == 0 {
-                    let node_id = workflow.graph[node_idx].id;
-                    if let Some(node_outputs) = self.compiled_outputs.get(&node_id) {
+                let node = &workflow.graph[node_idx];
+                let has_no_outgoing = workflow.graph.edges_directed(node_idx, Outgoing).count() == 0;
+
+                if has_no_outgoing || node.materialize {
+                    if let Some(node_outputs) = self.compiled_outputs.get(&node.id) {
                         for plan in node_outputs.values() {
                             final_outputs.insert(port_counter, plan.clone());
                             port_counter += 1;

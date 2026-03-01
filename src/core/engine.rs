@@ -26,6 +26,7 @@ use crate::nodes::NodeEvent;
 /// Custom planner to handle StateProbe, Materializer, and Excel translation from logical to physical.
 pub struct SwanFlowPlanner {
     pub event_tx: mpsc::UnboundedSender<NodeEvent>,
+    pub ctx: SessionContext,
 }
 
 #[async_trait]
@@ -47,8 +48,11 @@ impl ExtensionPlanner for SwanFlowPlanner {
         }
         if let Some(materializer) = node.as_any().downcast_ref::<MaterializerLogical>() {
             return Ok(Some(Arc::new(MaterializerExec::new(
+                materializer.node_id,
+                materializer.table_name.clone(),
                 materializer.cache_key.clone(),
                 physical_inputs[0].clone(),
+                self.ctx.clone(),
             ))));
         }
         if let Some(excel) = node.as_any().downcast_ref::<ExcelScanLogical>() {
@@ -131,6 +135,8 @@ pub struct WorkflowMetadata {
     pub profiles: HashMap<Uuid, RecordBatch>,
 }
 
+use duckdb::Connection;
+
 pub struct SwanFlowEngine {
     pub ctx: SessionContext,
     pub registry: Arc<NodeRegistry>,
@@ -138,7 +144,25 @@ pub struct SwanFlowEngine {
 
 impl SwanFlowEngine {
     pub fn new(registry: Arc<NodeRegistry>) -> Self {
+        let cache_dir = "target/swanflow_cache";
+        std::fs::create_dir_all(cache_dir).ok();
+
         let ctx = SessionContext::new();
+
+        // Initialize metadata table in DuckDB directly
+        let metadata_path = format!("{}/metadata.duckdb", cache_dir);
+        let conn = Connection::open(&metadata_path).expect("Failed to open DuckDB metadata");
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS flow_metadata (
+                node_id TEXT PRIMARY KEY,
+                table_name TEXT,
+                parquet_path TEXT,
+                schema_json TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        ).expect("Failed to create metadata table");
+
         Self { ctx, registry }
     }
 
@@ -162,6 +186,20 @@ impl SwanFlowEngine {
     ) -> anyhow::Result<mpsc::UnboundedReceiver<NodeEvent>> {
         let (tx, rx) = mpsc::unbounded_channel();
 
+        // Register existing tables from DuckDB metadata to SessionContext
+        let cache_dir = "target/swanflow_cache";
+        if let Ok(conn) = Connection::open(format!("{}/metadata.duckdb", cache_dir)) {
+            let mut stmt = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                if let Ok((table_name, path)) = row {
+                    self.ctx.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
+                }
+            }
+        }
+
         let mut compiler = WorkflowCompiler::new(true).with_event_tx(tx.clone());
         let terminal_outputs = compiler.compile(workflow, &self.registry, None).await?;
         
@@ -169,45 +207,67 @@ impl SwanFlowEngine {
             anyhow::bail!("Workflow has no outputs (no terminal nodes or core.output nodes)");
         }
 
-        let planner = SwanFlowPlanner { event_tx: tx.clone() };
-        let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(planner)]));
-        let query_planner = Arc::new(SwanFlowQueryPlanner { physical_planner });
-        
-        let state = SessionStateBuilder::new_from_existing(self.ctx.state())
-            .with_query_planner(query_planner)
-            .build();
-
-        let mut plans = Vec::new();
-        for (port, logical_plan) in terminal_outputs {
-            let physical_plan = state.create_physical_plan(&logical_plan).await?;
-            plans.push((port, physical_plan));
-        }
-
         let ctx_clone = self.ctx.clone();
         let tx_clone = tx.clone();
-        
+        let planner = SwanFlowPlanner { event_tx: tx.clone(), ctx: self.ctx.clone() };
+        let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(planner)]));
+        let query_planner = Arc::new(SwanFlowQueryPlanner { physical_planner });
+
         tokio::spawn(async move {
-            let mut join_set = tokio::task::JoinSet::new();
-            
-            for (port, physical_plan) in plans {
-                let task_ctx = ctx_clone.task_ctx();
-                let tx = tx_clone.clone();
-                join_set.spawn(async move {
-                    let result = datafusion::physical_plan::collect(physical_plan, task_ctx).await;
-                    if let Err(e) = result {
-                        let msg = format!("Terminal execution (port {}) error: {}", port, e);
-                        eprintln!("{}", msg);
-                        let _ = tx.send(NodeEvent::Error { 
-                            node_id: Uuid::nil(), // Placeholder for general terminal error
-                            message: msg 
+            for (port, logical_plan) in terminal_outputs {
+                // RE-SCAN Metadata DB to register any newly materialized tables
+                // Do this in a synchronous block to avoid non-Send issues with DuckDB handles
+                let cache_dir = "target/swanflow_cache";
+                let tables_to_register = {
+                    let mut tables = Vec::new();
+                    if let Ok(conn) = Connection::open(format!("{}/metadata.duckdb", cache_dir)) {
+                        if let Ok(mut stmt) = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata") {
+                            if let Ok(rows) = stmt.query_map([], |row| {
+                                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                            }) {
+                                for row in rows {
+                                    if let Ok(res) = row {
+                                        tables.push(res);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tables
+                };
+
+                for (table_name, path) in tables_to_register {
+                    // Force register in the session context
+                    ctx_clone.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
+                }
+
+                let state = SessionStateBuilder::new_from_existing(ctx_clone.state())
+                    .with_query_planner(query_planner.clone())
+                    .build();
+
+                match state.create_physical_plan(&logical_plan).await {
+                    Ok(physical_plan) => {
+                        let task_ctx = ctx_clone.task_ctx();
+                        // SEQUENTIAL COLLECT: ensure one finishes before next plans
+                        let result = datafusion::physical_plan::collect(physical_plan, task_ctx).await;
+                        
+                        // Small yield to let async table registration catch up
+                        tokio::task::yield_now().await;
+                        
+                        if let Err(e) = result {
+                            let msg = format!("Terminal execution (port {}) error: {}", port, e);
+                            let _ = tx_clone.send(NodeEvent::Error { 
+                                node_id: Uuid::nil(),
+                                message: msg 
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx_clone.send(NodeEvent::Error { 
+                            node_id: Uuid::nil(),
+                            message: format!("Planning error for port {}: {}", port, e)
                         });
                     }
-                });
-            }
-            
-            while let Some(res) = join_set.join_next().await {
-                if let Err(e) = res {
-                    eprintln!("Task join error: {}", e);
                 }
             }
         });
