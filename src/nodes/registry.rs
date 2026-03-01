@@ -47,6 +47,7 @@ impl NodeRegistry {
         use crate::nodes::boundary::{InputNode, OutputNode, DuckDBExtensionNode};
         use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode, ProfilerNode, VariableCreatorNode, TableToVariableNode};
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
+        use crate::nodes::ai::mcp::McpNode;
 
         self.register_node(Arc::new(SqlNode));
         self.register_node(Arc::new(CsvReadNode));
@@ -72,6 +73,9 @@ impl NodeRegistry {
         self.register_node(Arc::new(PythonNode));
         // Note: PythonUdfNode is registered but currently returns empty plan (stub implementation)
         self.register_node(Arc::new(PythonUdfNode));
+        // Register common MCP tools for tutorial support
+        self.register_node(Arc::new(McpNode { tool_name: "google_search".to_string() }));
+    }
 }
 
 impl Default for NodeRegistry {

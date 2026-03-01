@@ -17,15 +17,15 @@ graph:
         id: "00000000-0000-0000-0003-000000000003"
         graph:
           nodes:
-            - id: "sub-in"
+            - id: "00000000-0000-0000-0003-000000000011"
               type_id: "core.input"
               config: { port_index: 0 }
               state: "Configured"
-            - id: "sub-filter"
+            - id: "00000000-0000-0000-0003-000000000012"
               type_id: "core.transform.filter"
               config: { expr: "amount > 150" }
               state: "Configured"
-            - id: "sub-out"
+            - id: "00000000-0000-0000-0003-000000000013"
               type_id: "core.output"
               config: { port_index: 0 }
               state: "Configured"

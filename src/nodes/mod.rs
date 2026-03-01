@@ -50,6 +50,7 @@ pub enum NodeState {
 pub enum NodeEvent {
     StateChanged { node_id: Uuid, state: NodeState },
     Progress { node_id: Uuid, percentage: f32 },
+    Error { node_id: Uuid, message: String },
 }
 
 /// Metadata inferred before full execution.

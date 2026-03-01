@@ -67,12 +67,11 @@ impl Workflow {
         target: NodeIndex,
         edge: EdgeInstance,
     ) -> Result<()> {
-        let mut test_graph = self.graph.clone();
-        test_graph.add_edge(source, target, edge.clone());
-        if petgraph::algo::is_cyclic_directed(&test_graph) {
+        let edge_idx = self.graph.add_edge(source, target, edge);
+        if petgraph::algo::is_cyclic_directed(&self.graph) {
+            self.graph.remove_edge(edge_idx);
             return Err(anyhow!("Adding this edge would create a cycle"));
         }
-        self.graph.add_edge(source, target, edge);
         Ok(())
     }
 

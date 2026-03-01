@@ -36,7 +36,7 @@ impl ExcelReadNode {
             // Boolean type  
             Bool(_) => DataType::Boolean,
             // DateTime - store as string for now (could be improved with proper datetime type)
-            DateTime(_) => DataType::Utf8,
+            DateTime(_) | DateTimeIso(_) | DurationIso(_) => DataType::Utf8,
             // Error types - convert to null
             Error(_) => DataType::Null,
         }
@@ -363,15 +363,19 @@ impl NodeBehavior for DuckDBReadNode {
         let mut fields = Vec::new();
         for i in 0..column_count {
             let duckdb_type = stmt.column_type(i);
-            let arrow_type = match duckdb_type {
-                duckdb::types::Type::INT64 => DataType::Int64,
-                duckdb::types::Type::FLOAT => DataType::Float64,
-                duckdb::types::Type::DOUBLE => DataType::Float64,
-                duckdb::types::Type::VARCHAR => DataType::Utf8,
-                duckdb::types::Type::BOOLEAN => DataType::Boolean,
+            // duckdb-rs might return its own re-exported arrow DataType
+            // Convert it to our arrow crate's DataType by string representation if needed, 
+            // or better, if it's the same major version, they might be compatible.
+            // For now, let's use a more robust way to get the type if the enum match is failing.
+            let arrow_type = match format!("{:?}", duckdb_type).as_str() {
+                "Int64" | "BigInt" => DataType::Int64,
+                "Float32" | "Float" => DataType::Float32,
+                "Float64" | "Double" => DataType::Float64,
+                "Utf8" | "Varchar" | "VarChar" => DataType::Utf8,
+                "Boolean" | "Bool" => DataType::Boolean,
                 _ => DataType::Utf8,
             };
-            fields.push(Field::new(stmt.column_name(i), arrow_type, true));
+            fields.push(Field::new(stmt.column_name(i)?, arrow_type, true));
         }
         
         let schema = Arc::new(Schema::new(fields));

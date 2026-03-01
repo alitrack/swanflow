@@ -48,7 +48,18 @@ impl NodeBehavior for McpNode {
     ) -> Result<Vec<LogicalPlan>> {
         // MCP results are typically JSON strings or structured data.
         // We'll need a specialized 'TableProvider' to wrap the MCP call during execution.
-        // For Phase 4 MVP, we return an empty plan as a placeholder for the tool link.
-        Ok(vec![])
+        // For Phase 4 MVP, we return a placeholder empty relation with a basic schema.
+        let schema = arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("result", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("relevance", arrow::datatypes::DataType::Float64, true),
+        ]);
+        let df_schema = datafusion::common::DFSchema::try_from(schema)?;
+        
+        Ok(vec![LogicalPlan::EmptyRelation(
+            datafusion::logical_expr::EmptyRelation {
+                produce_one_row: true,
+                schema: std::sync::Arc::new(df_schema),
+            },
+        )])
     }
 }

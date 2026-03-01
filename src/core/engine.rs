@@ -137,11 +137,12 @@ impl SwanFlowEngine {
     ) -> anyhow::Result<mpsc::UnboundedReceiver<NodeEvent>> {
         let (tx, rx) = mpsc::unbounded_channel();
 
-        let mut compiler = WorkflowCompiler::new(true);
+        let mut compiler = WorkflowCompiler::new(true).with_event_tx(tx.clone());
         let terminal_outputs = compiler.compile(workflow, &self.registry, None).await?;
         
-        let final_plan = terminal_outputs.values().next()
-            .ok_or_else(|| anyhow::anyhow!("Workflow has no output"))?;
+        if terminal_outputs.is_empty() {
+            anyhow::bail!("Workflow has no outputs (no terminal nodes or core.output nodes)");
+        }
 
         let planner = SwanFlowPlanner { event_tx: tx.clone() };
         let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(planner)]));
@@ -151,14 +152,38 @@ impl SwanFlowEngine {
             .with_query_planner(query_planner)
             .build();
 
-        let physical_plan = state.create_physical_plan(final_plan).await?;
+        let mut plans = Vec::new();
+        for (port, logical_plan) in terminal_outputs {
+            let physical_plan = state.create_physical_plan(&logical_plan).await?;
+            plans.push((port, physical_plan));
+        }
 
         let ctx_clone = self.ctx.clone();
+        let tx_clone = tx.clone();
+        
         tokio::spawn(async move {
-            let task_ctx = ctx_clone.task_ctx();
-            let result = datafusion::physical_plan::collect(physical_plan, task_ctx).await;
-            if let Err(e) = result {
-                eprintln!("Workflow execution error: {}", e);
+            let mut join_set = tokio::task::JoinSet::new();
+            
+            for (port, physical_plan) in plans {
+                let task_ctx = ctx_clone.task_ctx();
+                let tx = tx_clone.clone();
+                join_set.spawn(async move {
+                    let result = datafusion::physical_plan::collect(physical_plan, task_ctx).await;
+                    if let Err(e) = result {
+                        let msg = format!("Terminal execution (port {}) error: {}", port, e);
+                        eprintln!("{}", msg);
+                        let _ = tx.send(NodeEvent::Error { 
+                            node_id: Uuid::nil(), // Placeholder for general terminal error
+                            message: msg 
+                        });
+                    }
+                });
+            }
+            
+            while let Some(res) = join_set.join_next().await {
+                if let Err(e) = res {
+                    eprintln!("Task join error: {}", e);
+                }
             }
         });
 

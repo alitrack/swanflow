@@ -3,12 +3,12 @@ description: "Demonstrates how to enable materialization to cache intermediate r
 id: "00000000-0000-0000-0000-000000000005"
 graph:
   nodes:
-    - id: "heavy_reader"
+    - id: "00000000-0000-0000-0005-000000000001"
       type_id: "core.io.csv"
       config: { path: "users.csv" }
       state: "Configured"
       materialize: true  # This will save to target/swanflow_cache/ after first run
-    - id: "filter_node"
+    - id: "00000000-0000-0000-0005-000000000002"
       type_id: "core.transform.filter"
       config: { expr: "age < 40" }
       state: "Configured"

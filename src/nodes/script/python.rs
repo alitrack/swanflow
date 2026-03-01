@@ -21,6 +21,8 @@ use futures::Stream;
 use futures::StreamExt;
 use serde_json::Value as JsonValue;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyModule};
+use pyo3::ffi::c_str;
 use pyo3_arrow::PyRecordBatch;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
@@ -140,23 +142,34 @@ impl ExecutionPlan for PythonExec {
         let compiled_fn = Python::with_gil(|py| -> Result<Py<PyAny>> {
             let script = &self.script;
             
-            // Security: Check for dangerous imports
-            let dangerous_patterns = [
-                "import os", "import sys", "import subprocess", "import socket",
-                "import requests", "import urllib", "import http",
-                "import pickle", "import marshal", "import code",
-                "exec(", "eval(", "compile(",
-                "__import__", "os.system", "os.popen",
-                "subprocess.", "socket.",
-            ];
+            // Define restricted import function
+            let restricted_mod = PyModule::from_code(py, c_str!(r#"
+import sys
+
+def make_restricted_import(original_import):
+    def restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
+        dangerous = [
+            "os", "sys", "subprocess", "socket", "requests", "urllib", "http",
+            "pickle", "marshal", "code", "builtins", "importlib", "pathlib"
+        ]
+        # Check if any dangerous module is being imported
+        for d in dangerous:
+            if name == d or name.startswith(d + "."):
+                raise ImportError(f"Access to module '{name}' is restricted for security reasons")
+        
+        return original_import(name, globals, locals, fromlist, level)
+    return restricted_import
+"#), c_str!("restricted_import.py"), c_str!("restricted_import"))?;
+            let make_restricted_import_fn = restricted_mod.getattr("make_restricted_import")?;
             
-            for pattern in dangerous_patterns {
-                if script.contains(pattern) {
-                    tracing::warn!("Potential dangerous Python pattern detected: {}", pattern);
-                    // In production, this should block the execution
-                    // For now, we log and continue but warn users
-                }
-            }
+            // Set up the globals with our restricted __import__
+            let builtins = PyModule::import(py, "builtins")?;
+            let original_import = builtins.getattr("__import__")?;
+            
+            let restricted_import_fn = make_restricted_import_fn.call1((original_import.clone(),))?;
+            
+            let locals = PyDict::new(py);
+            locals.set_item("__import__", restricted_import_fn)?;
             
             let full_script = format!(
                 "import pyarrow as pa\n\
@@ -166,23 +179,19 @@ impl ExecutionPlan for PythonExec {
                 script.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("\n")
             );
             
-            // Validate UTF-8
-            let code = CString::new(full_script)
-                .map_err(|_| anyhow!("Python script contains invalid UTF-8 characters"))?;
-            let file_name = CString::new("swanflow_transform.py")
-                .map_err(|_| anyhow!("Invalid filename"))?;
-            let mod_name = CString::new("swanflow_transform")
-                .map_err(|_| anyhow!("Invalid module name"))?;
+            let module = PyModule::from_code(py, &CString::new(full_script)?, c_str!("swanflow_transform.py"), c_str!("swanflow_transform"))?;
             
-            let module = PyModule::from_code(py, &code, &file_name, &mod_name)
-                .map_err(|e| anyhow!("Python compilation error: {}", e))?;
+            // Update module's __builtins__ to use our restricted import
+            let mod_dict = module.dict();
+            mod_dict.set_item("__builtins__", locals)?;
+            
             let fun = module.getattr("transform")
                 .map_err(|_| anyhow!("Python script must define 'transform(batch)' function"))?.into();
             
             tracing::debug!("Python script compiled successfully ({} bytes)", script.len());
             Ok(fun)
         }).map_err(|e| datafusion::error::DataFusionError::Execution(format!(
-            "Python script security/comilation error: {}", e
+            "Python script security/compilation error: {}", e
         )))?;
 
         Ok(Box::pin(PythonStream {
@@ -213,7 +222,13 @@ impl Stream for PythonStream {
                 let result = Python::with_gil(|py| -> Result<RecordBatch> {
                     let py_batch = PyRecordBatch::from(batch);
                     let result_py_obj = compiled_fn.call1(py, (py_batch,))?;
-                    let result_py_batch: PyRecordBatch = result_py_obj.extract(py)?;
+                    
+                    if result_py_obj.is_none(py) {
+                        anyhow::bail!("Python transform function must return a PyRecordBatch, but returned None");
+                    }
+                    
+                    let result_py_batch: PyRecordBatch = result_py_obj.extract(py)
+                        .map_err(|e| anyhow!("Failed to extract PyRecordBatch from Python return value: {}. Ensure your script returns the result (e.g., 'return batch').", e))?;
                     Ok(result_py_batch.into())
                 });
 

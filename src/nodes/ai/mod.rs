@@ -52,7 +52,6 @@ User Request: {}",
     /// Safely extracts JSON from LLM response, handling various markdown formats.
     /// Made pub for testing.
     pub fn extract_json_from_response(response: &str) -> Result<&str> {
-    fn extract_json_from_response(response: &str) -> Result<&str> {
         // Try ```json ... ``` format first
         if let Some(start) = response.find("```json") {
             let after_json_start = &response[start + 7..]; // Skip "```json"

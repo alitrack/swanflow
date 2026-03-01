@@ -18,6 +18,9 @@ use crate::core::observer::{MaterializerLogical, StateProbeLogical};
 use crate::core::templating::TemplateEngine;
 use crate::nodes::registry::NodeRegistry;
 
+use tokio::sync::mpsc;
+use crate::nodes::{NodeEvent, NodeState};
+
 /// The WorkflowCompiler is responsible for transforming a logical Workflow DAG
 /// into a DataFusion LogicalPlan.
 pub struct WorkflowCompiler {
@@ -29,6 +32,7 @@ pub struct WorkflowCompiler {
     pub dynamic_context: HashMap<String, JsonValue>,
     // Cache for serialized config to avoid repeated JSON serialization
     config_cache: HashMap<Uuid, String>,
+    pub event_tx: Option<mpsc::UnboundedSender<NodeEvent>>,
 }
 
 impl WorkflowCompiler {
@@ -41,7 +45,13 @@ impl WorkflowCompiler {
             inject_probes,
             dynamic_context: HashMap::new(),
             config_cache: HashMap::new(),
+            event_tx: None,
         }
+    }
+
+    pub fn with_event_tx(mut self, tx: mpsc::UnboundedSender<NodeEvent>) -> Self {
+        self.event_tx = Some(tx);
+        self
     }
     
     /// Get or compute serialized config string for a node.
@@ -54,69 +64,68 @@ impl WorkflowCompiler {
         config_str
     }
 
-    pub fn get_execution_order(&self, workflow: &Workflow) -> Result<Vec<NodeIndex>> {
+    pub fn get_execution_order(&mut self, workflow: &Workflow) -> Result<Vec<NodeIndex>> {
         let mut aug_graph = workflow.graph.clone();
-        let nodes: Vec<(NodeIndex, &NodeInstance)> = workflow
-            .graph
-            .node_indices()
-            .map(|idx| (idx, &workflow.graph[idx]))
-            .collect();
+        let node_indices: Vec<NodeIndex> = workflow.graph.node_indices().collect();
 
-        for (i_idx, i_node) in &nodes {
-            for (j_idx, j_node) in &nodes {
-                if i_idx == j_idx {
-                    continue;
+        // Step 1: Pre-index variable producers (which variables does each node produce?)
+        let mut variable_producers: HashMap<String, NodeIndex> = HashMap::new();
+        for &idx in &node_indices {
+            let node = &workflow.graph[idx];
+            if node.type_id == "core.flow.table_to_variable" {
+                // table_to_variable produces variables based on input schema mapping
+                // For order inference, we treat it as a general variable producer
+                // Since we don't know the exact variable names yet without compilation,
+                // we'll use a special marker to indicate it produces "context" variables.
+                // However, for simplicity, let's just mark it by its type.
+            } else if node.type_id == "core.flow.variable_creator" {
+                if let Some(vars) = node.config["variables"].as_object() {
+                    for var in vars.keys() {
+                        variable_producers.insert(var.clone(), idx);
+                    }
                 }
-                if self.is_variable_dependent(i_node, j_node) {
-                    aug_graph.add_edge(
-                        *j_idx,
-                        *i_idx,
-                        crate::core::graph::EdgeInstance {
-                            source_port: 0,
-                            target_port: 999,
-                        },
-                    );
+            }
+        }
+
+        // Step 2: Add implicit edges for variable dependencies
+        for &consumer_idx in &node_indices {
+            let consumer = &workflow.graph[consumer_idx];
+            let config_str = self.get_config_str(consumer);
+            
+            // Check for ${context.*} dependencies
+            if config_str.contains("${context.") {
+                // If consumer uses ${context.VAR}, add edge from producer of VAR
+                for (var, &producer_idx) in &variable_producers {
+                    if consumer_idx != producer_idx && config_str.contains(&format!("${{context.{}}}", var)) {
+                        aug_graph.add_edge(
+                            producer_idx,
+                            consumer_idx,
+                            crate::core::graph::EdgeInstance {
+                                source_port: 0,
+                                target_port: 999, // Special port for variable dependency
+                            },
+                        );
+                    }
+                }
+
+                // Add edges from ALL table_to_variable nodes since they produce dynamic variables
+                for &producer_idx in &node_indices {
+                    if consumer_idx != producer_idx && workflow.graph[producer_idx].type_id == "core.flow.table_to_variable" {
+                        aug_graph.add_edge(
+                            producer_idx,
+                            consumer_idx,
+                            crate::core::graph::EdgeInstance {
+                                source_port: 0,
+                                target_port: 999,
+                            },
+                        );
+                    }
                 }
             }
         }
 
         toposort(&aug_graph, None)
             .map_err(|_| anyhow!("Workflow contains cycles (possibly via variable dependencies) and cannot be compiled"))
-    }
-
-    /// Check if consumer node depends on variables produced by producer node.
-    /// This is used to add implicit edges for variable dependencies.
-    fn is_variable_dependent(&self, consumer: &NodeInstance, producer: &NodeInstance) -> bool {
-        let config_str = serde_json::to_string(&consumer.config).unwrap_or_default();
-        
-        // Variable-producing node types
-        let variable_producer_types = [
-            "core.flow.table_to_variable",
-            "core.flow.variable_creator",
-        ];
-        
-        // Check if producer is a variable-producing node
-        if !variable_producer_types.contains(&producer.type_id.as_str()) {
-            return false;
-        }
-        
-        // For table_to_variable: check if consumer uses ${context.*}
-        if producer.type_id == "core.flow.table_to_variable" {
-            return config_str.contains("${context.");
-        }
-        
-        // For variable_creator: check if consumer uses any of the created variables
-        if producer.type_id == "core.flow.variable_creator" {
-            if let Some(vars) = producer.config["variables"].as_object() {
-                for var in vars.keys() {
-                    if config_str.contains(&format!("${{context.{}}}", var)) {
-                        return true;
-                    }
-                }
-            }
-        }
-        
-        false
     }
 
     async fn execute_plan(&self, plan: &LogicalPlan) -> Result<Vec<RecordBatch>> {
@@ -191,12 +200,21 @@ impl WorkflowCompiler {
             self.node_hashes.insert(node.id, cache_key.clone());
 
             if node.type_id == "core.flow.variable_creator" {
+                if let Some(ref tx) = self.event_tx {
+                    let _ = tx.send(NodeEvent::StateChanged { node_id: node.id, state: NodeState::Running });
+                }
                 if let Some(vars) = resolved_config["variables"].as_object() {
                     for (k, v) in vars {
                         self.dynamic_context.insert(k.clone(), v.clone());
                     }
                 }
+                if let Some(ref tx) = self.event_tx {
+                    let _ = tx.send(NodeEvent::StateChanged { node_id: node.id, state: NodeState::Executed });
+                }
             } else if node.type_id == "core.flow.table_to_variable" {
+                if let Some(ref tx) = self.event_tx {
+                    let _ = tx.send(NodeEvent::StateChanged { node_id: node.id, state: NodeState::Running });
+                }
                 if let Some(input_plan) = inputs.get(&0) {
                     let results = self.execute_plan(input_plan).await?;
                     if let Some(batch) = results.first() {
@@ -254,6 +272,9 @@ impl WorkflowCompiler {
                             }
                         }
                     }
+                }
+                if let Some(ref tx) = self.event_tx {
+                    let _ = tx.send(NodeEvent::StateChanged { node_id: node.id, state: NodeState::Executed });
                 }
             }
 
@@ -367,11 +388,19 @@ impl WorkflowCompiler {
                 }
             }
         }
+
         if !has_output_nodes {
-            if let Some(&last_idx) = order.last() {
-                let last_id = workflow.graph[last_idx].id;
-                if let Some(node_outputs) = self.compiled_outputs.get(&last_id) {
-                    return Ok(node_outputs.clone());
+            // Collect all terminal nodes (nodes with no outgoing edges)
+            let mut port_counter = 0;
+            for &node_idx in &order {
+                if workflow.graph.edges_directed(node_idx, Outgoing).count() == 0 {
+                    let node_id = workflow.graph[node_idx].id;
+                    if let Some(node_outputs) = self.compiled_outputs.get(&node_id) {
+                        for plan in node_outputs.values() {
+                            final_outputs.insert(port_counter, plan.clone());
+                            port_counter += 1;
+                        }
+                    }
                 }
             }
         }

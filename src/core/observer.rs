@@ -382,5 +382,8 @@ impl Stream for MaterializingStream {
                     }
                 }
                 Poll::Ready(None)
+            }
+            other => other,
+        }
     }
 }
