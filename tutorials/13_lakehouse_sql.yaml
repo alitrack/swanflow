@@ -4,24 +4,24 @@ id: "00000000-0000-0000-0013-000000000001"
 graph:
   nodes:
     # Producer Path
-    - id: "00000000-0000-0000-0013-000000000002"
+    - id: "a1a1a1a1-0000-0000-0013-000000000002"
       type_id: "core.sql"
       config:
         query: "SELECT 'Electronics' as category, 5000 as revenue UNION ALL SELECT 'Books', 2000"
       state: "Configured"
-      materialize: true # This creates 'node_00000000'
+      materialize: true # This creates 'node_a1a1a1a1'
 
     # Consumer Path (Disconnected)
-    - id: "00000000-0000-0000-0013-000000000003"
+    - id: "b2b2b2b2-0000-0000-0013-000000000003"
       type_id: "core.sql"
       config:
         # Reference the producer by its short ID prefix
-        query: "SELECT * FROM node_00000000 WHERE revenue > 3000"
+        query: "SELECT * FROM node_a1a1a1a1 WHERE revenue > 3000"
       state: "Configured"
       materialize: false
 
     # Output for verification
-    - id: "00000000-0000-0000-0013-000000000004"
+    - id: "c3c3c3c3-0000-0000-0013-000000000004"
       type_id: "core.output"
       config: {}
       state: "Configured"

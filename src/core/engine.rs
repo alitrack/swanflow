@@ -18,6 +18,7 @@ use crate::core::graph::Workflow;
 use crate::core::compiler::WorkflowCompiler;
 use crate::core::observer::{StateProbeLogical, StateProbeExec, MaterializerLogical, MaterializerExec};
 use crate::core::datasource::{ExcelScanLogical, ExcelScanExec, ExcelSinkLogical, ExcelSinkExec, ExcelTemplateSinkLogical, ExcelTemplateExec, ExcelReportSinkLogical, ExcelReportExec};
+use crate::nodes::sql::SqlProxyLogical;
 use crate::nodes::script::python::{PythonLogical, PythonExec};
 use crate::nodes::registry::NodeRegistry;
 use crate::nodes::NodeEvent;
@@ -27,12 +28,16 @@ use duckdb::Connection;
 pub struct SwanFlowEngine {
     pub ctx: SessionContext,
     pub registry: Arc<NodeRegistry>,
+    pub cache_dir: String,
 }
 
 impl SwanFlowEngine {
     pub fn new(registry: Arc<NodeRegistry>) -> Self {
-        let cache_dir = "target/swanflow_cache";
-        std::fs::create_dir_all(cache_dir).ok();
+        Self::with_cache_dir(registry, "target/swanflow_cache".to_string())
+    }
+
+    pub fn with_cache_dir(registry: Arc<NodeRegistry>, cache_dir: String) -> Self {
+        std::fs::create_dir_all(&cache_dir).ok();
         
         let ctx = SessionContext::new();
         
@@ -50,11 +55,11 @@ impl SwanFlowEngine {
             [],
         ).expect("Failed to create metadata table");
 
-        Self { ctx, registry }
+        Self { ctx, registry, cache_dir }
     }
 
     pub async fn infer_metadata(&self, workflow: &Workflow) -> anyhow::Result<WorkflowMetadata> {
-        let mut compiler = WorkflowCompiler::new(false);
+        let mut compiler = WorkflowCompiler::with_cache_dir(false, self.cache_dir.clone());
         compiler.compile(workflow, &self.registry, None).await?;
         
         Ok(WorkflowMetadata {
@@ -71,7 +76,7 @@ impl SwanFlowEngine {
         let (tx, rx) = mpsc::unbounded_channel();
 
         // Register existing tables from DuckDB metadata to SessionContext
-        let cache_dir = "target/swanflow_cache";
+        let cache_dir = self.cache_dir.clone();
         if let Ok(conn) = Connection::open(format!("{}/metadata.duckdb", cache_dir)) {
             let mut stmt = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata")?;
             let rows = stmt.query_map([], |row| {
@@ -84,7 +89,7 @@ impl SwanFlowEngine {
             }
         }
 
-        let mut compiler = WorkflowCompiler::new(true).with_event_tx(tx.clone());
+        let mut compiler = WorkflowCompiler::with_cache_dir(true, self.cache_dir.clone()).with_event_tx(tx.clone());
         let terminal_outputs = compiler.compile(workflow, &self.registry, None).await?;
         
         if terminal_outputs.is_empty() {
@@ -92,17 +97,17 @@ impl SwanFlowEngine {
         }
 
         let tx_clone = tx.clone();
-        let planner = SwanFlowPlanner { event_tx: tx.clone(), ctx: self.ctx.clone() };
+        let planner = SwanFlowPlanner { event_tx: tx.clone(), ctx: self.ctx.clone(), cache_dir: self.cache_dir.clone() };
         let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(planner)]));
         let query_planner = Arc::new(SwanFlowQueryPlanner { physical_planner });
 
         let ctx = self.ctx.clone();
+        let current_cache_dir = self.cache_dir.clone();
         tokio::spawn(async move {
             for (port, logical_plan) in terminal_outputs {
-                let cache_dir = "target/swanflow_cache";
                 let tables_to_register = {
                     let mut tables = Vec::new();
-                    if let Ok(conn) = Connection::open(format!("{}/metadata.duckdb", cache_dir)) {
+                    if let Ok(conn) = Connection::open(format!("{}/metadata.duckdb", current_cache_dir)) {
                         if let Ok(mut stmt) = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata") {
                             if let Ok(rows) = stmt.query_map([], |row| {
                                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -157,6 +162,13 @@ match state.create_physical_plan(&logical_plan).await {
 pub struct SwanFlowPlanner {
     pub event_tx: mpsc::UnboundedSender<NodeEvent>,
     pub ctx: SessionContext,
+    pub cache_dir: String,
+}
+
+impl std::fmt::Debug for SwanFlowPlanner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SwanFlowPlanner").field("cache_dir", &self.cache_dir).finish()
+    }
 }
 
 #[async_trait]
@@ -177,11 +189,19 @@ impl ExtensionPlanner for SwanFlowPlanner {
             ))));
         }
         if let Some(materializer) = node.as_any().downcast_ref::<MaterializerLogical>() {
+            let input = physical_inputs[0].clone();
+            // Ensure we coalesce partitions before materializing to a single file
+            let input = if input.properties().output_partitioning().partition_count() > 1 {
+                Arc::new(datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input))
+            } else {
+                input
+            };
             return Ok(Some(Arc::new(MaterializerExec::new(
                 materializer.node_id,
                 materializer.table_name.clone(),
                 materializer.cache_key.clone(),
-                physical_inputs[0].clone(),
+                materializer.cache_dir.clone(),
+                input,
                 self.ctx.clone(),
             ))));
         }
@@ -223,6 +243,25 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 report_sink.charts.clone(),
                 physical_inputs.to_vec(),
             ))));
+        }
+        if let Some(proxy) = node.as_any().downcast_ref::<SqlProxyLogical>() {
+            // Late-binding: Register inputs and parse SQL now
+            tracing::debug!("Planning SqlProxy for node {}, query: {}", proxy.node_id, proxy.query);
+            for (i, input_plan) in proxy.inputs.iter().enumerate() {
+                let table_name = format!("input_{}", i);
+                let df = datafusion::prelude::DataFrame::new(self.ctx.state(), input_plan.clone());
+                self.ctx.register_table(&table_name, df.into_view()).map_err(|e| {
+                    datafusion::error::DataFusionError::Plan(format!("Failed to register input_{}: {}", i, e))
+                })?;
+            }
+
+            let df = self.ctx.sql(&proxy.query).await.map_err(|e| {
+                tracing::error!("Late-binding SQL error for node {}: {}", proxy.node_id, e);
+                datafusion::error::DataFusionError::Plan(format!("Late-binding SQL error: {}", e))
+            })?;
+            
+            let logical_plan = df.into_optimized_plan()?;
+            return _planner.create_physical_plan(&logical_plan, _session_state).await.map(Some);
         }
         if let Some(python) = node.as_any().downcast_ref::<PythonLogical>() {
             return Ok(Some(Arc::new(PythonExec::new(

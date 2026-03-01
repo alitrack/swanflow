@@ -1,0 +1,41 @@
+name: "Tutorial 15: Federated Lakehouse Query"
+description: "Demonstrates cross-node joins using the DuckDB Lakehouse index without explicit edges."
+id: "00000000-0000-0000-0015-000000000001"
+graph:
+  nodes:
+    # 1. Users Table (Materialized)
+    - id: "da1a0000-0000-0000-0015-000000000002"
+      type_id: "core.sql"
+      config:
+        query: "SELECT 1 as id, 'Alice' as name UNION ALL SELECT 2, 'Bob'"
+      state: "Configured"
+      materialize: true # Creates node_da1a0000
+
+    # 2. Orders Table (Materialized)
+    - id: "deada000-0000-0000-0015-000000000003"
+      type_id: "core.sql"
+      config:
+        query: "SELECT 101 as oid, 1 as user_id, 500 as amount UNION ALL SELECT 102, 2, 300"
+      state: "Configured"
+      materialize: true # Creates node_deada000
+
+    # 3. Federated Join (No Edges!)
+    - id: "f00d0000-0000-0000-0015-000000000004"
+      type_id: "core.sql"
+      config:
+        query: |
+          SELECT u.name, o.amount 
+          FROM node_da1a0000 u 
+          JOIN node_deada000 o ON u.id = o.user_id
+      state: "Configured"
+
+    # 4. Final Output
+    - id: "beef0000-0000-0000-0015-000000000005"
+      type_id: "core.output"
+      config: {}
+      state: "Configured"
+
+  edges:
+    - [2, 3, { source_port: 0, target_port: 0 }] # Only Connect Join -> Output
+  node_holes: []
+  edge_property: "directed"

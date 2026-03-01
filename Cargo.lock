@@ -3716,6 +3716,7 @@ dependencies = [
  "petgraph 0.7.1",
  "pyo3",
  "pyo3-arrow",
+ "regex",
  "reqwest 0.13.2",
  "rust_xlsxwriter",
  "schemars",

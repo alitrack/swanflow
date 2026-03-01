@@ -1,0 +1,27 @@
+name: "Tutorial 16: Dynamic Excel Exploration"
+description: "Lists all sheets in an Excel file and prepares for automated processing."
+id: "00000000-0000-0000-0016-000000000001"
+graph:
+  nodes:
+    - id: "da1a0000-0000-0000-0016-000000000002"
+      type_id: "core.io.excel_sheet_names"
+      config:
+        path: "financial_report.xlsx" # From Tutorial 14
+      state: "Configured"
+
+    - id: "deada000-0000-0000-0016-000000000003"
+      type_id: "core.sql"
+      config:
+        query: "SELECT * FROM input_0 WHERE sheet_name LIKE 'Sheet%'"
+      state: "Configured"
+
+    - id: "beef0000-0000-0000-0016-000000000004"
+      type_id: "core.output"
+      config: {}
+      state: "Configured"
+
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

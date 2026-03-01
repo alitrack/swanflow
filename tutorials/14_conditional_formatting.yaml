@@ -1,0 +1,34 @@
+name: "Tutorial 14: Conditional Financial Styling"
+description: "Generates a budget vs actual report with automatic zebra striping and conditional highlights."
+id: "00000000-0000-0000-0014-000000000001"
+graph:
+  nodes:
+    - id: "a1a1a1a1-0000-0000-0014-000000000002"
+      type_id: "core.sql"
+      config:
+        query: |
+          SELECT department, budget, actual, (actual - budget) as variance 
+          FROM (VALUES 
+            ('Marketing', 5000, 5200), 
+            ('Engineering', 12000, 11500), 
+            ('Sales', 8000, 9500), 
+            ('HR', 3000, 3000)
+          ) as t(department, budget, actual)
+      state: "Configured"
+
+    - id: "c3c3c3c3-0000-0000-0014-000000000004"
+      type_id: "core.io.excel_write"
+      config:
+        path: "financial_report.xlsx"
+        convert_to_table: true
+        styles:
+          - column: "variance"
+            format: { "bold": true, "font_color": "red" }
+          - column: "department"
+            format: { "bold": true, "bg_color": "yellow" }
+      state: "Configured"
+
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

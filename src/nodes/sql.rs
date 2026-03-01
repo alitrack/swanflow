@@ -1,10 +1,63 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use datafusion::logical_expr::LogicalPlan;
+use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::prelude::*;
+use datafusion::common::{DFSchema, DFSchemaRef};
 use serde_json::Value as JsonValue;
+use std::fmt;
+use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct SqlProxyLogical {
+    pub node_id: Uuid,
+    pub query: String,
+    pub inputs: Vec<LogicalPlan>,
+    pub schema: DFSchemaRef,
+}
+
+impl PartialOrd for SqlProxyLogical {
+    fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+        None
+    }
+}
+
+impl UserDefinedLogicalNodeCore for SqlProxyLogical {
+    fn name(&self) -> &str {
+        "SqlProxy"
+    }
+
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        self.inputs.iter().collect()
+    }
+
+    fn schema(&self) -> &DFSchemaRef {
+        &self.schema
+    }
+
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SqlProxy(node_id={}, query={})", self.node_id, self.query)
+    }
+
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> datafusion::error::Result<Self> {
+        Ok(Self {
+            node_id: self.node_id,
+            query: self.query.clone(),
+            inputs,
+            schema: self.schema.clone(),
+        })
+    }
+}
 
 pub struct SqlNode;
 
@@ -47,17 +100,25 @@ impl NodeBehavior for SqlNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let query = config["query"].as_str().unwrap();
+        let query = config["query"].as_str().unwrap().to_string();
+        
+        // For schema inference at compilation time, we use a best-guess from first input
+        // or an empty schema if no inputs are present. Real schema will be resolved at runtime.
+        let schema = if !inputs.is_empty() {
+            inputs[0].schema().clone()
+        } else {
+            Arc::new(DFSchema::empty())
+        };
 
-        let ctx = SessionContext::new();
-        for (i, plan) in inputs.into_iter().enumerate() {
-            let table_name = format!("input_{}", i);
-            // In DataFusion 45, we create a DataFrame directly from state and plan
-            let df = DataFrame::new(ctx.state(), plan);
-            ctx.register_table(&table_name, df.into_view())?;
-        }
+        let proxy = SqlProxyLogical {
+            node_id: Uuid::nil(), // Will be updated by compiler if necessary, but nil is safe for now
+            query,
+            inputs,
+            schema,
+        };
 
-        let df = ctx.sql(query).await?;
-        Ok(vec![df.into_optimized_plan()?])
+        Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
+            node: Arc::new(proxy),
+        })])
     }
 }
