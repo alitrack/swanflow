@@ -13,6 +13,9 @@ async fn test_all_tutorial_workflows() {
     // 测试 Tutorial 09: Excel Reports
     run_yaml_workflow(&engine, "tutorials/09_excel_reports.yaml").await;
     
+    // 测试 Tutorial 13: Lakehouse SQL Interop (Decoupled SQL)
+    run_yaml_workflow(&engine, "tutorials/13_lakehouse_sql.yaml").await;
+    
     // 测试 Tutorial 12: Excel Templates (如果提供了模板文件，这里可以取消注释)
     // run_yaml_workflow(&engine, "tutorials/12_excel_templates.yaml").await;
 }

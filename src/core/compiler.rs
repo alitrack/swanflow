@@ -402,29 +402,42 @@ impl WorkflowCompiler {
         }
 
         let mut final_outputs = HashMap::new();
-        let mut has_output_nodes = false;
+        let mut port_counter = 0;
+
+        // 1. First, collect explicit Output nodes
         for &node_idx in &order {
             let node = &workflow.graph[node_idx];
             if node.type_id == "core.output" {
-                has_output_nodes = true;
                 let port_idx = node.config["port_index"].as_u64().unwrap_or(0) as u32;
                 if let Some(node_outputs) = self.compiled_outputs.get(&node.id) {
                     if let Some(plan) = node_outputs.get(&0) {
                         final_outputs.insert(port_idx, plan.clone());
+                        if port_idx >= port_counter { port_counter = port_idx + 1; }
                     }
                 }
             }
         }
 
-        if !has_output_nodes {
-            // Collect all terminal nodes (nodes with no outgoing edges or explicitly materialized)
-            let mut port_counter = 0;
-            for &node_idx in &order {
-                let node = &workflow.graph[node_idx];
-                let has_no_outgoing = workflow.graph.edges_directed(node_idx, Outgoing).count() == 0;
+        // 2. Also collect ANY materialized node that has no outgoing edges
+        // (This enables Decoupled SQL for orphan producers)
+        for &node_idx in &order {
+            let node = &workflow.graph[node_idx];
+            let has_no_outgoing = workflow.graph.edges_directed(node_idx, Outgoing).count() == 0;
+            if node.materialize && has_no_outgoing && node.type_id != "core.output" {
+                if let Some(node_outputs) = self.compiled_outputs.get(&node.id) {
+                    for plan in node_outputs.values() {
+                        final_outputs.insert(port_counter, plan.clone());
+                        port_counter += 1;
+                    }
+                }
+            }
+        }
 
-                if has_no_outgoing || node.materialize {
-                    if let Some(node_outputs) = self.compiled_outputs.get(&node.id) {
+        // 3. Fallback: If absolutely no outputs yet, collect all terminals
+        if final_outputs.is_empty() {
+            for &node_idx in &order {
+                if workflow.graph.edges_directed(node_idx, Outgoing).count() == 0 {
+                    if let Some(node_outputs) = self.compiled_outputs.get(&workflow.graph[node_idx].id) {
                         for plan in node_outputs.values() {
                             final_outputs.insert(port_counter, plan.clone());
                             port_counter += 1;

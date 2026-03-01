@@ -61,9 +61,12 @@ async fn test_decoupled_sql_querying() {
         }
     }
 
+    // Wait a bit more for final registrations
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
     // 3. Verification: Check if Node B actually got the data from Node A
     // Before checking B, let's verify A is in the catalog
-    let results_a = engine.ctx.sql(&format!("SELECT * FROM {}", table_name)).await.unwrap().collect().await.unwrap();
+    let results_a = engine.ctx.sql(&format!("SELECT * FROM {}", table_name)).await.expect("Node A table not found in catalog").collect().await.unwrap();
     assert_eq!(results_a[0].num_rows(), 2);
 
     let table_b_name = format!("node_{}", &node_b_id.to_string()[..8]);

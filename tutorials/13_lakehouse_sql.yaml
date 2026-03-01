@@ -1,0 +1,32 @@
+name: "Tutorial 13: Lakehouse SQL Interop"
+description: "Demonstrates how nodes can reference each other via SQL tables without direct edges."
+id: "00000000-0000-0000-0013-000000000001"
+graph:
+  nodes:
+    # Producer Path
+    - id: "00000000-0000-0000-0013-000000000002"
+      type_id: "core.sql"
+      config:
+        query: "SELECT 'Electronics' as category, 5000 as revenue UNION ALL SELECT 'Books', 2000"
+      state: "Configured"
+      materialize: true # This creates 'node_00000000'
+
+    # Consumer Path (Disconnected)
+    - id: "00000000-0000-0000-0013-000000000003"
+      type_id: "core.sql"
+      config:
+        # Reference the producer by its short ID prefix
+        query: "SELECT * FROM node_00000000 WHERE revenue > 3000"
+      state: "Configured"
+      materialize: false
+
+    # Output for verification
+    - id: "00000000-0000-0000-0013-000000000004"
+      type_id: "core.output"
+      config: {}
+      state: "Configured"
+
+  edges:
+    - [1, 2, { source_port: 0, target_port: 0 }] # Node 3 -> Node 4
+  node_holes: []
+  edge_property: "directed"
