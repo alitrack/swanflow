@@ -1,3 +1,4 @@
+use datafusion::prelude::*;
 use std::any::Any;
 use std::fmt;
 use std::path::PathBuf;
@@ -23,7 +24,9 @@ use futures::Stream;
 use futures::StreamExt;
 use rust_xlsxwriter::{Chart, ChartType, Workbook, Format, Color};
 use std::collections::HashMap;
-use sqlx::{Column, Executor, Row, TypeInfo};
+use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
+use datafusion::physical_plan::stream::RecordBatchReceiverStream;
+use datafusion::arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 
 /// Logical node for SQLx-based generic database scanning.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -129,58 +132,51 @@ impl ExecutionPlan for SqlxScanExec {
         let query = self.query.clone();
         let schema = self.project_schema.clone();
 
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let mut builder = RecordBatchReceiverStream::builder(schema.clone(), 1);
+        let tx = builder.tx();
 
-        tokio::spawn(async move {
-            let res = async {
-                sqlx::any::install_default_drivers();
-                let pool = sqlx::AnyPool::connect(&url).await.map_err(|e| anyhow::anyhow!(e))?;
-                let mut rows = sqlx::query(&query).fetch(&pool);
+        builder.spawn(async move {
+            sqlx::any::install_default_drivers();
+            let pool = sqlx::AnyPool::connect(&url).await.map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            let mut rows = sqlx::query(&query).fetch(&pool);
 
-                let mut builders: Vec<StringBuilder> = (0..schema.fields().len())
-                    .map(|_| StringBuilder::new())
-                    .collect();
+            let mut builders: Vec<StringBuilder> = (0..schema.fields().len())
+                .map(|_| StringBuilder::new())
+                .collect();
 
-                let mut count = 0;
-                while let Some(row_res) = rows.next().await {
-                    let row = row_res.map_err(|e| anyhow::anyhow!(e))?;
-                    for i in 0..schema.fields().len() {
-                        // Very simplified: convert everything to string for this MVP
-                        // Better approach: dynamic mapping based on sqlx column types
-                        let val: String = match row.try_get_raw(i) {
-                            Ok(v) if !v.is_null() => {
-                                // This is a bit tricky with sqlx::Any
-                                // For now, we'll try common types or fallback to string
-                                row.try_get::<String, _>(i).unwrap_or_else(|_| "complex_type".to_string())
-                            }
-                            _ => "".to_string(),
-                        };
-                        builders[i].append_value(val);
-                    }
-                    count += 1;
-                    if count >= 1000 {
-                        let columns: Vec<ArrayRef> = builders.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef).collect();
-                        let batch = RecordBatch::try_new(schema.clone(), columns)?;
-                        tx.send(Ok(batch)).await.ok();
-                        builders = (0..schema.fields().len()).map(|_| StringBuilder::new()).collect();
-                        count = 0;
-                    }
+            let mut count = 0;
+            while let Some(row_res) = rows.next().await {
+                let row = row_res.map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                for i in 0..schema.fields().len() {
+                    let val: String = match row.try_get_raw(i) {
+                        Ok(v) if !v.is_null() => {
+                            row.try_get::<String, _>(i).unwrap_or_else(|_| "complex_type".to_string())
+                        }
+                        _ => "".to_string(),
+                    };
+                    builders[i].append_value(val);
                 }
-
-                if count > 0 {
-                    let columns: Vec<ArrayRef> = builders.into_iter().map(|mut b| Arc::new(b.finish()) as ArrayRef).collect();
-                    let batch = RecordBatch::try_new(schema.clone(), columns)?;
+                count += 1;
+                if count >= 1000 {
+                    let columns: Vec<ArrayRef> = builders.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef).collect();
+                    let batch = RecordBatch::try_new(schema.clone(), columns)
+                        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
                     tx.send(Ok(batch)).await.ok();
+                    builders = (0..schema.fields().len()).map(|_| StringBuilder::new()).collect();
+                    count = 0;
                 }
-                Ok::<(), anyhow::Error>(())
-            }.await;
-
-            if let Err(e) = res {
-                tx.send(Err(datafusion::error::DataFusionError::External(e.into()))).await.ok();
             }
+
+            if count > 0 {
+                let columns: Vec<ArrayRef> = builders.into_iter().map(|mut b| Arc::new(b.finish()) as ArrayRef).collect();
+                let batch = RecordBatch::try_new(schema.clone(), columns)
+                    .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+                tx.send(Ok(batch)).await.ok();
+            }
+            Ok(())
         });
 
-        Ok(Box::pin(datafusion::physical_plan::stream::RecordBatchReceiverStream::create(&schema, rx)))
+        Ok(builder.build())
     }
 }
 
@@ -296,8 +292,6 @@ impl ExecutionPlan for DuckDBScanExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        // Implementation will fetch all data into memory for this simple version
-        // Future: implement a streaming DuckDB query result
         let conn = duckdb::Connection::open(&self.connection_path)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
         
@@ -312,13 +306,25 @@ impl ExecutionPlan for DuckDBScanExec {
                 .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
         }
 
-        let mut stmt = conn.prepare(&self.query)
+        // Use a temporary parquet file to bridge DuckDB and DataFusion Arrow versions
+        let tmp_dir = std::env::temp_dir();
+        let tmp_file = tmp_dir.join(format!("rustflow_duckdb_{}.parquet", uuid::Uuid::new_v4()));
+        let tmp_path = tmp_file.to_str().unwrap();
+
+        let copy_sql = format!("COPY ({}) TO '{}' (FORMAT PARQUET)", self.query, tmp_path);
+        conn.execute(&copy_sql, [])
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
         
-        let arrow_results = stmt.query_arrow([])
+        // Read back with DataFusion
+        let ctx = SessionContext::new();
+        let df = futures::executor::block_on(ctx.read_parquet(tmp_path, datafusion::prelude::ParquetReadOptions::default()))
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
         
-        let batches: Vec<RecordBatch> = arrow_results.collect();
+        let batches = futures::executor::block_on(df.collect())
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        
+        // Clean up
+        std::fs::remove_file(tmp_file).ok();
         
         Ok(Box::pin(datafusion::physical_plan::memory::MemoryStream::try_new(
             batches,

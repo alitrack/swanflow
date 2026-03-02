@@ -1,0 +1,29 @@
+name: "Tutorial 17: Database Connector (Performance Path)"
+description: "Connects to an external SQLite database using high-performance DuckDB scanners."
+id: "00000000-0000-0000-0017-000000000001"
+graph:
+  nodes:
+    - id: "da1a0000-0000-0000-0017-000000000002"
+      type_id: "core.io.db_connector"
+      config:
+        # Use sqlite:// for vectorized performance
+        url: "sqlite://users.db" 
+        query: "SELECT id, name FROM ext_db.users WHERE id > 0"
+      state: "Configured"
+
+    - id: "f00d0000-0000-0000-0017-000000000003"
+      type_id: "core.sql"
+      config:
+        query: "SELECT name, UPPER(name) as name_upper FROM input_0"
+      state: "Configured"
+
+    - id: "beef0000-0000-0000-0017-000000000004"
+      type_id: "core.output"
+      config: {}
+      state: "Configured"
+
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

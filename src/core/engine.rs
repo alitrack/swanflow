@@ -9,7 +9,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner, DefaultPhysicalPlanner};
 use datafusion::execution::context::{SessionState, QueryPlanner};
 use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion::common::DFSchemaRef;
+use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -17,7 +17,11 @@ use uuid::Uuid;
 use crate::core::graph::Workflow;
 use crate::core::compiler::WorkflowCompiler;
 use crate::core::observer::{StateProbeLogical, StateProbeExec, MaterializerLogical, MaterializerExec};
-use crate::core::datasource::{ExcelScanLogical, ExcelScanExec, ExcelSinkLogical, ExcelSinkExec, ExcelTemplateSinkLogical, ExcelTemplateExec, ExcelReportSinkLogical, ExcelReportExec};
+use crate::core::datasource::{
+    ExcelScanLogical, ExcelScanExec, ExcelSinkLogical, ExcelSinkExec, 
+    ExcelTemplateSinkLogical, ExcelTemplateExec, ExcelReportSinkLogical, ExcelReportExec,
+    DuckDBScanLogical, DuckDBScanExec, SqlxScanLogical, SqlxScanExec,
+};
 use crate::nodes::sql::SqlProxyLogical;
 use crate::nodes::script::python::{PythonLogical, PythonExec};
 use crate::nodes::registry::NodeRegistry;
@@ -261,7 +265,21 @@ impl ExtensionPlanner for SwanFlowPlanner {
             })?;
             
             let logical_plan = df.into_optimized_plan()?;
-            return _planner.create_physical_plan(&logical_plan, _session_state).await.map(Some);
+            let physical_plan = _planner.create_physical_plan(&logical_plan, _session_state).await?;
+            
+            // Check if schema matches logical proxy schema
+            let logical_schema = proxy.schema.clone();
+            let physical_schema = physical_plan.schema();
+            
+            if logical_schema.as_ref() != &DFSchema::try_from(physical_schema.as_ref().clone())? {
+                tracing::warn!("Schema mismatch for node {}: logical={:?}, physical={:?}. Aligning...", proxy.node_id, logical_schema, physical_schema);
+            }
+            
+            // To fix this, we return a physical plan whose schema matches proxy.schema exactly.
+            // If they differ, we use a projection.
+            let physical_plan = self.align_schemas(physical_plan, logical_schema.as_ref())?;
+            
+            return Ok(Some(physical_plan));
         }
         if let Some(python) = node.as_any().downcast_ref::<PythonLogical>() {
             return Ok(Some(Arc::new(PythonExec::new(
@@ -292,6 +310,40 @@ impl ExtensionPlanner for SwanFlowPlanner {
             ))));
         }
         Ok(None)
+    }
+}
+
+impl SwanFlowPlanner {
+    fn align_schemas(&self, plan: Arc<dyn ExecutionPlan>, target: &DFSchema) -> Result<Arc<dyn ExecutionPlan>> {
+        let plan_schema = plan.schema();
+        
+        // Check if actually different
+        let plan_df_schema = DFSchema::try_from(plan_schema.as_ref().clone())?;
+        if plan_df_schema == *target {
+            return Ok(plan);
+        }
+
+        // Create a projection to match the target schema
+        let mut exprs = Vec::new();
+        for field in target.fields() {
+            if let Ok(idx) = plan_schema.index_of(field.name()) {
+                exprs.push((
+                    datafusion::physical_expr::expressions::col(field.name(), &plan_schema)?,
+                    field.name().to_string(),
+                ));
+            } else {
+                // Column missing in physical plan, add as NULL
+                let null_expr = datafusion::physical_expr::expressions::Literal::new(
+                    ScalarValue::try_from(field.data_type())?
+                );
+                exprs.push((Arc::new(null_expr), field.name().to_string()));
+            }
+        }
+
+        Ok(Arc::new(datafusion::physical_plan::projection::ProjectionExec::try_new(
+            exprs,
+            plan,
+        )?))
     }
 }
 

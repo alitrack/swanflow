@@ -5,17 +5,35 @@ use datafusion::prelude::*;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use serde_json::Value as JsonValue;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(Debug, Clone)]
 pub struct SqlProxyLogical {
     pub node_id: Uuid,
     pub query: String,
     pub inputs: Vec<LogicalPlan>,
     pub schema: DFSchemaRef,
+    // Add a mutex for internal schema updates if we really need it, 
+    // but for now we align in the planner.
+}
+
+impl std::cmp::PartialEq for SqlProxyLogical {
+    fn eq(&self, other: &Self) -> bool {
+        self.node_id == other.node_id && self.query == other.query && self.inputs == other.inputs
+    }
+}
+
+impl std::cmp::Eq for SqlProxyLogical {}
+
+impl std::hash::Hash for SqlProxyLogical {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.node_id.hash(state);
+        self.query.hash(state);
+        self.inputs.hash(state);
+    }
 }
 
 impl PartialOrd for SqlProxyLogical {
@@ -102,8 +120,6 @@ impl NodeBehavior for SqlNode {
     ) -> Result<Vec<LogicalPlan>> {
         let query = config["query"].as_str().unwrap().to_string();
         
-        // For schema inference at compilation time, we use a best-guess from first input
-        // or an empty schema if no inputs are present. Real schema will be resolved at runtime.
         let schema = if !inputs.is_empty() {
             inputs[0].schema().clone()
         } else {
@@ -111,7 +127,7 @@ impl NodeBehavior for SqlNode {
         };
 
         let proxy = SqlProxyLogical {
-            node_id: Uuid::nil(), // Will be updated by compiler if necessary, but nil is safe for now
+            node_id: Uuid::nil(),
             query,
             inputs,
             schema,

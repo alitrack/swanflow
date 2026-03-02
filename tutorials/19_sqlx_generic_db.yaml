@@ -1,0 +1,29 @@
+name: "Tutorial 19: Generic Database (SQLx Path)"
+description: "Connects to any SQLx-supported database (MySQL, MSSQL, etc.) using dynamic protocol detection."
+id: "00000000-0000-0000-0019-000000000001"
+graph:
+  nodes:
+    - id: "da1a0000-0000-0000-0019-000000000002"
+      type_id: "core.io.db_connector"
+      config:
+        # sqlx handles mysql://, mssql://, etc.
+        url: "mysql://user:pass@localhost:3306/db" 
+        query: "SELECT id, category, price FROM products"
+      state: "Configured"
+
+    - id: "f00d0000-0000-0000-0019-000000000003"
+      type_id: "core.sql"
+      config:
+        query: "SELECT category, SUM(price) as total_value FROM input_0 GROUP BY category"
+      state: "Configured"
+
+    - id: "beef0000-0000-0000-0019-000000000004"
+      type_id: "core.output"
+      config: {}
+      state: "Configured"
+
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

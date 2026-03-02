@@ -225,7 +225,6 @@ impl WorkflowCompiler {
             let cache_key = self.generate_cache_key(node, &input_hashes);
             self.node_hashes.insert(node.id, cache_key.clone());
 
-            // ... (flow logic for variable_creator, table_to_variable)
             if node.type_id == "core.flow.variable_creator" {
                 if let Some(ref tx) = self.event_tx {
                     let _ = tx.send(NodeEvent::StateChanged { node_id: node.id, state: NodeState::Running });

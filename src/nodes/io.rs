@@ -12,6 +12,7 @@ use datafusion::datasource::file_format::csv::CsvFormat;
 use datafusion::prelude::*;
 use duckdb::Connection;
 use serde_json::Value as JsonValue;
+use sqlx::{Column, Row};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -529,9 +530,20 @@ impl DuckDBHelper {
     }
 
     pub fn query_arrow(conn: &Connection, query: &str) -> Result<Vec<RecordBatch>> {
-        let mut stmt = conn.prepare(query)?;
-        let arrow_results = stmt.query_arrow([])?;
-        let batches: Vec<RecordBatch> = arrow_results.collect();
+        // Use temporary parquet to bridge crate versions
+        let tmp_file = std::env::temp_dir().join(format!("rustflow_query_{}.parquet", uuid::Uuid::new_v4()));
+        let tmp_path = tmp_file.to_str().unwrap();
+
+        let copy_sql = format!("COPY ({}) TO '{}' (FORMAT PARQUET)", query, tmp_path);
+        conn.execute(&copy_sql, []).map_err(|e| anyhow!("DuckDB COPY failed: {}", e))?;
+        
+        let ctx = SessionContext::new();
+        let batches = futures::executor::block_on(async {
+            let df = ctx.read_parquet(tmp_path, ParquetReadOptions::default()).await?;
+            df.collect().await
+        }).map_err(|e| anyhow!("DataFusion read back failed: {}", e))?;
+        
+        std::fs::remove_file(tmp_file).ok();
         Ok(batches)
     }
 }
@@ -1212,23 +1224,13 @@ impl NodeBehavior for DbConnectorNode {
                     conn.execute(&format!("ATTACH '{}' AS ext_db (TYPE sqlite);", path), [])?;
                 }
                 
-                // Run a sample to get the schema
-                let mut stmt = conn.prepare(query)?;
-                let column_count = stmt.column_count();
-                let mut fields = Vec::new();
-                for i in 0..column_count {
-                    let duckdb_type = stmt.column_type(i);
-                    let arrow_type = match format!("{:?}", duckdb_type).as_str() {
-                        "Int64" | "BigInt" => DataType::Int64,
-                        "Float64" | "Double" => DataType::Float64,
-                        "Boolean" | "Bool" => DataType::Boolean,
-                        _ => DataType::Utf8,
-                    };
-                    fields.push(Field::new(stmt.column_name(i)?, arrow_type, true));
+                // Use query_arrow to get the schema reliably
+                let batches = DuckDBHelper::query_arrow(&conn, query)?;
+                if batches.is_empty() {
+                    return Err(anyhow!("Query returned no data for schema inference"));
                 }
-                
-                let schema = Arc::new(Schema::new(fields));
-                let df_schema = datafusion::common::DFSchema::try_from(schema)?;
+                let schema = batches[0].schema();
+                let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
                 
                 let attach_sql = if driver == DbDriver::DuckDBPostgres {
                     Some(format!("ATTACH '{}' AS ext_db (TYPE postgres);", url))
@@ -1259,7 +1261,7 @@ impl NodeBehavior for DbConnectorNode {
                 
                 let mut fields = Vec::new();
                 for col in first_row.columns() {
-                    fields.push(Field::new(col.name(), DataType::Utf8, true));
+                    fields.push(Field::new(col.name().to_string(), DataType::Utf8, true));
                 }
                 
                 let schema = Arc::new(Schema::new(fields));
