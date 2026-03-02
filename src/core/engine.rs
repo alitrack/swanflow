@@ -9,7 +9,6 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner, DefaultPhy
 use datafusion::execution::context::{SessionState, QueryPlanner};
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
-use datafusion::arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use uuid::Uuid;
 use serde_json::json;
@@ -66,31 +65,31 @@ impl SwanFlowEngine {
         let (tx, rx) = mpsc::unbounded_channel();
         
         let mut compiler = WorkflowCompiler::with_cache_dir(true, self.cache_dir.clone());
-        compiler.ctx = self.ctx.clone();
+        compiler.ctx = self.ctx.clone(); // CRITICAL: Share the same context!
         compiler.event_tx = Some(tx.clone());
         
-        let terminals = compiler.compile(workflow, &self.registry, None).await
+        let stages = compiler.compile(workflow, &self.registry, Some(self.ctx.clone())).await
             .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
         
-        if terminals.is_empty() {
+        if stages.is_empty() {
             return Err(datafusion::error::DataFusionError::Plan("Workflow has no outputs".to_string()));
         }
 
-        let ctx = self.ctx.clone();
-        let planner = SwanFlowPlanner { event_tx: tx.clone(), ctx: ctx.clone(), cache_dir: self.cache_dir.clone() };
+        let planner = SwanFlowPlanner { event_tx: tx.clone(), ctx: self.ctx.clone(), cache_dir: self.cache_dir.clone() };
         let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(planner.clone())]));
         let query_planner = Arc::new(SwanFlowQueryPlanner { physical_planner });
 
-        let ctx_clone = ctx.clone();
+        // Use shared context directly in the task
+        let ctx_shared = self.ctx.clone();
         let cache_dir_clone = self.cache_dir.clone();
         let query_planner_clone = query_planner.clone();
 
         tokio::spawn(async move {
-            // SEQUENTIAL EXECUTION: run each terminal stage
-            for (port, logical_plan) in terminals {
-                println!("DEBUG: Stage Execution for port {}", port);
+            // STAGED TOPOLOGICAL EXECUTION: run each level stage in order
+            for (level, terminals) in stages.into_iter().enumerate() {
+                println!("DEBUG: Executing Stage Level {}", level);
                 
-                // 1. Sync Materialized Tables
+                // 1. Initial Sync for this level (might need tables from previous stages)
                 let tables = {
                     let mut tables_data = Vec::new();
                     let metadata_path = format!("{}/metadata.duckdb", cache_dir_clone);
@@ -111,53 +110,108 @@ impl SwanFlowEngine {
                 };
 
                 for (table_name, path) in tables {
-                    let _ = ctx_clone.deregister_table(&table_name);
-                    ctx_clone.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
+                    let _ = ctx_shared.deregister_table(&table_name);
+                    ctx_shared.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
                 }
 
-                // 2. Planning with latest context
-                let state = ctx_clone.state();
-                let state = SessionStateBuilder::new_from_existing(state)
-                    .with_query_planner(query_planner_clone.clone())
-                    .build();
+                // 2. Planning and execution for all terminals at this level
+                for (port, logical_plan) in terminals {
+                    println!("DEBUG: Stage Execution for level {}, port {}", level, port);
+                    
+                    let state = ctx_shared.state();
+                    let state = SessionStateBuilder::new_from_existing(state)
+                        .with_query_planner(query_planner_clone.clone())
+                        .build();
 
-                match state.create_physical_plan(&logical_plan).await {
-                    Ok(physical_plan) => {
-                        let task_ctx = ctx_clone.task_ctx();
-                        // 3. Execution (blocking collect)
-                        if let Err(e) = datafusion::physical_plan::collect(physical_plan, task_ctx).await {
-                            let _ = tx.send(NodeEvent::Error { 
-                                node_id: Uuid::nil(), 
-                                message: format!("Execution error: {}", e) 
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        // 4. RETRY after sync if failed
-                        println!("DEBUG: Initial planning failed for port {}, syncing and retrying...", port);
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        
-                        let state = ctx_clone.state();
-                        let state = SessionStateBuilder::new_from_existing(state)
-                            .with_query_planner(query_planner_clone.clone())
-                            .build();
-                        
-                        match state.create_physical_plan(&logical_plan).await {
-                            Ok(physical_plan) => {
-                                let task_ctx = ctx_clone.task_ctx();
-                                if let Err(e) = datafusion::physical_plan::collect(physical_plan, task_ctx).await {
-                                    let _ = tx.send(NodeEvent::Error { node_id: Uuid::nil(), message: format!("Execution error: {}", e) });
-                                }
-                            }
-                            Err(e2) => {
+                    match state.create_physical_plan(&logical_plan).await {
+                        Ok(physical_plan) => {
+                            let task_ctx = ctx_shared.task_ctx();
+                            // Blocking Collect (wait for this stage to finish!)
+                            if let Err(e) = datafusion::physical_plan::collect(physical_plan, task_ctx).await {
                                 let _ = tx.send(NodeEvent::Error { 
                                     node_id: Uuid::nil(), 
-                                    message: format!("Planning error for port {}: {} (Original: {})", port, e2, e) 
+                                    message: format!("Execution error: {}", e) 
                                 });
                             }
                         }
+                        Err(e) => {
+                            // RETRY after Sync if failed (Node might depend on tables materialized in THE SAME level)
+                            println!("DEBUG: Level {} port {} planning failed, retrying after sync...", level, port);
+                            
+                            // SYNC AGAIN
+                            let tables = {
+                                let mut tables_data = Vec::new();
+                                let metadata_path = format!("{}/metadata.duckdb", cache_dir_clone);
+                                if let Ok(conn) = Connection::open(&metadata_path) {
+                                    if let Ok(mut stmt) = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata") {
+                                        if let Ok(rows) = stmt.query_map([], |row| {
+                                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                                        }) {
+                                            for row in rows {
+                                                if let Ok(res) = row {
+                                                    tables_data.push(res);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                tables_data
+                            };
+
+                            for (table_name, path) in tables {
+                                let _ = ctx_shared.deregister_table(&table_name);
+                                ctx_shared.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
+                            }
+
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            
+                            let state = ctx_shared.state();
+                            let state = SessionStateBuilder::new_from_existing(state)
+                                .with_query_planner(query_planner_clone.clone())
+                                .build();
+                            
+                            match state.create_physical_plan(&logical_plan).await {
+                                Ok(physical_plan) => {
+                                    let task_ctx = ctx_shared.task_ctx();
+                                    if let Err(e) = datafusion::physical_plan::collect(physical_plan, task_ctx).await {
+                                        let _ = tx.send(NodeEvent::Error { node_id: Uuid::nil(), message: format!("Execution error: {}", e) });
+                                    }
+                                }
+                                Err(e2) => {
+                                    let _ = tx.send(NodeEvent::Error { 
+                                        node_id: Uuid::nil(), 
+                                        message: format!("Planning error for port {}: {} (Original: {})", port, e2, e) 
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
+            }
+
+            // 5. Final Sync to ensure results are visible to main thread
+            let final_tables = {
+                let mut tables_data = Vec::new();
+                let metadata_path = format!("{}/metadata.duckdb", cache_dir_clone);
+                if let Ok(conn) = Connection::open(&metadata_path) {
+                    if let Ok(mut stmt) = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata") {
+                        if let Ok(rows) = stmt.query_map([], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        }) {
+                            for row in rows {
+                                if let Ok(res) = row {
+                                    tables_data.push(res);
+                                }
+                            }
+                        }
+                    }
+                }
+                tables_data
+            };
+
+            for (table_name, path) in final_tables {
+                let _ = ctx_shared.deregister_table(&table_name);
+                ctx_shared.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
             }
         });
 
@@ -168,7 +222,7 @@ impl SwanFlowEngine {
         let mut compiler = WorkflowCompiler::with_cache_dir(true, self.cache_dir.clone());
         compiler.ctx = self.ctx.clone();
         let registry = self.registry.clone();
-        let _ = compiler.compile(workflow, &registry, None).await
+        let _ = compiler.compile(workflow, &registry, Some(self.ctx.clone())).await
             .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
         
         Ok(WorkflowMetadata {

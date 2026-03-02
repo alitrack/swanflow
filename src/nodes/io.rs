@@ -594,6 +594,7 @@ impl NodeBehavior for DuckDBReadNode {
         // Execute query to get result schema (for validation)
         let stmt = conn.prepare(query)?;
         let column_count = stmt.column_count();
+
         
         let mut fields = Vec::new();
         for i in 0..column_count {
@@ -958,6 +959,7 @@ impl NodeBehavior for UniversalReadNode {
         let ctx = SessionContext::new_with_config(sess_config);
         let is_dir = std::path::Path::new(path).is_dir();
 
+
         match format {
             FileFormat::Parquet => {
                 let mut opts = ParquetReadOptions::default();
@@ -1017,8 +1019,9 @@ impl NodeBehavior for UniversalReadNode {
 
         let sess_config = SessionConfig::new().with_target_partitions(1);
         let ctx = SessionContext::new_with_config(sess_config);
-        
+
         // Handle directory vs file
+
         let is_dir = std::path::Path::new(path).is_dir();
         
         if is_dir {

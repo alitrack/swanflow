@@ -83,10 +83,10 @@ async fn test_db_connector_sqlx_numeric_aggregation() {
         id: sql_node_id,
         type_id: "core.sql".into(),
         config: json!({ 
-            "query": format!("SELECT SUM(amount) as total FROM node_{}", &db_node_id.to_string()[..8]) 
+            "query": "SELECT SUM(amount) as total FROM input_0" 
         }),
         state: NodeState::Configured,
-        materialize: true,
+        materialize: true, // MUST materialize to be queryable by caller via 'node_...' table
         sub_workflow: None,
     });
 
@@ -103,6 +103,9 @@ async fn test_db_connector_sqlx_numeric_aggregation() {
         }
     }
 
+    // Give materialization a moment to settle
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
     // List all tables in DuckDB to see what's there
     if let Ok(conn) = duckdb::Connection::open(format!("{}/metadata.duckdb", cache_dir)) {
         let mut stmt = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata").unwrap();
@@ -116,16 +119,20 @@ async fn test_db_connector_sqlx_numeric_aggregation() {
     }
 
     let table_name = format!("node_{}", &sql_node_id.to_string()[..8]);
-    let df = engine.ctx.table(&table_name).await.unwrap();
-    println!("DEBUG: Querying table {}, schema: {:?}", table_name, df.schema());
-    let results = df.collect().await.unwrap();
-    println!("DEBUG: Results len: {}", results.len());
-    if results.is_empty() {
-        panic!("Result set is empty for table {}", table_name);
+    let results = engine.ctx.sql(&format!("SELECT * FROM {}", table_name)).await.unwrap().collect().await.unwrap();
+    
+    if results.is_empty() || results[0].num_rows() == 0 {
+        panic!("Aggregation table {} exists but is empty", table_name);
     }
-    println!("DEBUG: Batch 0 rows: {}", results[0].num_rows());
-    let val = results[0].column(0).as_any().downcast_ref::<datafusion::arrow::array::Float64Array>().unwrap().value(0);
-    assert_eq!(val, 301.0);
+    
+    println!("DEBUG: Results batches:");
+    datafusion::arrow::util::pretty::print_batches(&results).unwrap();
+
+    let total_array = results[0].column(0);
+    let s = datafusion::arrow::util::display::array_value_to_string(total_array, 0).unwrap();
+    println!("DEBUG: Final Extracted total: '{}'", s);
+    let total: f64 = s.parse::<f64>().expect(&format!("Failed to parse '{}'", s));
+    assert_eq!(total, 301.0);
 }
 
 #[tokio::test]

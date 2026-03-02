@@ -119,10 +119,30 @@ impl NodeBehavior for SqlNode {
     ) -> Result<Vec<LogicalPlan>> {
         let query = config["query"].as_str().unwrap().to_string();
         
-        let schema = if !inputs.is_empty() {
-            inputs[0].schema().clone()
-        } else {
-            Arc::new(DFSchema::empty())
+        // Attempt early schema discovery if possible
+        // We use a temporary context to see if we can parse the SQL
+        let ctx = datafusion::prelude::SessionContext::new();
+        for (i, input) in inputs.iter().enumerate() {
+            let table_name = format!("input_{}", i);
+            let df = datafusion::prelude::DataFrame::new(ctx.state(), input.clone());
+            ctx.register_table(&table_name, df.into_view()).ok();
+        }
+
+        // Also register any already materialized tables if we can find them
+        // (but usually we can't here because we don't have the engine's cache_dir)
+        
+        let schema: DFSchemaRef = match ctx.sql(&query).await {
+            Ok(df) => Arc::new(df.schema().clone()),
+            Err(_) => {
+                // Fallback: if it's a cross-node query (referencing node_XXXX)
+                // we might not be able to resolve it yet.
+                // In that case, we use a placeholder or input schema.
+                if !inputs.is_empty() {
+                    inputs[0].schema().clone()
+                } else {
+                    Arc::new(DFSchema::empty())
+                }
+            }
         };
 
         let proxy = SqlProxyLogical {
