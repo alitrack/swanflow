@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray, StringBuilder};
+use datafusion::arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray, StringBuilder, Int64Builder, Float64Builder, BooleanBuilder, TimestampNanosecondBuilder};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use calamine::{open_workbook, Data, Reader, Xlsx};
@@ -24,9 +24,88 @@ use futures::Stream;
 use futures::StreamExt;
 use rust_xlsxwriter::{Chart, ChartType, Workbook, Format, Color};
 use std::collections::HashMap;
-use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
+use sqlx::any::AnyTypeInfo;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
-use datafusion::arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+
+pub fn sqlx_type_to_arrow(ti: &AnyTypeInfo) -> DataType {
+    use sqlx::TypeInfo;
+    let name = ti.name().to_uppercase();
+    match name.as_str() {
+        "BOOLEAN" | "BOOL" | "TINYINT(1)" => DataType::Boolean,
+        "SMALLINT" | "INT2" | "INT" | "INTEGER" | "INT4" | "BIGINT" | "INT8" | "INT64" => DataType::Int64,
+        "FLOAT" | "REAL" | "FLOAT4" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT8" | "NUMERIC" | "DECIMAL" => DataType::Float64,
+        "TIMESTAMP" | "TIMESTAMPTZ" | "DATETIME" => DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Nanosecond, None),
+        "DATE" => DataType::Date32,
+        _ => DataType::Utf8,
+    }
+}
+
+pub enum DynamicArrayBuilder {
+    Int64(Int64Builder),
+    Float64(Float64Builder),
+    Boolean(BooleanBuilder),
+    Timestamp(TimestampNanosecondBuilder),
+    Utf8(StringBuilder),
+}
+
+impl DynamicArrayBuilder {
+    pub fn new(data_type: &DataType, capacity: usize) -> Self {
+        match data_type {
+            DataType::Int64 => Self::Int64(Int64Builder::with_capacity(capacity)),
+            DataType::Float64 => Self::Float64(Float64Builder::with_capacity(capacity)),
+            DataType::Boolean => Self::Boolean(BooleanBuilder::with_capacity(capacity)),
+            DataType::Timestamp(_, _) => {
+                Self::Timestamp(TimestampNanosecondBuilder::with_capacity(capacity))
+            }
+            _ => Self::Utf8(StringBuilder::with_capacity(capacity, capacity * 32)),
+        }
+    }
+
+    pub fn append_from_row(&mut self, row: &sqlx::any::AnyRow, index: usize) {
+        use sqlx::Row;
+        match self {
+            Self::Int64(b) => {
+                let val: Option<i64> = row.try_get(index).ok();
+                b.append_option(val);
+            }
+            Self::Float64(b) => {
+                let val: Option<f64> = row.try_get(index).ok();
+                b.append_option(val);
+            }
+            Self::Boolean(b) => {
+                let val: Option<bool> = row.try_get(index).ok();
+                b.append_option(val);
+            }
+            Self::Timestamp(b) => {
+                if let Ok(s) = row.try_get::<String, _>(index) {
+                    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S") {
+                        b.append_value(dt.and_utc().timestamp_nanos_opt().unwrap_or(0));
+                    } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s) {
+                        b.append_value(dt.timestamp_nanos_opt().unwrap_or(0));
+                    } else {
+                        b.append_null();
+                    }
+                } else {
+                    b.append_null();
+                }
+            }
+            Self::Utf8(b) => {
+                let val: Option<String> = row.try_get(index).ok();
+                b.append_option(val);
+            }
+        }
+    }
+
+    pub fn finish(&mut self) -> ArrayRef {
+        match self {
+            Self::Int64(b) => Arc::new(b.finish()) as ArrayRef,
+            Self::Float64(b) => Arc::new(b.finish()) as ArrayRef,
+            Self::Boolean(b) => Arc::new(b.finish()) as ArrayRef,
+            Self::Timestamp(b) => Arc::new(b.finish()) as ArrayRef,
+            Self::Utf8(b) => Arc::new(b.finish()) as ArrayRef,
+        }
+    }
+}
 
 /// Logical node for SQLx-based generic database scanning.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -140,38 +219,34 @@ impl ExecutionPlan for SqlxScanExec {
             let pool = sqlx::AnyPool::connect(&url).await.map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
             let mut rows = sqlx::query(&query).fetch(&pool);
 
-            let mut builders: Vec<StringBuilder> = (0..schema.fields().len())
-                .map(|_| StringBuilder::new())
+            let mut builders: Vec<DynamicArrayBuilder> = schema.fields().iter()
+                .map(|f| DynamicArrayBuilder::new(f.data_type(), 1000))
                 .collect();
 
             let mut count = 0;
             while let Some(row_res) = rows.next().await {
                 let row = row_res.map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
                 for i in 0..schema.fields().len() {
-                    let val: String = match row.try_get_raw(i) {
-                        Ok(v) if !v.is_null() => {
-                            row.try_get::<String, _>(i).unwrap_or_else(|_| "complex_type".to_string())
-                        }
-                        _ => "".to_string(),
-                    };
-                    builders[i].append_value(val);
+                    builders[i].append_from_row(&row, i);
                 }
                 count += 1;
                 if count >= 1000 {
-                    let columns: Vec<ArrayRef> = builders.iter_mut().map(|b| Arc::new(b.finish()) as ArrayRef).collect();
+                    let columns: Vec<ArrayRef> = builders.iter_mut().map(|b| b.finish()).collect();
                     let batch = RecordBatch::try_new(schema.clone(), columns)
                         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
-                    tx.send(Ok(batch)).await.ok();
-                    builders = (0..schema.fields().len()).map(|_| StringBuilder::new()).collect();
+                    let _ = tx.send(Ok(batch)).await;
+                    builders = schema.fields().iter()
+                        .map(|f| DynamicArrayBuilder::new(f.data_type(), 1000))
+                        .collect();
                     count = 0;
                 }
             }
 
             if count > 0 {
-                let columns: Vec<ArrayRef> = builders.into_iter().map(|mut b| Arc::new(b.finish()) as ArrayRef).collect();
+                let columns: Vec<ArrayRef> = builders.into_iter().map(|mut b| b.finish()).collect();
                 let batch = RecordBatch::try_new(schema.clone(), columns)
                     .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
-                tx.send(Ok(batch)).await.ok();
+                let _ = tx.send(Ok(batch)).await;
             }
             Ok(())
         });
@@ -1009,7 +1084,7 @@ impl ExcelWritingStream {
 
             // Task 2.3: Implement Excel Table (ListObject) support
             if self.convert_to_table && row_offset > 1 {
-                let mut table = rust_xlsxwriter::Table::new();
+                let table = rust_xlsxwriter::Table::new();
                 if let Err(e) = worksheet.add_table(0, 0, (row_offset - 1) as u32, (schema.fields().len() - 1) as u16, &table) {
                     tracing::warn!("Failed to add Excel table: {}", e);
                 }

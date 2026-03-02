@@ -8,7 +8,7 @@ graph:
       config:
         # Use sqlite:// for vectorized performance
         url: "sqlite://users.db" 
-        query: "SELECT id, name FROM ext_db.users WHERE id > 0"
+        query: "SELECT id, name FROM users WHERE id > 0"
       state: "Configured"
 
     - id: "f00d0000-0000-0000-0017-000000000003"

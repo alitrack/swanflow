@@ -7,26 +7,34 @@ use std::sync::Arc;
 use uuid::Uuid;
 use std::fs;
 
+async fn create_sqlite_db(path: &str, table_sql: &str, insert_sql: &str) {
+    fs::remove_file(path).ok();
+    sqlx::any::install_default_drivers();
+    let opts = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true);
+    let pool = sqlx::SqlitePool::connect_with(opts).await.unwrap();
+    sqlx::query(table_sql).execute(&pool).await.unwrap();
+    sqlx::query(insert_sql).execute(&pool).await.unwrap();
+    pool.close().await;
+}
+
 #[tokio::test]
-async fn test_db_connector_duckdb_sqlite() {
-    let cache_dir = "target/connector_test_duckdb_sqlite";
+async fn test_db_connector_sqlx_sqlite_basic() {
+    let cache_dir = format!("target/connector_test_{}", Uuid::new_v4());
     let engine = SwanFlowEngine::with_cache_dir(Arc::new(NodeRegistry::default()), cache_dir.to_string());
     
-    // 1. Create a dummy SQLite file
-    let sqlite_path = format!("{}/test.db", cache_dir);
-    fs::create_dir_all(cache_dir).unwrap();
-    let conn = duckdb::Connection::open(&sqlite_path).unwrap();
-    conn.execute("CREATE TABLE users (id INTEGER, name TEXT)", []).unwrap();
-    conn.execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')", []).unwrap();
+    let sqlite_path = format!("{}/basic.db", cache_dir);
+    fs::create_dir_all(&cache_dir).unwrap();
+    create_sqlite_db(&sqlite_path, "CREATE TABLE users (id INTEGER, name TEXT)", "INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')").await;
 
-    // 2. Build Workflow
-    let mut workflow = Workflow::new("DuckDB SQLite Scanner");
+    let mut workflow = Workflow::new("SQLx Basic");
     let node_id = Uuid::new_v4();
     workflow.add_node(NodeInstance {
         id: node_id,
         type_id: "core.io.db_connector".into(),
         config: json!({ 
-            "url": format!("sqlite://{}", sqlite_path), 
+            "url": format!("sqlite3://{}", sqlite_path), 
             "query": "SELECT * FROM users" 
         }),
         state: NodeState::Configured,
@@ -34,7 +42,6 @@ async fn test_db_connector_duckdb_sqlite() {
         sub_workflow: None,
     });
 
-    // 3. Execute
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
     while let Some(event) = rx.recv().await {
         if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
@@ -42,46 +49,108 @@ async fn test_db_connector_duckdb_sqlite() {
         }
     }
 
-    // 4. Verify
     let table_name = format!("node_{}", &node_id.to_string()[..8]);
     let results = engine.ctx.sql(&format!("SELECT * FROM {}", table_name)).await.unwrap().collect().await.unwrap();
     assert_eq!(results[0].num_rows(), 2);
 }
 
 #[tokio::test]
-async fn test_db_connector_sqlx_sqlite() {
-    let cache_dir = "target/connector_test_sqlx_sqlite";
+async fn test_db_connector_sqlx_numeric_aggregation() {
+    let cache_dir = format!("target/connector_test_{}", Uuid::new_v4());
     let engine = SwanFlowEngine::with_cache_dir(Arc::new(NodeRegistry::default()), cache_dir.to_string());
     
-    // 1. Create a dummy SQLite file
-    let sqlite_path = format!("{}/test_sqlx.db", cache_dir);
-    fs::create_dir_all(cache_dir).unwrap();
-    let conn = duckdb::Connection::open(&sqlite_path).unwrap();
-    conn.execute("CREATE TABLE products (id INTEGER, name TEXT)", []).unwrap();
-    conn.execute("INSERT INTO products VALUES (101, 'Laptop'), (102, 'Phone')", []).unwrap();
+    let sqlite_path = format!("{}/agg.db", cache_dir);
+    fs::create_dir_all(&cache_dir).unwrap();
+    create_sqlite_db(&sqlite_path, "CREATE TABLE sales (id INTEGER, amount DOUBLE)", "INSERT INTO sales VALUES (1, 100.5), (2, 200.5)").await;
 
-    // 2. Build Workflow
-    let mut workflow = Workflow::new("SQLx SQLite");
-    let node_id = Uuid::new_v4();
-    // Use a non-sqlite:// prefix to force SQLx if we wanted, 
-    // but here we just test that the router works. 
-    // SQLite is supported by both, DuckDB is preferred for sqlite://
-    // To force SQLx, we'd need a URL that DuckDB doesn't recognize as performance path.
-    // For now, let's just test that the basic SQLx infrastructure is there.
+    let mut workflow = Workflow::new("SQLx Aggregation");
     
-    workflow.add_node(NodeInstance {
-        id: node_id,
+    let db_node_id = Uuid::new_v4();
+    let db_node_idx = workflow.add_node(NodeInstance {
+        id: db_node_id,
         type_id: "core.io.db_connector".into(),
         config: json!({ 
-            "url": format!("sqlite://{}", sqlite_path), 
-            "query": "SELECT * FROM products" 
+            "url": format!("sqlite3://{}", sqlite_path), 
+            "query": "SELECT * FROM sales" 
         }),
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
     });
 
-    // 3. Execute
+    let sql_node_id = Uuid::new_v4();
+    let sql_node_idx = workflow.add_node(NodeInstance {
+        id: sql_node_id,
+        type_id: "core.sql".into(),
+        config: json!({ 
+            "query": format!("SELECT SUM(amount) as total FROM node_{}", &db_node_id.to_string()[..8]) 
+        }),
+        state: NodeState::Configured,
+        materialize: true,
+        sub_workflow: None,
+    });
+
+    workflow.add_edge(db_node_idx, sql_node_idx, rustflow::core::graph::EdgeInstance { 
+        source_port: 0, 
+        target_port: 0 
+    }).unwrap();
+
+    let mut rx = engine.execute_workflow(&workflow).await.unwrap();
+    while let Some(event) = rx.recv().await {
+        println!("DEBUG: Event: {:?}", event);
+        if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
+            panic!("Workflow failed: {}", message);
+        }
+    }
+
+    // List all tables in DuckDB to see what's there
+    if let Ok(conn) = duckdb::Connection::open(format!("{}/metadata.duckdb", cache_dir)) {
+        let mut stmt = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata").unwrap();
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).unwrap();
+        for row in rows {
+            let (name, path) = row.unwrap();
+            println!("DEBUG: flow_metadata entry: {} -> {}", name, path);
+        }
+    }
+
+    let table_name = format!("node_{}", &sql_node_id.to_string()[..8]);
+    let df = engine.ctx.table(&table_name).await.unwrap();
+    println!("DEBUG: Querying table {}, schema: {:?}", table_name, df.schema());
+    let results = df.collect().await.unwrap();
+    println!("DEBUG: Results len: {}", results.len());
+    if results.is_empty() {
+        panic!("Result set is empty for table {}", table_name);
+    }
+    println!("DEBUG: Batch 0 rows: {}", results[0].num_rows());
+    let val = results[0].column(0).as_any().downcast_ref::<datafusion::arrow::array::Float64Array>().unwrap().value(0);
+    assert_eq!(val, 301.0);
+}
+
+#[tokio::test]
+async fn test_db_connector_sqlx_timestamps() {
+    let cache_dir = format!("target/connector_test_{}", Uuid::new_v4());
+    let engine = SwanFlowEngine::with_cache_dir(Arc::new(NodeRegistry::default()), cache_dir.to_string());
+    
+    let sqlite_path = format!("{}/ts.db", cache_dir);
+    fs::create_dir_all(&cache_dir).unwrap();
+    create_sqlite_db(&sqlite_path, "CREATE TABLE logs (id INTEGER, ts TEXT)", "INSERT INTO logs VALUES (1, '2026-03-02 12:00:00')").await;
+
+    let mut workflow = Workflow::new("SQLx Timestamps");
+    let node_id = Uuid::new_v4();
+    workflow.add_node(NodeInstance {
+        id: node_id,
+        type_id: "core.io.db_connector".into(),
+        config: json!({ 
+            "url": format!("sqlite://{}", sqlite_path), 
+            "query": "SELECT ts FROM ext_db.logs" 
+        }),
+        state: NodeState::Configured,
+        materialize: true,
+        sub_workflow: None,
+    });
+
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
     while let Some(event) = rx.recv().await {
         if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
@@ -89,8 +158,7 @@ async fn test_db_connector_sqlx_sqlite() {
         }
     }
 
-    // 4. Verify
     let table_name = format!("node_{}", &node_id.to_string()[..8]);
     let results = engine.ctx.sql(&format!("SELECT * FROM {}", table_name)).await.unwrap().collect().await.unwrap();
-    assert_eq!(results[0].num_rows(), 2);
+    assert_eq!(results[0].num_rows(), 1);
 }

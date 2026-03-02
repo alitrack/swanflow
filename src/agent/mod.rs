@@ -46,7 +46,7 @@ impl AnalystAgent {
         let mut history = format!("User Request: {}\n", user_prompt);
         let system_prompt = self.build_system_prompt();
 
-        for i in 0..5 {
+        for _i in 0..5 {
             let full_prompt = format!("System: {}\n{}", system_prompt, history);
             let response_text = self.provider.complete(&full_prompt).await?;
             let response: AgentResponse = self.parse_response(&response_text)?;

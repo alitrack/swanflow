@@ -1,20 +1,19 @@
 use std::any::Any;
 use std::fmt;
-use std::sync::Arc;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
-
-use arrow::array::RecordBatch;
-use arrow::datatypes::SchemaRef;
-use datafusion::common::DFSchemaRef;
-use datafusion::error::Result;
-use datafusion::execution::context::{TaskContext, SessionContext};
+use datafusion::arrow::array::RecordBatch;
+use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::common::{DFSchemaRef, Result};
+use datafusion::execution::context::{SessionContext, TaskContext};
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
-    RecordBatchStream, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream,
 };
+use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::prelude::ParquetReadOptions;
 use futures::Stream;
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -33,7 +32,7 @@ impl UserDefinedLogicalNodeCore for StateProbeLogical {
     fn inputs(&self) -> Vec<&LogicalPlan> { vec![&self.input] }
     fn schema(&self) -> &DFSchemaRef { self.input.schema() }
     fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> { vec![] }
-    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "StateProbe(node_id={})", self.node_id) }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "StateProbe(id={})", self.node_id) }
     fn with_exprs_and_inputs(&self, _exprs: Vec<datafusion::logical_expr::Expr>, inputs: Vec<LogicalPlan>) -> Result<Self> {
         Ok(Self { node_id: self.node_id, input: inputs[0].clone() })
     }
@@ -52,7 +51,7 @@ impl StateProbeExec {
         let input_props = input.properties();
         let cache = PlanProperties::new(
             EquivalenceProperties::new(input.schema()),
-            input_props.output_partitioning().clone(),
+            datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
             input_props.emission_type,
             input_props.boundedness,
         );
@@ -61,22 +60,24 @@ impl StateProbeExec {
 }
 
 impl DisplayAs for StateProbeExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "StateProbeExec(node_id={})", self.node_id) }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "StateProbeExec(id={})", self.node_id)
+    }
 }
 
 impl ExecutionPlan for StateProbeExec {
     fn as_any(&self) -> &dyn Any { self }
-    fn name(&self) -> &str { "StateProbeExec" }
     fn schema(&self) -> SchemaRef { self.input.schema() }
-    fn properties(&self) -> &PlanProperties { &self.cache }
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.input] }
     fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(Self::new(self.node_id, children[0].clone(), self.event_tx.clone())))
     }
     fn execute(&self, partition: usize, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
-        let input_stream = self.input.execute(partition, context)?;
-        Ok(Box::pin(StateProbeStream { node_id: self.node_id, input: input_stream, event_tx: self.event_tx.clone() }))
+        let input = self.input.execute(partition, context)?;
+        Ok(Box::pin(StateProbeStream { node_id: self.node_id, input, event_tx: self.event_tx.clone() }))
     }
+    fn properties(&self) -> &PlanProperties { &self.cache }
+    fn name(&self) -> &str { "StateProbeExec" }
 }
 
 struct StateProbeStream {
@@ -105,13 +106,45 @@ impl RecordBatchStream for StateProbeStream {
     fn schema(&self) -> SchemaRef { self.input.schema() }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, PartialOrd)]
+#[derive(Clone)]
 pub struct MaterializerLogical {
     pub node_id: Uuid,
     pub table_name: String,
     pub cache_key: String,
     pub cache_dir: String,
     pub input: LogicalPlan,
+    pub ctx: Arc<SessionContext>,
+}
+
+impl std::fmt::Debug for MaterializerLogical {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MaterializerLogical")
+            .field("node_id", &self.node_id)
+            .field("table_name", &self.table_name)
+            .finish()
+    }
+}
+
+impl std::cmp::PartialEq for MaterializerLogical {
+    fn eq(&self, other: &Self) -> bool {
+        self.node_id == other.node_id && self.table_name == other.table_name && self.cache_key == other.cache_key
+    }
+}
+
+impl std::cmp::Eq for MaterializerLogical {}
+
+impl std::hash::Hash for MaterializerLogical {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.node_id.hash(state);
+        self.table_name.hash(state);
+        self.cache_key.hash(state);
+    }
+}
+
+impl PartialOrd for MaterializerLogical {
+    fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+        None
+    }
 }
 
 impl UserDefinedLogicalNodeCore for MaterializerLogical {
@@ -126,7 +159,8 @@ impl UserDefinedLogicalNodeCore for MaterializerLogical {
             table_name: self.table_name.clone(), 
             cache_key: self.cache_key.clone(), 
             cache_dir: self.cache_dir.clone(),
-            input: inputs[0].clone() 
+            input: inputs[0].clone(),
+            ctx: self.ctx.clone(),
         })
     }
 }
@@ -137,21 +171,21 @@ pub struct MaterializerExec {
     pub cache_key: String,
     pub cache_dir: String,
     pub input: Arc<dyn ExecutionPlan>,
-    pub ctx: SessionContext,
+    pub ctx: Arc<SessionContext>,
     cache: PlanProperties,
 }
 
 impl std::fmt::Debug for MaterializerExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MaterializerExec")
-            .field("table", &self.table_name)
-            .field("cache_dir", &self.cache_dir)
+            .field("node_id", &self.node_id)
+            .field("table_name", &self.table_name)
             .finish()
     }
 }
 
 impl MaterializerExec {
-    pub fn new(node_id: Uuid, table_name: String, cache_key: String, cache_dir: String, input: Arc<dyn ExecutionPlan>, ctx: SessionContext) -> Self {
+    pub fn new(node_id: Uuid, table_name: String, cache_key: String, cache_dir: String, input: Arc<dyn ExecutionPlan>, ctx: Arc<SessionContext>) -> Self {
         let input_props = input.properties();
         let cache = PlanProperties::new(
             EquivalenceProperties::new(input.schema()),
@@ -164,39 +198,32 @@ impl MaterializerExec {
 }
 
 impl DisplayAs for MaterializerExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result { 
-        write!(f, "MaterializerExec(table={}, cache_dir={})", self.table_name, self.cache_dir) 
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "MaterializerExec(table={}, cache_dir={})", self.table_name, self.cache_dir)
     }
 }
 
 impl ExecutionPlan for MaterializerExec {
     fn as_any(&self) -> &dyn Any { self }
-    fn name(&self) -> &str { "MaterializerExec" }
     fn schema(&self) -> SchemaRef { self.input.schema() }
-    fn properties(&self) -> &PlanProperties { &self.cache }
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.input] }
     fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(Self::new(
-            self.node_id, 
-            self.table_name.clone(), 
-            self.cache_key.clone(), 
-            self.cache_dir.clone(),
-            children[0].clone(), 
-            self.ctx.clone()
-        )))
+        Ok(Arc::new(Self::new(self.node_id, self.table_name.clone(), self.cache_key.clone(), self.cache_dir.clone(), children[0].clone(), self.ctx.clone())))
     }
     fn execute(&self, partition: usize, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
-        let input_stream = self.input.execute(partition, context)?;
-        Ok(Box::pin(MaterializingStream {
-            node_id: self.node_id,
-            table_name: self.table_name.clone(),
-            cache_key: self.cache_key.clone(),
-            cache_dir: self.cache_dir.clone(),
-            input: input_stream,
+        let input = self.input.execute(partition, context)?;
+        Ok(Box::pin(MaterializingStream { 
+            node_id: self.node_id, 
+            table_name: self.table_name.clone(), 
+            cache_key: self.cache_key.clone(), 
+            cache_dir: self.cache_dir.clone(), 
+            input, 
             batches: Vec::new(),
-            ctx: self.ctx.clone(),
+            ctx: self.ctx.clone()
         }))
     }
+    fn properties(&self) -> &PlanProperties { &self.cache }
+    fn name(&self) -> &str { "MaterializerExec" }
 }
 
 struct MaterializingStream {
@@ -206,7 +233,7 @@ struct MaterializingStream {
     cache_dir: String,
     input: SendableRecordBatchStream,
     batches: Vec<RecordBatch>,
-    ctx: SessionContext,
+    ctx: Arc<SessionContext>,
 }
 
 impl Stream for MaterializingStream {
@@ -219,8 +246,6 @@ impl Stream for MaterializingStream {
             }
             Poll::Ready(None) => {
                 if !self.batches.is_empty() {
-                    let num_rows: usize = self.batches.iter().map(|b| b.num_rows()).sum();
-                    
                     let batches = std::mem::take(&mut self.batches);
                     let table_name = self.table_name.clone();
                     let cache_dir = self.cache_dir.clone();
@@ -234,15 +259,18 @@ impl Stream for MaterializingStream {
                         writer.close().unwrap();
 
                         if let Ok(conn) = duckdb::Connection::open(&metadata_path) {
+                            println!("DEBUG: Recording materialization for node {} into table {}", self.node_id, table_name);
                             conn.execute(
-                                "INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES (?1, ?2, ?3, ?4)",
-                                [self.node_id.to_string(), table_name.clone(), path.clone(), serde_json::to_string(&schema.to_string()).unwrap_or_default()],
+                                "INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES (?, ?, ?, ?)",
+                                [self.node_id.to_string(), table_name.clone(), path.clone(), "{}".to_string()],
                             ).ok();
-                            let ctx = self.ctx.clone();
+                            
+                            // ALSO register it in the shared context immediately
+                            let ctx_clone = self.ctx.clone();
                             let table_name_clone = table_name.clone();
+                            let path_clone = path.clone();
                             tokio::spawn(async move {
-                                tracing::debug!("Live registering table {}", table_name_clone);
-                                ctx.register_parquet(&table_name_clone, &path, datafusion::prelude::ParquetReadOptions::default()).await.ok();
+                                ctx_clone.register_parquet(&table_name_clone, &path_clone, ParquetReadOptions::default()).await.ok();
                             });
                         }
                     }

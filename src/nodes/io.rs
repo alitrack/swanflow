@@ -8,7 +8,6 @@ use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::logical_expr::{Extension, LogicalPlan};
 use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl, ListingTableConfigExt};
 use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::datasource::file_format::csv::CsvFormat;
 use datafusion::prelude::*;
 use duckdb::Connection;
 use serde_json::Value as JsonValue;
@@ -424,7 +423,7 @@ impl NodeBehavior for ExcelSheetNamesNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let path = config["path"].as_str().unwrap().to_string();
-        let mut workbook: Xlsx<_> = open_workbook(&path)?;
+        let workbook: Xlsx<_> = open_workbook(&path)?;
         let names = workbook.sheet_names();
         
         let schema = Arc::new(Schema::new(vec![Field::new("sheet_name", DataType::Utf8, false)]));
@@ -593,7 +592,7 @@ impl NodeBehavior for DuckDBReadNode {
         let conn = Connection::open(path)?;
         
         // Execute query to get result schema (for validation)
-        let mut stmt = conn.prepare(query)?;
+        let stmt = conn.prepare(query)?;
         let column_count = stmt.column_count();
         
         let mut fields = Vec::new();
@@ -955,7 +954,7 @@ impl NodeBehavior for UniversalReadNode {
             }
         };
 
-        let mut sess_config = SessionConfig::new().with_target_partitions(1);
+        let sess_config = SessionConfig::new().with_target_partitions(1);
         let ctx = SessionContext::new_with_config(sess_config);
         let is_dir = std::path::Path::new(path).is_dir();
 
@@ -1016,7 +1015,7 @@ impl NodeBehavior for UniversalReadNode {
             }
         };
 
-        let mut sess_config = SessionConfig::new().with_target_partitions(1);
+        let sess_config = SessionConfig::new().with_target_partitions(1);
         let ctx = SessionContext::new_with_config(sess_config);
         
         // Handle directory vs file
@@ -1252,7 +1251,12 @@ impl NodeBehavior for DbConnectorNode {
             DbDriver::SqlxAny => {
                 // SQLx path: dynamic schema discovery
                 sqlx::any::install_default_drivers();
-                let pool = futures::executor::block_on(sqlx::AnyPool::connect(url))
+                let normalized_url = if url.starts_with("sqlite3://") {
+                    url.replace("sqlite3://", "sqlite://")
+                } else {
+                    url.to_string()
+                };
+                let pool = futures::executor::block_on(sqlx::AnyPool::connect(&normalized_url))
                     .map_err(|e| anyhow!("SQLx connection failed: {}", e))?;
                 
                 let query_obj = sqlx::query(query);
@@ -1261,7 +1265,8 @@ impl NodeBehavior for DbConnectorNode {
                 
                 let mut fields = Vec::new();
                 for col in first_row.columns() {
-                    fields.push(Field::new(col.name().to_string(), DataType::Utf8, true));
+                    let arrow_type = crate::core::datasource::sqlx_type_to_arrow(col.type_info());
+                    fields.push(Field::new(col.name().to_string(), arrow_type, true));
                 }
                 
                 let schema = Arc::new(Schema::new(fields));
@@ -1269,7 +1274,7 @@ impl NodeBehavior for DbConnectorNode {
 
                 Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
                     node: Arc::new(crate::core::datasource::SqlxScanLogical {
-                        url: url.to_string(),
+                        url: normalized_url,
                         query: query.to_string(),
                         schema: Arc::new(df_schema),
                     }),

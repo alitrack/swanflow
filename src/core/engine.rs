@@ -1,7 +1,6 @@
 use std::sync::Arc;
-use std::fmt;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedSender};
 use datafusion::prelude::*;
 use datafusion::error::Result;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
@@ -13,6 +12,7 @@ use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use uuid::Uuid;
+use serde_json::json;
 
 use crate::core::graph::Workflow;
 use crate::core::compiler::WorkflowCompiler;
@@ -30,7 +30,7 @@ use crate::nodes::NodeEvent;
 use duckdb::Connection;
 
 pub struct SwanFlowEngine {
-    pub ctx: SessionContext,
+    pub ctx: Arc<SessionContext>,
     pub registry: Arc<NodeRegistry>,
     pub cache_dir: String,
 }
@@ -43,7 +43,7 @@ impl SwanFlowEngine {
     pub fn with_cache_dir(registry: Arc<NodeRegistry>, cache_dir: String) -> Self {
         std::fs::create_dir_all(&cache_dir).ok();
         
-        let ctx = SessionContext::new();
+        let ctx = Arc::new(SessionContext::new());
         
         // Initialize metadata table in DuckDB directly
         let metadata_path = format!("{}/metadata.duckdb", cache_dir);
@@ -62,98 +62,100 @@ impl SwanFlowEngine {
         Self { ctx, registry, cache_dir }
     }
 
-    pub async fn infer_metadata(&self, workflow: &Workflow) -> anyhow::Result<WorkflowMetadata> {
-        let mut compiler = WorkflowCompiler::with_cache_dir(false, self.cache_dir.clone());
-        compiler.compile(workflow, &self.registry, None).await?;
-        
-        Ok(WorkflowMetadata {
-            schemas: compiler.inferred_schemas,
-            sample_data: compiler.sample_data,
-            profiles: HashMap::new(),
-        })
-    }
-
-    pub async fn execute_workflow(
-        &self,
-        workflow: &Workflow,
-    ) -> anyhow::Result<mpsc::UnboundedReceiver<NodeEvent>> {
+    pub async fn execute_workflow(&self, workflow: &Workflow) -> Result<mpsc::UnboundedReceiver<NodeEvent>> {
         let (tx, rx) = mpsc::unbounded_channel();
-
-        // Register existing tables from DuckDB metadata to SessionContext
-        let cache_dir = self.cache_dir.clone();
-        if let Ok(conn) = Connection::open(format!("{}/metadata.duckdb", cache_dir)) {
-            let mut stmt = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata")?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            for row in rows {
-                if let Ok((table_name, path)) = row {
-                    self.ctx.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
-                }
-            }
-        }
-
-        let mut compiler = WorkflowCompiler::with_cache_dir(true, self.cache_dir.clone()).with_event_tx(tx.clone());
-        let terminal_outputs = compiler.compile(workflow, &self.registry, None).await?;
         
-        if terminal_outputs.is_empty() {
-            anyhow::bail!("Workflow has no outputs");
+        let mut compiler = WorkflowCompiler::with_cache_dir(true, self.cache_dir.clone());
+        compiler.ctx = self.ctx.clone();
+        compiler.event_tx = Some(tx.clone());
+        
+        let terminals = compiler.compile(workflow, &self.registry, None).await
+            .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
+        
+        if terminals.is_empty() {
+            return Err(datafusion::error::DataFusionError::Plan("Workflow has no outputs".to_string()));
         }
-
-        let tx_clone = tx.clone();
-        let planner = SwanFlowPlanner { event_tx: tx.clone(), ctx: self.ctx.clone(), cache_dir: self.cache_dir.clone() };
-        let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(planner)]));
-        let query_planner = Arc::new(SwanFlowQueryPlanner { physical_planner });
 
         let ctx = self.ctx.clone();
-        let current_cache_dir = self.cache_dir.clone();
+        let planner = SwanFlowPlanner { event_tx: tx.clone(), ctx: ctx.clone(), cache_dir: self.cache_dir.clone() };
+        let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(planner.clone())]));
+        let query_planner = Arc::new(SwanFlowQueryPlanner { physical_planner });
+
+        let ctx_clone = ctx.clone();
+        let cache_dir_clone = self.cache_dir.clone();
+        let query_planner_clone = query_planner.clone();
+
         tokio::spawn(async move {
-            for (port, logical_plan) in terminal_outputs {
-                let tables_to_register = {
-                    let mut tables = Vec::new();
-                    if let Ok(conn) = Connection::open(format!("{}/metadata.duckdb", current_cache_dir)) {
+            // SEQUENTIAL EXECUTION: run each terminal stage
+            for (port, logical_plan) in terminals {
+                println!("DEBUG: Stage Execution for port {}", port);
+                
+                // 1. Sync Materialized Tables
+                let tables = {
+                    let mut tables_data = Vec::new();
+                    let metadata_path = format!("{}/metadata.duckdb", cache_dir_clone);
+                    if let Ok(conn) = Connection::open(&metadata_path) {
                         if let Ok(mut stmt) = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata") {
                             if let Ok(rows) = stmt.query_map([], |row| {
                                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                             }) {
                                 for row in rows {
                                     if let Ok(res) = row {
-                                        tables.push(res);
+                                        tables_data.push(res);
                                     }
                                 }
                             }
                         }
                     }
-                    tables
+                    tables_data
                 };
 
-                for (table_name, path) in tables_to_register {
-                    // Register both with and without schema prefix for maximum compatibility
-                    ctx.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
+                for (table_name, path) in tables {
+                    let _ = ctx_clone.deregister_table(&table_name);
+                    ctx_clone.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
                 }
 
-                // Small sleep to ensure all async registration background tasks are settled
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-                let state = SessionStateBuilder::new_from_existing(ctx.state())
-                    .with_query_planner(query_planner.clone())
+                // 2. Planning with latest context
+                let state = ctx_clone.state();
+                let state = SessionStateBuilder::new_from_existing(state)
+                    .with_query_planner(query_planner_clone.clone())
                     .build();
-match state.create_physical_plan(&logical_plan).await {
-    Ok(physical_plan) => {
-        let task_ctx = ctx.task_ctx();
-        // SEQUENTIAL COLLECT: ensure one finishes before next plans
-        let _ = datafusion::physical_plan::collect(physical_plan, task_ctx).await;
 
-        // Force a catalog refresh in the session context
-        // By registering a dummy table or just waiting a bit
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-
+                match state.create_physical_plan(&logical_plan).await {
+                    Ok(physical_plan) => {
+                        let task_ctx = ctx_clone.task_ctx();
+                        // 3. Execution (blocking collect)
+                        if let Err(e) = datafusion::physical_plan::collect(physical_plan, task_ctx).await {
+                            let _ = tx.send(NodeEvent::Error { 
+                                node_id: Uuid::nil(), 
+                                message: format!("Execution error: {}", e) 
+                            });
+                        }
+                    }
                     Err(e) => {
-                        let _ = tx_clone.send(NodeEvent::Error { 
-                            node_id: Uuid::nil(),
-                            message: format!("Planning error: {}", e)
-                        });
+                        // 4. RETRY after sync if failed
+                        println!("DEBUG: Initial planning failed for port {}, syncing and retrying...", port);
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        
+                        let state = ctx_clone.state();
+                        let state = SessionStateBuilder::new_from_existing(state)
+                            .with_query_planner(query_planner_clone.clone())
+                            .build();
+                        
+                        match state.create_physical_plan(&logical_plan).await {
+                            Ok(physical_plan) => {
+                                let task_ctx = ctx_clone.task_ctx();
+                                if let Err(e) = datafusion::physical_plan::collect(physical_plan, task_ctx).await {
+                                    let _ = tx.send(NodeEvent::Error { node_id: Uuid::nil(), message: format!("Execution error: {}", e) });
+                                }
+                            }
+                            Err(e2) => {
+                                let _ = tx.send(NodeEvent::Error { 
+                                    node_id: Uuid::nil(), 
+                                    message: format!("Planning error for port {}: {} (Original: {})", port, e2, e) 
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -161,13 +163,29 @@ match state.create_physical_plan(&logical_plan).await {
 
         Ok(rx)
     }
+
+    pub async fn infer_metadata(&self, workflow: &Workflow) -> Result<WorkflowMetadata> {
+        let mut compiler = WorkflowCompiler::with_cache_dir(true, self.cache_dir.clone());
+        compiler.ctx = self.ctx.clone();
+        let registry = self.registry.clone();
+        let _ = compiler.compile(workflow, &registry, None).await
+            .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
+        
+        Ok(WorkflowMetadata {
+            schemas: compiler.inferred_schemas,
+            sample_data: compiler.sample_data,
+            profiles: HashMap::new(),
+        })
+    }
 }
 
+#[derive(Clone)]
 pub struct SwanFlowPlanner {
-    pub event_tx: mpsc::UnboundedSender<NodeEvent>,
-    pub ctx: SessionContext,
+    pub event_tx: UnboundedSender<NodeEvent>,
+    pub ctx: Arc<SessionContext>,
     pub cache_dir: String,
 }
+
 
 impl std::fmt::Debug for SwanFlowPlanner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -193,42 +211,35 @@ impl ExtensionPlanner for SwanFlowPlanner {
             ))));
         }
         if let Some(materializer) = node.as_any().downcast_ref::<MaterializerLogical>() {
-            let input = physical_inputs[0].clone();
-            // Ensure we coalesce partitions before materializing to a single file
-            let input = if input.properties().output_partitioning().partition_count() > 1 {
-                Arc::new(datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input))
-            } else {
-                input
-            };
             return Ok(Some(Arc::new(MaterializerExec::new(
                 materializer.node_id,
                 materializer.table_name.clone(),
                 materializer.cache_key.clone(),
                 materializer.cache_dir.clone(),
-                input,
+                physical_inputs[0].clone(),
                 self.ctx.clone(),
             ))));
         }
-        if let Some(excel) = node.as_any().downcast_ref::<ExcelScanLogical>() {
-            let schema = excel.schema.as_ref();
-            let arrow_schema = datafusion::arrow::datatypes::Schema::new(
-                schema.fields().iter().map(|f| f.as_ref().clone().into()).collect::<Vec<datafusion::arrow::datatypes::Field>>()
-            );
+        if let Some(excel_scan) = node.as_any().downcast_ref::<ExcelScanLogical>() {
+            let fields = excel_scan.schema.fields().iter()
+                .map(|f| datafusion::arrow::datatypes::Field::new(f.name(), f.data_type().clone(), f.is_nullable()))
+                .collect::<Vec<_>>();
+            let arrow_schema = datafusion::arrow::datatypes::Schema::new(fields);
             return Ok(Some(Arc::new(ExcelScanExec::new(
-                excel.path.clone(),
-                excel.sheet.clone(),
-                excel.mode.clone(),
+                excel_scan.path.clone(),
+                excel_scan.sheet.clone(),
+                excel_scan.mode.clone(),
                 Arc::new(arrow_schema),
             ))));
         }
-        if let Some(sink) = node.as_any().downcast_ref::<ExcelSinkLogical>() {
+        if let Some(excel_sink) = node.as_any().downcast_ref::<ExcelSinkLogical>() {
             return Ok(Some(Arc::new(ExcelSinkExec::new(
-                sink.path.clone(),
-                sink.sheets.clone(),
-                sink.styles.clone(),
-                sink.convert_to_table,
-                sink.conditional_formatting.clone(),
-                physical_inputs.to_vec(),
+                excel_sink.path.clone(),
+                vec![excel_sink.sheets.first().cloned().unwrap_or_else(|| "Sheet1".to_string())],
+                json!({}), 
+                true, 
+                json!({}), 
+                vec![physical_inputs[0].clone()],
             ))));
         }
         if let Some(template_sink) = node.as_any().downcast_ref::<ExcelTemplateSinkLogical>() {
@@ -250,33 +261,24 @@ impl ExtensionPlanner for SwanFlowPlanner {
         }
         if let Some(proxy) = node.as_any().downcast_ref::<SqlProxyLogical>() {
             // Late-binding: Register inputs and parse SQL now
-            tracing::debug!("Planning SqlProxy for node {}, query: {}", proxy.node_id, proxy.query);
             for (i, input_plan) in proxy.inputs.iter().enumerate() {
                 let table_name = format!("input_{}", i);
                 let df = datafusion::prelude::DataFrame::new(self.ctx.state(), input_plan.clone());
+                let _ = self.ctx.deregister_table(&table_name);
                 self.ctx.register_table(&table_name, df.into_view()).map_err(|e| {
                     datafusion::error::DataFusionError::Plan(format!("Failed to register input_{}: {}", i, e))
                 })?;
             }
 
             let df = self.ctx.sql(&proxy.query).await.map_err(|e| {
-                tracing::error!("Late-binding SQL error for node {}: {}", proxy.node_id, e);
                 datafusion::error::DataFusionError::Plan(format!("Late-binding SQL error: {}", e))
             })?;
             
             let logical_plan = df.into_optimized_plan()?;
-            let physical_plan = _planner.create_physical_plan(&logical_plan, _session_state).await?;
+            let physical_plan = _planner.create_physical_plan(&logical_plan, &self.ctx.state()).await?;
             
             // Check if schema matches logical proxy schema
             let logical_schema = proxy.schema.clone();
-            let physical_schema = physical_plan.schema();
-            
-            if logical_schema.as_ref() != &DFSchema::try_from(physical_schema.as_ref().clone())? {
-                tracing::warn!("Schema mismatch for node {}: logical={:?}, physical={:?}. Aligning...", proxy.node_id, logical_schema, physical_schema);
-            }
-            
-            // To fix this, we return a physical plan whose schema matches proxy.schema exactly.
-            // If they differ, we use a projection.
             let physical_plan = self.align_schemas(physical_plan, logical_schema.as_ref())?;
             
             return Ok(Some(physical_plan));
@@ -288,9 +290,10 @@ impl ExtensionPlanner for SwanFlowPlanner {
             ))));
         }
         if let Some(duck_scan) = node.as_any().downcast_ref::<DuckDBScanLogical>() {
-            let arrow_schema = datafusion::arrow::datatypes::Schema::new(
-                duck_scan.schema.fields().iter().map(|f| f.as_ref().clone().into()).collect::<Vec<datafusion::arrow::datatypes::Field>>()
-            );
+            let fields = duck_scan.schema.fields().iter()
+                .map(|f| datafusion::arrow::datatypes::Field::new(f.name(), f.data_type().clone(), f.is_nullable()))
+                .collect::<Vec<_>>();
+            let arrow_schema = datafusion::arrow::datatypes::Schema::new(fields);
             return Ok(Some(Arc::new(DuckDBScanExec::new(
                 duck_scan.connection_path.clone(),
                 duck_scan.extensions.clone(),
@@ -300,9 +303,10 @@ impl ExtensionPlanner for SwanFlowPlanner {
             ))));
         }
         if let Some(sqlx_scan) = node.as_any().downcast_ref::<SqlxScanLogical>() {
-            let arrow_schema = datafusion::arrow::datatypes::Schema::new(
-                sqlx_scan.schema.fields().iter().map(|f| f.as_ref().clone().into()).collect::<Vec<datafusion::arrow::datatypes::Field>>()
-            );
+            let fields = sqlx_scan.schema.fields().iter()
+                .map(|f| datafusion::arrow::datatypes::Field::new(f.name(), f.data_type().clone(), f.is_nullable()))
+                .collect::<Vec<_>>();
+            let arrow_schema = datafusion::arrow::datatypes::Schema::new(fields);
             return Ok(Some(Arc::new(SqlxScanExec::new(
                 sqlx_scan.url.clone(),
                 sqlx_scan.query.clone(),
@@ -316,23 +320,19 @@ impl ExtensionPlanner for SwanFlowPlanner {
 impl SwanFlowPlanner {
     fn align_schemas(&self, plan: Arc<dyn ExecutionPlan>, target: &DFSchema) -> Result<Arc<dyn ExecutionPlan>> {
         let plan_schema = plan.schema();
-        
-        // Check if actually different
         let plan_df_schema = DFSchema::try_from(plan_schema.as_ref().clone())?;
         if plan_df_schema == *target {
             return Ok(plan);
         }
 
-        // Create a projection to match the target schema
         let mut exprs = Vec::new();
         for field in target.fields() {
-            if let Ok(idx) = plan_schema.index_of(field.name()) {
+            if let Ok(_idx) = plan_schema.index_of(field.name()) {
                 exprs.push((
                     datafusion::physical_expr::expressions::col(field.name(), &plan_schema)?,
                     field.name().to_string(),
                 ));
             } else {
-                // Column missing in physical plan, add as NULL
                 let null_expr = datafusion::physical_expr::expressions::Literal::new(
                     ScalarValue::try_from(field.data_type())?
                 );
@@ -364,15 +364,13 @@ impl QueryPlanner for SwanFlowQueryPlanner {
         logical_plan: &LogicalPlan,
         session_state: &SessionState,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.physical_planner
-            .create_physical_plan(logical_plan, session_state)
-            .await
+        self.physical_planner.create_physical_plan(logical_plan, session_state).await
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct WorkflowMetadata {
     pub schemas: HashMap<Uuid, Vec<DFSchemaRef>>,
-    pub sample_data: HashMap<Uuid, Vec<RecordBatch>>,
-    pub profiles: HashMap<Uuid, RecordBatch>,
+    pub sample_data: HashMap<Uuid, Vec<datafusion::arrow::record_batch::RecordBatch>>,
+    pub profiles: HashMap<Uuid, datafusion::arrow::record_batch::RecordBatch>,
 }

@@ -1,11 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::prelude::*;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use serde_json::Value as JsonValue;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};

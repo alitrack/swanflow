@@ -878,6 +878,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -3929,6 +3930,7 @@ dependencies = [
  "async-recursion",
  "async-trait",
  "calamine",
+ "chrono",
  "clap",
  "datafusion",
  "dotenvy",
