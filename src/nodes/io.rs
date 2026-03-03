@@ -11,6 +11,7 @@ use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::prelude::*;
 use duckdb::Connection;
 use serde_json::Value as JsonValue;
+use serde_json::json;
 use sqlx::{Column, Row};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -148,24 +149,22 @@ impl NodeBehavior for ExcelReadNode {
                 data_rows.next();
             }
 
-            let mut count = 0;
-            for row in data_rows.take(sample_limit) {
-                count += 1;
-                for (i, cell) in row.iter().enumerate() {
-                    if i < builders.len() {
+            for _ in 0..sample_limit {
+                if let Some(row) = data_rows.next() {
+                    for (i, cell) in row.iter().enumerate() {
                         builders[i].append_value(cell.to_string());
                     }
+                } else {
+                    break;
                 }
             }
 
-            if count > 0 {
-                let columns: Vec<ArrayRef> = builders
-                    .into_iter()
-                    .map(|mut b| Arc::new(b.finish()) as ArrayRef)
-                    .collect();
-                let batch = RecordBatch::try_new(main_schema.clone(), columns)?;
-                sample_batches.push(batch);
-            }
+            let columns: Vec<ArrayRef> = builders
+                .into_iter()
+                .map(|mut b| Arc::new(b.finish()) as ArrayRef)
+                .collect();
+            let batch = RecordBatch::try_new(main_schema.clone(), columns)?;
+            sample_batches.push(batch);
         }
 
         Ok(InferredMetadata {
@@ -182,29 +181,20 @@ impl NodeBehavior for ExcelReadNode {
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let metadata = self.infer_schema(vec![], config).await?;
         let path = PathBuf::from(config["path"].as_str().unwrap());
         let sheet = config["sheet"].as_str().map(|s| s.to_string());
+        let mode = ExcelScanMode::Validated;
 
-        let main_plan = LogicalPlan::Extension(Extension {
-            node: Arc::new(ExcelScanLogical {
-                path: path.clone(),
-                sheet: sheet.clone(),
-                mode: ExcelScanMode::Validated,
-                schema: metadata.schemas[0].clone(),
-            }),
-        });
-
-        let rejects_plan = LogicalPlan::Extension(Extension {
+        let scan_node = LogicalPlan::Extension(Extension {
             node: Arc::new(ExcelScanLogical {
                 path,
                 sheet,
-                mode: ExcelScanMode::Rejects,
-                schema: metadata.schemas[1].clone(),
+                mode,
+                schema: Arc::new(DFSchema::empty()), // Placeholder, will be inferred
             }),
         });
 
-        Ok(vec![main_plan, rejects_plan])
+        Ok(vec![scan_node])
     }
 }
 
@@ -216,55 +206,19 @@ impl NodeBehavior for ExcelWriteNode {
         NodeSpec {
             type_id: "core.io.excel_write".to_string(),
             display_name: "Excel Writer".to_string(),
-            description: "Write data to an Excel file with multi-sheet, chart and pivot support".to_string(),
-            input_ports: vec![
-                PortSpec { id: 0, name: "sheet_0".into(), description: "Data for sheet 1".into() },
-                PortSpec { id: 1, name: "sheet_1".into(), description: "Data for sheet 2 (Optional)".into() },
-                PortSpec { id: 2, name: "sheet_2".into(), description: "Data for sheet 3 (Optional)".into() },
-            ],
+            description: "Write data to an Excel file.".to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data to write".into(),
+            }],
             output_ports: vec![],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "sheets": { 
-                        "type": "array", 
-                        "items": { "type": "string" },
-                        "default": ["Sheet1"]
-                    },
-                    "styles": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "column": { "type": "string" },
-                                "format": {
-                                    "type": "object",
-                                    "properties": {
-                                        "bold": { "type": "boolean" },
-                                        "font_color": { "type": "string" },
-                                        "bg_color": { "type": "string" },
-                                        "num_format": { "type": "string" }
-                                    }
-                                }
-                            },
-                            "required": ["column", "format"]
-                        }
-                    },
-                    "convert_to_table": { "type": "boolean", "default": false },
-                    "conditional_formatting": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "column": { "type": "string" },
-                                "type": { "type": "string", "enum": ["cell", "average", "duplicate", "unique"] },
-                                "criteria": { "type": "string" },
-                                "value": { "type": "number" },
-                                "format": { "type": "object" }
-                            }
-                        }
-                    }
+                    "sheet": { "type": "string", "default": "Sheet1" },
+                    "convert_to_table": { "type": "boolean", "default": true }
                 },
                 "required": ["path"]
             }),
@@ -274,7 +228,7 @@ impl NodeBehavior for ExcelWriteNode {
     fn validate(&self, config: &JsonValue) -> Result<()> {
         config["path"]
             .as_str()
-            .ok_or_else(|| anyhow!("Output Path is required"))?;
+            .ok_or_else(|| anyhow!("Excel Path is required"))?;
         Ok(())
     }
 
@@ -284,20 +238,17 @@ impl NodeBehavior for ExcelWriteNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let path = PathBuf::from(config["path"].as_str().unwrap());
-        let sheets: Vec<String> = if let Some(arr) = config["sheets"].as_array() {
-            arr.iter().map(|v| v.as_str().unwrap_or("Sheet").to_string()).collect()
-        } else {
-            vec!["Sheet1".to_string()]
-        };
+        let sheet = config["sheet"].as_str().unwrap_or("Sheet1").to_string();
+        let convert_to_table = config["convert_to_table"].as_bool().unwrap_or(true);
 
         let sink_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(ExcelSinkLogical {
                 path,
-                sheets,
-                styles: config["styles"].clone(),
-                convert_to_table: config["convert_to_table"].as_bool().unwrap_or(false),
-                conditional_formatting: config["conditional_formatting"].clone(),
+                sheets: vec![sheet],
                 inputs,
+                styles: json!({}),
+                convert_to_table,
+                conditional_formatting: json!({}),
             }),
         });
 
@@ -528,21 +479,35 @@ impl DuckDBHelper {
         Ok(())
     }
 
-    pub fn query_arrow(conn: &Connection, query: &str) -> Result<Vec<RecordBatch>> {
-        // Use temporary parquet to bridge crate versions
-        let tmp_file = std::env::temp_dir().join(format!("rustflow_query_{}.parquet", uuid::Uuid::new_v4()));
+    pub async fn query_arrow(
+        path: &str,
+        query: &str,
+        extensions: &[String],
+        attach_sql: &Option<String>,
+    ) -> Result<Vec<RecordBatch>> {
+        let conn = Self::open_connection(path)?;
+        Self::prepare_connection(&conn, &extensions.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+        
+        if let Some(sql) = attach_sql {
+            conn.execute_batch(sql).map_err(|e| anyhow!("Attach SQL failed: {}", e))?;
+        }
+
+        // Use a temporary parquet file to bridge DuckDB and DataFusion
+        let tmp_dir = std::env::temp_dir();
+        let tmp_file = tmp_dir.join(format!("duckdb_bridge_{}.parquet", uuid::Uuid::new_v4()));
         let tmp_path = tmp_file.to_str().unwrap();
 
         let copy_sql = format!("COPY ({}) TO '{}' (FORMAT PARQUET)", query, tmp_path);
         conn.execute(&copy_sql, []).map_err(|e| anyhow!("DuckDB COPY failed: {}", e))?;
         
         let ctx = SessionContext::new();
-        let batches = futures::executor::block_on(async {
+        let batches = {
             let df = ctx.read_parquet(tmp_path, ParquetReadOptions::default()).await?;
             df.collect().await
-        }).map_err(|e| anyhow!("DataFusion read back failed: {}", e))?;
+        }.map_err(|e| anyhow!("DataFusion read back failed: {}", e))?;
         
-        std::fs::remove_file(tmp_file).ok();
+        std::fs::remove_file(tmp_path).ok();
+        
         Ok(batches)
     }
 }
@@ -588,34 +553,14 @@ impl NodeBehavior for DuckDBReadNode {
         let path = config["path"].as_str().unwrap_or(":memory:");
         let query = config["query"].as_str().unwrap_or("SELECT 1");
         
-        // Open DuckDB connection to validate query and infer schema
-        let conn = Connection::open(path)?;
-        
-        // Execute query to get result schema (for validation)
-        let stmt = conn.prepare(query)?;
-        let column_count = stmt.column_count();
-
-        
-        let mut fields = Vec::new();
-        for i in 0..column_count {
-            let duckdb_type = stmt.column_type(i);
-            // duckdb-rs might return its own re-exported arrow DataType
-            // Convert it to our arrow crate's DataType by string representation if needed, 
-            // or better, if it's the same major version, they might be compatible.
-            // For now, let's use a more robust way to get the type if the enum match is failing.
-            let arrow_type = match format!("{:?}", duckdb_type).as_str() {
-                "Int64" | "BigInt" => DataType::Int64,
-                "Float32" | "Float" => DataType::Float32,
-                "Float64" | "Double" => DataType::Float64,
-                "Utf8" | "Varchar" | "VarChar" => DataType::Utf8,
-                "Boolean" | "Bool" => DataType::Boolean,
-                _ => DataType::Utf8,
-            };
-            fields.push(Field::new(stmt.column_name(i)?, arrow_type, true));
+        // Use query_arrow to get the schema reliably without holding Connection across await
+        let batches = DuckDBHelper::query_arrow(path, query, &vec![], &None).await?;
+        if batches.is_empty() {
+            return Err(anyhow!("Query returned no data for schema inference"));
         }
         
-        let schema = Arc::new(Schema::new(fields));
-        let df_schema = datafusion::common::DFSchema::try_from(schema)?;
+        let schema = batches[0].schema();
+        let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
 
         Ok(vec![LogicalPlan::EmptyRelation(
             datafusion::logical_expr::EmptyRelation {
@@ -701,47 +646,23 @@ impl NodeBehavior for HttpFetchNode {
         Ok(())
     }
 
-    async fn infer_schema(
-        &self,
-        _input_schemas: Vec<DFSchemaRef>,
-        config: &JsonValue,
-    ) -> Result<InferredMetadata> {
-        let url = config["url"].as_str().unwrap();
-        let client = reqwest::Client::new();
-        let response = client.get(url).send().await?;
-        let json: JsonValue = response.json().await?;
-        let items = if json.is_array() {
-            json.as_array().unwrap().clone()
-        } else {
-            vec![json]
-        };
-        if items.is_empty() {
-            return Err(anyhow!("Empty JSON response"));
-        }
-
-        // We'll use a placeholder schema for now or try to infer it.
-        // DataFusion SessionContext can sometimes infer from JSON.
-        let schema = Arc::new(Schema::new(vec![Field::new("data", DataType::Utf8, true)]));
-        let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
-
-        Ok(InferredMetadata {
-            schemas: vec![Arc::new(df_schema)],
-            sample_data: None,
-        })
-    }
-
     async fn propose_plan(
         &self,
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let metadata = self.infer_schema(vec![], config).await?;
-        Ok(vec![LogicalPlan::EmptyRelation(
-            datafusion::logical_expr::EmptyRelation {
-                produce_one_row: false,
-                schema: metadata.schemas[0].clone(),
-            },
-        )])
+        let url = config["url"].as_str().unwrap().to_string();
+        let _method = config["method"].as_str().unwrap_or("GET").to_string();
+
+        Ok(vec![LogicalPlan::Extension(Extension {
+            node: Arc::new(crate::core::datasource::DuckDBScanLogical {
+                connection_path: ":memory:".to_string(),
+                extensions: vec!["httpfs".to_string()],
+                attach_sql: None,
+                query: format!("SELECT * FROM read_json_auto('{}')", url),
+                schema: Arc::new(DFSchema::empty()),
+            }),
+        })])
     }
 }
 
@@ -751,9 +672,9 @@ pub struct ParquetReadNode;
 impl NodeBehavior for ParquetReadNode {
     fn spec(&self) -> NodeSpec {
         NodeSpec {
-            type_id: "core.io.parquet".to_string(),
+            type_id: "core.io.parquet_read".to_string(),
             display_name: "Parquet Reader".to_string(),
-            description: "Read data from a Parquet file".to_string(),
+            description: "Read data from a Parquet file or directory.".to_string(),
             input_ports: vec![],
             output_ports: vec![PortSpec {
                 id: 0,
@@ -797,9 +718,9 @@ pub struct CsvReadNode;
 impl NodeBehavior for CsvReadNode {
     fn spec(&self) -> NodeSpec {
         NodeSpec {
-            type_id: "core.io.csv".to_string(),
+            type_id: "core.io.csv_read".to_string(),
             display_name: "CSV Reader".to_string(),
-            description: "Read data from a CSV file".to_string(),
+            description: "Read data from a CSV file.".to_string(),
             input_ports: vec![],
             output_ports: vec![PortSpec {
                 id: 0,
@@ -837,70 +758,44 @@ impl NodeBehavior for CsvReadNode {
 
 pub struct UniversalReadNode;
 
+impl UniversalReadNode {
+    fn detect_format(path: &str) -> Option<FileFormat> {
+        let path = path.to_lowercase();
+        if path.ends_with(".parquet") {
+            Some(FileFormat::Parquet)
+        } else if path.ends_with(".csv") {
+            Some(FileFormat::Csv)
+        } else if path.ends_with(".json") || path.ends_with(".jsonl") {
+            Some(FileFormat::Json)
+        } else {
+            None
+        }
+    }
+
+    fn discover_partitions(dir_path: &str) -> Vec<String> {
+        let mut partitions = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir_path) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    let name = entry.file_name().into_string().unwrap_or_default();
+                    if name.contains('=') {
+                        let parts: Vec<&str> = name.split('=').collect();
+                        if !parts.is_empty() {
+                            partitions.push(parts[0].to_string());
+                        }
+                    }
+                }
+            }
+        }
+        partitions
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileFormat {
     Parquet,
     Csv,
     Json,
-    Avro,
-    Arrow,
-}
-
-impl UniversalReadNode {
-    fn detect_format(path: &str) -> Option<FileFormat> {
-        let path_lower = path.to_lowercase();
-        if path_lower.ends_with(".parquet") {
-            return Some(FileFormat::Parquet);
-        }
-        if path_lower.ends_with(".csv") {
-            return Some(FileFormat::Csv);
-        }
-        if path_lower.ends_with(".json") || path_lower.ends_with(".ndjson") {
-            return Some(FileFormat::Json);
-        }
-        if path_lower.ends_with(".avro") {
-            return Some(FileFormat::Avro);
-        }
-        if path_lower.ends_with(".arrow") {
-            return Some(FileFormat::Arrow);
-        }
-        
-        // Basic magic number detection could be added here if needed
-        None
-    }
-
-    fn discover_partitions(path: &str) -> Vec<(String, DataType)> {
-        let mut partitions = std::collections::BTreeMap::new();
-        Self::discover_partitions_recursive(std::path::Path::new(path), &mut partitions);
-        partitions.into_iter().map(|(k, v)| (k, v)).collect()
-    }
-
-    fn discover_partitions_recursive(path: &std::path::Path, partitions: &mut std::collections::BTreeMap<String, DataType>) {
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.contains('=') {
-                        let parts: Vec<&str> = name.splitn(2, '=').collect();
-                        if parts.len() == 2 {
-                            let key = parts[0].to_string();
-                            let val = parts[1];
-                            let dt = if val.parse::<i64>().is_ok() {
-                                DataType::Int64
-                            } else if val.parse::<f64>().is_ok() {
-                                DataType::Float64
-                            } else {
-                                DataType::Utf8
-                            };
-                            partitions.entry(key).or_insert(dt);
-                        }
-                    }
-                    // Recurse to find nested partitions
-                    Self::discover_partitions_recursive(&entry.path(), partitions);
-                }
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -959,7 +854,6 @@ impl NodeBehavior for UniversalReadNode {
         let ctx = SessionContext::new_with_config(sess_config);
         let is_dir = std::path::Path::new(path).is_dir();
 
-
         match format {
             FileFormat::Parquet => {
                 let mut opts = ParquetReadOptions::default();
@@ -967,7 +861,9 @@ impl NodeBehavior for UniversalReadNode {
                     let abs_path = std::fs::canonicalize(path)?;
                     let partitions = Self::discover_partitions(abs_path.to_str().unwrap());
                     if !partitions.is_empty() {
-                        opts.table_partition_cols = partitions;
+                        opts.table_partition_cols = partitions.into_iter()
+                            .map(|p| (p, DataType::Utf8))
+                            .collect();
                     }
                 }
                 let df = ctx.read_parquet(path, opts).await?;
@@ -987,13 +883,20 @@ impl NodeBehavior for UniversalReadNode {
                 })
             }
             FileFormat::Json => {
-                let df = ctx.read_json(path, NdJsonReadOptions::default()).await?;
+                let abs_path = std::fs::canonicalize(path)?;
+                let query = format!("SELECT * FROM read_json_auto('{}')", abs_path.to_str().unwrap());
+                
+                let batches = DuckDBHelper::query_arrow(":memory:", &query, &vec![], &None).await?;
+                if batches.is_empty() { return Err(anyhow!("JSON file is empty or invalid: {}", path)); }
+                
+                let schema = batches[0].schema();
+                let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
+
                 Ok(InferredMetadata {
-                    schemas: vec![Arc::new(df.schema().clone())],
+                    schemas: vec![Arc::new(df_schema)],
                     sample_data: None,
                 })
             }
-            _ => Err(anyhow!("Schema inference not yet fully implemented for {:?}", format)),
         }
     }
 
@@ -1004,7 +907,7 @@ impl NodeBehavior for UniversalReadNode {
     ) -> Result<Vec<LogicalPlan>> {
         let path = config["path"].as_str().unwrap();
         let format_str = config["format"].as_str().unwrap_or("auto");
-        let _recursive = config["recursive"].as_bool().unwrap_or(false);
+        let recursive = config["recursive"].as_bool().unwrap_or(false);
         
         let format = if format_str == "auto" {
             Self::detect_format(path).ok_or_else(|| anyhow!("Could not detect format for {}", path))?
@@ -1021,79 +924,9 @@ impl NodeBehavior for UniversalReadNode {
         let ctx = SessionContext::new_with_config(sess_config);
 
         // Handle directory vs file
-
         let is_dir = std::path::Path::new(path).is_dir();
         
         if is_dir {
-            match format {
-                FileFormat::Parquet => {
-                    let abs_path = std::fs::canonicalize(path)?;
-                    let table_url = ListingTableUrl::parse(abs_path.to_str().unwrap())?;
-                    
-                    let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
-                        .with_collect_stat(true)
-                        .with_file_extension(".parquet")
-                        .with_target_partitions(1);
-                    
-                    let config = ListingTableConfig::new(table_url)
-                        .with_listing_options(listing_options);
-                    
-                    let config = config.infer(&ctx.state()).await?;
-                    let table = Arc::new(ListingTable::try_new(config)?);
-                    
-                    let df = ctx.read_table(table)?;
-                    let df = df.repartition(datafusion::logical_expr::Partitioning::RoundRobinBatch(1))?;
-                    Ok(vec![df.into_optimized_plan()?])
-                }
-                FileFormat::Csv => {
-                    let abs_path = std::fs::canonicalize(path)?;
-                    let glob_path = format!("file://{}/**/*.csv", abs_path.to_str().unwrap());
-                    let table_url = ListingTableUrl::parse(glob_path)?;
-                    
-                    let has_header = config["has_header"].as_bool().unwrap_or(true);
-                    let delimiter = config["delimiter"].as_str().unwrap_or(",").as_bytes()[0];
-                    
-                    let csv_format = datafusion::datasource::file_format::csv::CsvFormat::default()
-                        .with_has_header(has_header)
-                        .with_delimiter(delimiter);
-                    
-                    let listing_options = ListingOptions::new(Arc::new(csv_format))
-                        .with_collect_stat(true)
-                        .with_target_partitions(1);
-                    
-                    let config = ListingTableConfig::new(table_url)
-                        .with_listing_options(listing_options);
-                    
-                    let config = config.infer(&ctx.state()).await?;
-                    let table = Arc::new(ListingTable::try_new(config)?);
-                    
-                    let df = ctx.read_table(table)?;
-                    Ok(vec![df.into_optimized_plan()?])
-                }
-                FileFormat::Json => {
-                    let abs_path = std::fs::canonicalize(path)?;
-                    let query = format!("SELECT * FROM read_json_auto('{}/**/*.json')", abs_path.to_str().unwrap());
-                    
-                    let conn = DuckDBHelper::open_connection(":memory:")?;
-                    let batches = DuckDBHelper::query_arrow(&conn, &query)?;
-                    if batches.is_empty() { return Err(anyhow!("No JSON data found in {}", path)); }
-                    
-                    let schema = batches[0].schema();
-                    let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
-
-                    Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
-                        node: Arc::new(crate::core::datasource::DuckDBScanLogical {
-                            connection_path: ":memory:".to_string(),
-                            extensions: vec![],
-                            attach_sql: None,
-                            query,
-                            schema: Arc::new(df_schema),
-                        }),
-                    })])
-                }
-                _ => Err(anyhow!("Directory scanning not yet supported for {:?}", format)),
-            }
-        } else {
             match format {
                 FileFormat::Parquet => {
                     let abs_path = std::fs::canonicalize(path)?;
@@ -1123,10 +956,48 @@ impl NodeBehavior for UniversalReadNode {
                 }
                 FileFormat::Json => {
                     let abs_path = std::fs::canonicalize(path)?;
+                    let query = if recursive {
+                        format!("SELECT * FROM read_json_auto('{}/**/*.json')", abs_path.to_str().unwrap())
+                    } else {
+                        format!("SELECT * FROM read_json_auto('{}/*.json')", abs_path.to_str().unwrap())
+                    };
+                    
+                    let batches = DuckDBHelper::query_arrow(":memory:", &query, &vec![], &None).await?;
+                    if batches.is_empty() { return Err(anyhow!("No JSON data found in {}", path)); }
+                    
+                    let schema = batches[0].schema();
+                    let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
+
+                    Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
+                        node: Arc::new(crate::core::datasource::DuckDBScanLogical {
+                            connection_path: ":memory:".to_string(),
+                            extensions: vec![],
+                            attach_sql: None,
+                            query,
+                            schema: Arc::new(df_schema),
+                        }),
+                    })])
+                }
+            }
+        } else {
+            // Single file path
+            match format {
+                FileFormat::Parquet => {
+                    let df = ctx.read_parquet(path, ParquetReadOptions::default()).await?;
+                    Ok(vec![df.into_optimized_plan()?])
+                }
+                FileFormat::Csv => {
+                    let has_header = config["has_header"].as_bool().unwrap_or(true);
+                    let delimiter = config["delimiter"].as_str().unwrap_or(",").as_bytes()[0];
+                    let opts = CsvReadOptions::new().has_header(has_header).delimiter(delimiter);
+                    let df = ctx.read_csv(path, opts).await?;
+                    Ok(vec![df.into_optimized_plan()?])
+                }
+                FileFormat::Json => {
+                    let abs_path = std::fs::canonicalize(path)?;
                     let query = format!("SELECT * FROM read_json_auto('{}')", abs_path.to_str().unwrap());
                     
-                    let conn = DuckDBHelper::open_connection(":memory:")?;
-                    let batches = DuckDBHelper::query_arrow(&conn, &query)?;
+                    let batches = DuckDBHelper::query_arrow(":memory:", &query, &vec![], &None).await?;
                     if batches.is_empty() { return Err(anyhow!("JSON file is empty or invalid: {}", path)); }
                     
                     let schema = batches[0].schema();
@@ -1142,7 +1013,6 @@ impl NodeBehavior for UniversalReadNode {
                         }),
                     })])
                 }
-                _ => Err(anyhow!("Format {:?} not supported in propose_plan", format)),
             }
         }
     }
@@ -1206,44 +1076,46 @@ impl NodeBehavior for DbConnectorNode {
     ) -> Result<Vec<LogicalPlan>> {
         let url = config["url"].as_str().unwrap();
         let query = config["query"].as_str().unwrap();
-        let driver = Self::select_driver(url);
         
-        let ctx = SessionContext::new();
+        // ENV expansion for security
+        let expanded_url = if url.contains("${") {
+            let mut result = url.to_string();
+            let re = regex::Regex::new(r"\$\{([A-Z0-9_]+)\}").unwrap();
+            for cap in re.captures_iter(url) {
+                let var_name = &cap[1];
+                if let Ok(val) = std::env::var(var_name) {
+                    result = result.replace(&cap[0], &val);
+                }
+            }
+            result
+        } else {
+            url.to_string()
+        };
+
+        let driver = Self::select_driver(&expanded_url);
         
         match driver {
             DbDriver::DuckDBPostgres | DbDriver::DuckDBSqlite => {
-                let conn = DuckDBHelper::open_connection(":memory:")?;
                 let ext = if driver == DbDriver::DuckDBPostgres { "postgres" } else { "sqlite" };
-                DuckDBHelper::prepare_connection(&conn, &[ext])?;
                 
-                // For Postgres, we need to ATTACH. 
-                // For SQLite, we can just ATTACH.
-                if driver == DbDriver::DuckDBPostgres {
-                    conn.execute(&format!("ATTACH '{}' AS ext_db (TYPE postgres);", url), [])?;
+                let (path, attach_sql) = if driver == DbDriver::DuckDBPostgres {
+                    (":memory:", Some(format!("ATTACH '{}' AS ext_db (TYPE postgres);", expanded_url)))
                 } else {
-                    // url is sqlite:///path/to/db.sqlite, DuckDB needs the path
-                    let path = url.trim_start_matches("sqlite://");
-                    conn.execute(&format!("ATTACH '{}' AS ext_db (TYPE sqlite);", path), [])?;
-                }
+                    let db_path = expanded_url.trim_start_matches("sqlite://");
+                    (":memory:", Some(format!("ATTACH '{}' AS ext_db (TYPE sqlite);", db_path)))
+                };
                 
-                // Use query_arrow to get the schema reliably
-                let batches = DuckDBHelper::query_arrow(&conn, query)?;
+                // Use query_arrow to get the schema reliably without holding Connection
+                let batches = DuckDBHelper::query_arrow(path, query, &vec![ext.to_string()], &attach_sql).await?;
                 if batches.is_empty() {
                     return Err(anyhow!("Query returned no data for schema inference"));
                 }
                 let schema = batches[0].schema();
                 let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
                 
-                let attach_sql = if driver == DbDriver::DuckDBPostgres {
-                    Some(format!("ATTACH '{}' AS ext_db (TYPE postgres);", url))
-                } else {
-                    let path = url.trim_start_matches("sqlite://");
-                    Some(format!("ATTACH '{}' AS ext_db (TYPE sqlite);", path))
-                };
-
                 Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
                     node: Arc::new(crate::core::datasource::DuckDBScanLogical {
-                        connection_path: ":memory:".to_string(),
+                        connection_path: path.to_string(),
                         extensions: vec![ext.to_string()],
                         attach_sql,
                         query: query.to_string(),
@@ -1254,16 +1126,16 @@ impl NodeBehavior for DbConnectorNode {
             DbDriver::SqlxAny => {
                 // SQLx path: dynamic schema discovery
                 sqlx::any::install_default_drivers();
-                let normalized_url = if url.starts_with("sqlite3://") {
-                    url.replace("sqlite3://", "sqlite://")
+                let normalized_url = if expanded_url.starts_with("sqlite3://") {
+                    expanded_url.replace("sqlite3://", "sqlite://")
                 } else {
-                    url.to_string()
+                    expanded_url.to_string()
                 };
-                let pool = futures::executor::block_on(sqlx::AnyPool::connect(&normalized_url))
+                let pool = sqlx::AnyPool::connect(&normalized_url).await
                     .map_err(|e| anyhow!("SQLx connection failed: {}", e))?;
                 
                 let query_obj = sqlx::query(query);
-                let first_row = futures::executor::block_on(query_obj.fetch_one(&pool))
+                let first_row = query_obj.fetch_one(&pool).await
                     .map_err(|e| anyhow!("SQLx query failed for schema inference: {}", e))?;
                 
                 let mut fields = Vec::new();
@@ -1280,6 +1152,7 @@ impl NodeBehavior for DbConnectorNode {
                         url: normalized_url,
                         query: query.to_string(),
                         schema: Arc::new(df_schema),
+                        params: vec![], // TODO: Support parameters in DbConnectorNode if needed
                     }),
                 })])
             }

@@ -125,6 +125,7 @@ impl WorkflowCompiler {
                             cache_dir: self.cache_dir.clone(),
                             input: plan.clone(),
                             ctx: ctx.clone(),
+                            event_tx: self.event_tx.clone().unwrap(),
                         }),
                     });
                     

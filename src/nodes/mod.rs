@@ -49,6 +49,7 @@ pub enum NodeState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeEvent {
     StateChanged { node_id: Uuid, state: NodeState },
+    Materialized { node_id: Uuid, table_name: String, parquet_path: String },
     Progress { node_id: Uuid, percentage: f32 },
     Error { node_id: Uuid, message: String },
 }

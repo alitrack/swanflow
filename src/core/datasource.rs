@@ -10,7 +10,7 @@ use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use calamine::{open_workbook, Data, Reader, Xlsx};
 use serde_json::Value as JsonValue;
-use datafusion::common::DFSchemaRef;
+use datafusion::common::{DFSchemaRef, ScalarValue};
 use datafusion::error::Result;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
@@ -113,6 +113,7 @@ pub struct SqlxScanLogical {
     pub url: String,
     pub query: String,
     pub schema: DFSchemaRef,
+    pub params: Vec<ScalarValue>,
 }
 
 impl PartialOrd for SqlxScanLogical {
@@ -152,11 +153,12 @@ pub struct SqlxScanExec {
     pub url: String,
     pub query: String,
     pub project_schema: SchemaRef,
+    pub params: Vec<ScalarValue>,
     cache: PlanProperties,
 }
 
 impl SqlxScanExec {
-    pub fn new(url: String, query: String, project_schema: SchemaRef) -> Self {
+    pub fn new(url: String, query: String, project_schema: SchemaRef, params: Vec<ScalarValue>) -> Self {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(project_schema.clone()),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
@@ -167,6 +169,7 @@ impl SqlxScanExec {
             url,
             query,
             project_schema,
+            params,
             cache,
         }
     }
@@ -199,7 +202,12 @@ impl ExecutionPlan for SqlxScanExec {
         self: Arc<Self>,
         _children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(self)
+        Ok(Arc::new(Self::new(
+            self.url.clone(),
+            self.query.clone(),
+            self.project_schema.clone(),
+            self.params.clone(),
+        )))
     }
 
     fn execute(
@@ -210,6 +218,7 @@ impl ExecutionPlan for SqlxScanExec {
         let url = self.url.clone();
         let query = self.query.clone();
         let schema = self.project_schema.clone();
+        let params = self.params.clone();
 
         let mut builder = RecordBatchReceiverStream::builder(schema.clone(), 1);
         let tx = builder.tx();
@@ -217,7 +226,21 @@ impl ExecutionPlan for SqlxScanExec {
         builder.spawn(async move {
             sqlx::any::install_default_drivers();
             let pool = sqlx::AnyPool::connect(&url).await.map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-            let mut rows = sqlx::query(&query).fetch(&pool);
+            
+            let mut query_obj = sqlx::query(&query);
+            for param in &params {
+                match param {
+                    ScalarValue::Int64(Some(i)) => query_obj = query_obj.bind(*i),
+                    ScalarValue::Float64(Some(f)) => query_obj = query_obj.bind(*f),
+                    ScalarValue::Boolean(Some(b)) => query_obj = query_obj.bind(*b),
+                    ScalarValue::Utf8(Some(s)) => query_obj = query_obj.bind(s.clone()),
+                    _ => {
+                        let s = format!("{}", param);
+                        query_obj = query_obj.bind(s);
+                    }
+                }
+            }
+            let mut rows = query_obj.fetch(&pool);
 
             let mut builders: Vec<DynamicArrayBuilder> = schema.fields().iter()
                 .map(|f| DynamicArrayBuilder::new(f.data_type(), 1000))
@@ -871,16 +894,17 @@ impl ExecutionPlan for ExcelSinkExec {
             streams.push(input.execute(partition, context.clone())?);
         }
         
+        let input_count = streams.len();
         Ok(Box::pin(ExcelWritingStream {
             inputs: streams,
             path: self.path.clone(),
             sheets: self.sheets.clone(),
             styles: self.styles.clone(),
             convert_to_table: self.convert_to_table,
-            conditional_formatting: self.conditional_formatting.clone(),
-            all_batches: vec![Vec::new(); self.inputs.len()],
-            finished_mask: vec![false; self.inputs.len()],
+            all_batches: vec![Vec::new(); input_count],
+            finished_mask: vec![false; input_count],
         }))
+
     }
 }
 
@@ -890,7 +914,6 @@ struct ExcelWritingStream {
     sheets: Vec<String>,
     styles: JsonValue,
     convert_to_table: bool,
-    conditional_formatting: JsonValue,
     /// Stores batches per input (sheet)
     all_batches: Vec<Vec<RecordBatch>>,
     finished_mask: Vec<bool>,

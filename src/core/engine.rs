@@ -34,6 +34,32 @@ pub struct SwanFlowEngine {
     pub cache_dir: String,
 }
 
+async fn sync_metadata_to_context(ctx: &Arc<SessionContext>, cache_dir: &str) {
+    let metadata_path = format!("{}/metadata.duckdb", cache_dir);
+    let tables = {
+        let mut tables_data = Vec::new();
+        if let Ok(conn) = Connection::open(&metadata_path) {
+            if let Ok(mut stmt) = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata") {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                }) {
+                    for row in rows {
+                        if let Ok(res) = row {
+                            tables_data.push(res);
+                        }
+                    }
+                }
+            }
+        }
+        tables_data
+    };
+
+    for (table_name, path) in tables {
+        let _ = ctx.deregister_table(&table_name);
+        ctx.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
+    }
+}
+
 impl SwanFlowEngine {
     pub fn new(registry: Arc<NodeRegistry>) -> Self {
         Self::with_cache_dir(registry, "target/swanflow_cache".to_string())
@@ -89,30 +115,8 @@ impl SwanFlowEngine {
             for (level, terminals) in stages.into_iter().enumerate() {
                 println!("DEBUG: Executing Stage Level {}", level);
                 
-                // 1. Initial Sync for this level (might need tables from previous stages)
-                let tables = {
-                    let mut tables_data = Vec::new();
-                    let metadata_path = format!("{}/metadata.duckdb", cache_dir_clone);
-                    if let Ok(conn) = Connection::open(&metadata_path) {
-                        if let Ok(mut stmt) = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata") {
-                            if let Ok(rows) = stmt.query_map([], |row| {
-                                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                            }) {
-                                for row in rows {
-                                    if let Ok(res) = row {
-                                        tables_data.push(res);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    tables_data
-                };
-
-                for (table_name, path) in tables {
-                    let _ = ctx_shared.deregister_table(&table_name);
-                    ctx_shared.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
-                }
+                // 1. Initial Sync for this level
+                sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
 
                 // 2. Planning and execution for all terminals at this level
                 for (port, logical_plan) in terminals {
@@ -126,7 +130,6 @@ impl SwanFlowEngine {
                     match state.create_physical_plan(&logical_plan).await {
                         Ok(physical_plan) => {
                             let task_ctx = ctx_shared.task_ctx();
-                            // Blocking Collect (wait for this stage to finish!)
                             if let Err(e) = datafusion::physical_plan::collect(physical_plan, task_ctx).await {
                                 let _ = tx.send(NodeEvent::Error { 
                                     node_id: Uuid::nil(), 
@@ -135,34 +138,9 @@ impl SwanFlowEngine {
                             }
                         }
                         Err(e) => {
-                            // RETRY after Sync if failed (Node might depend on tables materialized in THE SAME level)
+                            // RETRY after Sync
                             println!("DEBUG: Level {} port {} planning failed, retrying after sync...", level, port);
-                            
-                            // SYNC AGAIN
-                            let tables = {
-                                let mut tables_data = Vec::new();
-                                let metadata_path = format!("{}/metadata.duckdb", cache_dir_clone);
-                                if let Ok(conn) = Connection::open(&metadata_path) {
-                                    if let Ok(mut stmt) = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata") {
-                                        if let Ok(rows) = stmt.query_map([], |row| {
-                                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                                        }) {
-                                            for row in rows {
-                                                if let Ok(res) = row {
-                                                    tables_data.push(res);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                tables_data
-                            };
-
-                            for (table_name, path) in tables {
-                                let _ = ctx_shared.deregister_table(&table_name);
-                                ctx_shared.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
-                            }
-
+                            sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             
                             let state = ctx_shared.state();
@@ -187,32 +165,13 @@ impl SwanFlowEngine {
                         }
                     }
                 }
+                
+                // Final Sync after this level to be absolutely sure
+                sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
             }
 
             // 5. Final Sync to ensure results are visible to main thread
-            let final_tables = {
-                let mut tables_data = Vec::new();
-                let metadata_path = format!("{}/metadata.duckdb", cache_dir_clone);
-                if let Ok(conn) = Connection::open(&metadata_path) {
-                    if let Ok(mut stmt) = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata") {
-                        if let Ok(rows) = stmt.query_map([], |row| {
-                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                        }) {
-                            for row in rows {
-                                if let Ok(res) = row {
-                                    tables_data.push(res);
-                                }
-                            }
-                        }
-                    }
-                }
-                tables_data
-            };
-
-            for (table_name, path) in final_tables {
-                let _ = ctx_shared.deregister_table(&table_name);
-                ctx_shared.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
-            }
+            sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
         });
 
         Ok(rx)
@@ -272,6 +231,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 materializer.cache_dir.clone(),
                 physical_inputs[0].clone(),
                 self.ctx.clone(),
+                self.event_tx.clone(),
             ))));
         }
         if let Some(excel_scan) = node.as_any().downcast_ref::<ExcelScanLogical>() {
@@ -315,6 +275,10 @@ impl ExtensionPlanner for SwanFlowPlanner {
         }
         if let Some(proxy) = node.as_any().downcast_ref::<SqlProxyLogical>() {
             // Late-binding: Register inputs and parse SQL now
+            
+            // LAZY REGISTRATION: Sync materialized tables from metadata.duckdb
+            sync_metadata_to_context(&self.ctx, &self.cache_dir).await;
+
             for (i, input_plan) in proxy.inputs.iter().enumerate() {
                 let table_name = format!("input_{}", i);
                 let df = datafusion::prelude::DataFrame::new(self.ctx.state(), input_plan.clone());
@@ -324,17 +288,29 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 })?;
             }
 
-            let df = self.ctx.sql(&proxy.query).await.map_err(|e| {
+            let mut query = proxy.query.clone();
+            
+            // WORKAROUND for DataFusion 52.1.0 sql() limitation with $1 placeholders
+            for (i, param) in proxy.params.iter().enumerate() {
+                let placeholder = format!("${}", i + 1);
+                let val_str = match param {
+                    ScalarValue::Utf8(Some(s)) => format!("'{}'", s.replace("'", "''")),
+                    _ => format!("{}", param),
+                };
+                query = query.replace(&placeholder, &val_str);
+            }
+
+            let df = self.ctx.sql(&query).await.map_err(|e| {
                 datafusion::error::DataFusionError::Plan(format!("Late-binding SQL error: {}", e))
             })?;
             
             let logical_plan = df.into_optimized_plan()?;
+            // We MUST use the latest session state from our context which now has the tables!
             let physical_plan = _planner.create_physical_plan(&logical_plan, &self.ctx.state()).await?;
             
             // Check if schema matches logical proxy schema
             let logical_schema = proxy.schema.clone();
             let physical_plan = self.align_schemas(physical_plan, logical_schema.as_ref())?;
-            
             return Ok(Some(physical_plan));
         }
         if let Some(python) = node.as_any().downcast_ref::<PythonLogical>() {
@@ -365,6 +341,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 sqlx_scan.url.clone(),
                 sqlx_scan.query.clone(),
                 Arc::new(arrow_schema),
+                sqlx_scan.params.clone(),
             ))));
         }
         Ok(None)
