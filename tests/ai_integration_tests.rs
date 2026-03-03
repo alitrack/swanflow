@@ -15,12 +15,12 @@ async fn test_real_ai_workflow_generation() {
 
     let config = LlmConfig {
         provider: ProviderKind::OpenAI,
-        api_key,
+        api_key: Some(api_key),
         model,
         endpoint: Some(api_base),
     };
 
-    let provider = Arc::new(OpenAiProvider::new(config));
+    let provider: Arc<dyn rustflow::nodes::ai::providers::LlmProvider> = Arc::new(OpenAiProvider::new(config).unwrap());
     let registry = Arc::new(NodeRegistry::default());
     let engine = Arc::new(SwanFlowEngine::new(registry.clone()));
     

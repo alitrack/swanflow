@@ -27,6 +27,7 @@ async fn test_complex_metanode_optimization() {
         type_id: "core.input".into(),
         config: json!({ "port_index": 0 }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
     let sub_sql = sub_workflow.add_node(NodeInstance {
@@ -34,6 +35,7 @@ async fn test_complex_metanode_optimization() {
         type_id: "core.sql".into(),
         config: json!({ "query": "SELECT * FROM input_0 WHERE city = 'New York'" }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
     let sub_out = sub_workflow.add_node(NodeInstance {
@@ -41,6 +43,7 @@ async fn test_complex_metanode_optimization() {
         type_id: "core.output".into(),
         config: json!({ "port_index": 0 }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
     sub_workflow
@@ -71,6 +74,7 @@ async fn test_complex_metanode_optimization() {
         type_id: "core.io.csv".into(),
         config: json!({ "path": csv_path }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
     let meta_idx = main_workflow.add_node(NodeInstance {
@@ -78,6 +82,7 @@ async fn test_complex_metanode_optimization() {
         type_id: "core.metanode".into(),
         config: json!({}),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: Some(Box::new(sub_workflow)),
     });
     let project_idx = main_workflow.add_node(NodeInstance {
@@ -85,6 +90,7 @@ async fn test_complex_metanode_optimization() {
         type_id: "core.transform.project".into(),
         config: json!({ "columns": ["name", "city"] }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
 

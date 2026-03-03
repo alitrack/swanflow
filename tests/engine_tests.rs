@@ -155,7 +155,8 @@ async fn test_schema_inference() {
         )
         .unwrap();
 
-    let schemas = engine.infer_schemas(&workflow).await.unwrap();
+    let metadata = engine.infer_metadata(&workflow).await.unwrap();
+    let schemas = metadata.schemas;
 
     let read_schema = &schemas[&read_id][0];
     assert_eq!(read_schema.fields().len(), 3);

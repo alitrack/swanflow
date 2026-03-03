@@ -1,23 +1,33 @@
 use anyhow::{anyhow, Result};
-use datafusion::arrow::array::{ArrayRef, StringBuilder};
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::array::{ArrayRef, StringBuilder, Int64Array, StringArray, Float64Array};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use calamine::{open_workbook, Data, Reader, Xlsx};
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::logical_expr::{Extension, LogicalPlan};
+use datafusion::logical_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl, ListingTableConfigExt};
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::prelude::*;
+use datafusion::physical_plan::{ExecutionPlan, PlanProperties, DisplayAs, DisplayFormatType, RecordBatchStream, SendableRecordBatchStream};
+use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::execution::context::TaskContext;
+use datafusion::error::DataFusionError;
 use duckdb::Connection;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 use sqlx::{Column, Row};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::fmt;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use futures::Stream;
+use futures::StreamExt;
+use futures::future::BoxFuture;
 
 use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
-use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec};
+use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec, GraphSchemas};
 
 pub struct ExcelReadNode;
 
@@ -248,7 +258,7 @@ impl NodeBehavior for ExcelWriteNode {
                 inputs,
                 styles: json!({}),
                 convert_to_table,
-                conditional_formatting: json!({}),
+                conditional_formatting: json!([]),
             }),
         });
 
@@ -1158,4 +1168,212 @@ impl NodeBehavior for DbConnectorNode {
             }
         }
     }
+}
+
+pub struct GraphIndexWriterNode;
+
+#[async_trait]
+impl NodeBehavior for GraphIndexWriterNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "io.graph_index_writer".to_string(),
+            display_name: "Graph Index Writer".to_string(),
+            description: "Persist nodes and edges to DuckDB graph index".to_string(),
+            input_ports: vec![
+                PortSpec { id: 0, name: "nodes".into(), description: "Entities table".into() },
+                PortSpec { id: 1, name: "edges".into(), description: "Relationships table".into() },
+            ],
+            output_ports: vec![],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        }
+    }
+
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        if inputs.len() < 2 {
+            return Err(anyhow!("GraphIndexWriter requires Nodes and Edges inputs"));
+        }
+        
+        let node = Arc::new(GraphIndexWriterLogical {
+            nodes_input: inputs[0].clone(),
+            edges_input: inputs[1].clone(),
+        });
+
+        Ok(vec![LogicalPlan::Extension(Extension { node })])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
+pub struct GraphIndexWriterLogical {
+    pub nodes_input: LogicalPlan,
+    pub edges_input: LogicalPlan,
+}
+
+impl UserDefinedLogicalNodeCore for GraphIndexWriterLogical {
+    fn name(&self) -> &str { "GraphIndexWriter" }
+    fn inputs(&self) -> Vec<&LogicalPlan> { vec![&self.nodes_input, &self.edges_input] }
+    fn schema(&self) -> &DFSchemaRef {
+        lazy_static::lazy_static! {
+            static ref EMPTY_SCHEMA: DFSchemaRef = Arc::new(DFSchema::empty());
+        }
+        &EMPTY_SCHEMA
+    }
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> { vec![] }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "GraphIndexWriter") }
+    fn with_exprs_and_inputs(&self, _exprs: Vec<datafusion::logical_expr::Expr>, inputs: Vec<LogicalPlan>) -> std::result::Result<Self, DataFusionError> {
+        Ok(Self { nodes_input: inputs[0].clone(), edges_input: inputs[1].clone() })
+    }
+}
+
+pub struct GraphIndexWriterExec {
+    pub nodes_input: Arc<dyn ExecutionPlan>,
+    pub edges_input: Arc<dyn ExecutionPlan>,
+    pub cache_dir: String,
+    cache: PlanProperties,
+}
+
+impl fmt::Debug for GraphIndexWriterExec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GraphIndexWriterExec").finish()
+    }
+}
+
+impl GraphIndexWriterExec {
+    pub fn new(nodes_input: Arc<dyn ExecutionPlan>, edges_input: Arc<dyn ExecutionPlan>, cache_dir: String) -> Self {
+        let schema = Arc::new(Schema::empty());
+        let cache = PlanProperties::new(
+            EquivalenceProperties::new(schema),
+            datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
+            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
+            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
+        );
+        Self { nodes_input, edges_input, cache_dir, cache }
+    }
+}
+
+impl DisplayAs for GraphIndexWriterExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "GraphIndexWriterExec")
+    }
+}
+
+impl ExecutionPlan for GraphIndexWriterExec {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn schema(&self) -> SchemaRef { Arc::new(Schema::empty()) }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.nodes_input, &self.edges_input] }
+    fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(Arc::new(Self::new(children[0].clone(), children[1].clone(), self.cache_dir.clone())))
+    }
+    fn execute(&self, partition: usize, context: Arc<TaskContext>) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
+        let nodes_stream = self.nodes_input.execute(partition, context.clone())?;
+        let edges_stream = self.edges_input.execute(partition, context)?;
+        Ok(Box::pin(GraphIndexingStream {
+            nodes_stream,
+            edges_stream,
+            cache_dir: self.cache_dir.clone(),
+            state: IndexerState::Polling,
+        }))
+    }
+    fn properties(&self) -> &PlanProperties { &self.cache }
+    fn name(&self) -> &str { "GraphIndexWriterExec" }
+}
+
+enum IndexerState {
+    Polling,
+    Writing(BoxFuture<'static, std::result::Result<(), DataFusionError>>),
+    Done,
+}
+
+struct GraphIndexingStream {
+    nodes_stream: SendableRecordBatchStream,
+    edges_stream: SendableRecordBatchStream,
+    cache_dir: String,
+    state: IndexerState,
+}
+
+impl Stream for GraphIndexingStream {
+    type Item = std::result::Result<RecordBatch, DataFusionError>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match &mut self.state {
+                IndexerState::Polling => {
+                    let mut nodes_input = std::mem::replace(&mut self.nodes_stream, Box::pin(datafusion::physical_plan::stream::EmptyRecordBatchStream::new(Arc::new(Schema::empty()))));
+                    let mut edges_input = std::mem::replace(&mut self.edges_stream, Box::pin(datafusion::physical_plan::stream::EmptyRecordBatchStream::new(Arc::new(Schema::empty()))));
+                    let cache_dir = self.cache_dir.clone();
+
+                    let fut = async move {
+                        let metadata_path = format!("{}/metadata.duckdb", cache_dir);
+                        
+                        let mut nodes_batches = Vec::new();
+                        while let Some(Ok(batch)) = nodes_input.next().await {
+                            nodes_batches.push(batch);
+                        }
+
+                        let mut edges_batches = Vec::new();
+                        while let Some(Ok(batch)) = edges_input.next().await {
+                            edges_batches.push(batch);
+                        }
+
+                        tokio::task::spawn_blocking(move || {
+                            if let Ok(conn) = Connection::open(&metadata_path) {
+                                for batch in nodes_batches {
+                                    let ids = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+                                    let labels = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+                                    let properties = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+                                    for i in 0..batch.num_rows() {
+                                        conn.execute(
+                                            "INSERT OR REPLACE INTO __graph_nodes (id, label, properties) VALUES (?, ?, ?)",
+                                            duckdb::params![ids.value(i), labels.value(i), properties.value(i)],
+                                        ).ok();
+                                    }
+                                }
+                                for batch in edges_batches {
+                                    let src_ids = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+                                    let dst_ids = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+                                    let types = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+                                    let weights = batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+                                    for i in 0..batch.num_rows() {
+                                        conn.execute(
+                                            "INSERT OR REPLACE INTO __graph_edges (source_id, target_id, type, weight) VALUES (?, ?, ?, ?)",
+                                            duckdb::params![src_ids.value(i), dst_ids.value(i), types.value(i), weights.value(i)],
+                                        ).ok();
+                                    }
+                                }
+                            }
+                        }).await.map_err(|e| DataFusionError::Execution(format!("Spawn blocking error: {}", e)))?;
+                        Ok(())
+                    };
+                    self.state = IndexerState::Writing(Box::pin(fut));
+                }
+                IndexerState::Writing(fut) => {
+                    match fut.as_mut().poll(cx) {
+                        Poll::Ready(Ok(_)) => {
+                            self.state = IndexerState::Done;
+                            return Poll::Ready(None);
+                        }
+                        Poll::Ready(Err(e)) => {
+                            self.state = IndexerState::Done;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                IndexerState::Done => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
+impl RecordBatchStream for GraphIndexingStream {
+    fn schema(&self) -> SchemaRef { Arc::new(Schema::empty()) }
 }

@@ -538,3 +538,62 @@ impl NodeBehavior for TableToVariableNode {
         Ok(vec![])
     }
 }
+
+pub struct GraphMergerNode;
+
+#[async_trait]
+impl NodeBehavior for GraphMergerNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "transform.graph_merger".to_string(),
+            display_name: "Graph Merger".to_string(),
+            description: "Deduplicate and normalize nodes and edges".to_string(),
+            input_ports: vec![
+                PortSpec { id: 0, name: "nodes".into(), description: "Entities".into() },
+                PortSpec { id: 1, name: "edges".into(), description: "Relationships".into() },
+            ],
+            output_ports: vec![
+                PortSpec { id: 0, name: "nodes".into(), description: "Merged Entities".into() },
+                PortSpec { id: 1, name: "edges".into(), description: "Merged Relationships".into() },
+            ],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "dedup_nodes": { "type": "boolean", "default": true }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        if inputs.len() < 2 {
+            return Err(anyhow!("GraphMerger requires Nodes and Edges inputs"));
+        }
+
+        let ctx = SessionContext::new();
+        
+        // 1. Merge Nodes (Deduplicate by ID)
+        let nodes_df = DataFrame::new(ctx.state(), inputs[0].clone());
+        ctx.register_table("nodes_input", nodes_df.into_view())?;
+        // Use standard SQL for FIRST/SUM if available in DataFusion
+        let nodes_merged = ctx.sql("SELECT id, FIRST_VALUE(label) as label, FIRST_VALUE(properties) as properties FROM nodes_input GROUP BY id").await?;
+
+        // 2. Merge Edges (Deduplicate by source, target, type)
+        let edges_df = DataFrame::new(ctx.state(), inputs[1].clone());
+        ctx.register_table("edges_input", edges_df.into_view())?;
+        let edges_merged = ctx.sql("SELECT source_id, target_id, type, SUM(weight) as weight FROM edges_input GROUP BY source_id, target_id, type").await?;
+
+        Ok(vec![
+            nodes_merged.into_optimized_plan()?,
+            edges_merged.into_optimized_plan()?,
+        ])
+    }
+}

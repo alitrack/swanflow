@@ -62,6 +62,7 @@ fn test_workflow_graph_construction() {
         type_id: "test.dummy".into(),
         config: json!({}),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
     let n2 = workflow.add_node(NodeInstance {
@@ -69,6 +70,7 @@ fn test_workflow_graph_construction() {
         type_id: "test.dummy".into(),
         config: json!({}),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
 
@@ -95,6 +97,7 @@ fn test_cycle_detection() {
         type_id: "test.dummy".into(),
         config: json!({}),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
     let n2 = workflow.add_node(NodeInstance {
@@ -102,6 +105,7 @@ fn test_cycle_detection() {
         type_id: "test.dummy".into(),
         config: json!({}),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
 
@@ -137,6 +141,7 @@ fn test_metanode_structure() {
         type_id: "test.dummy".into(),
         config: json!({}),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
 
@@ -145,6 +150,7 @@ fn test_metanode_structure() {
         type_id: "core.metanode".into(),
         config: json!({}),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: Some(Box::new(sub_workflow)),
     });
 

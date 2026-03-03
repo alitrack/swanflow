@@ -84,6 +84,26 @@ impl SwanFlowEngine {
             [],
         ).expect("Failed to create metadata table");
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS __graph_nodes (
+                id BIGINT PRIMARY KEY,
+                label TEXT,
+                properties TEXT
+            )",
+            [],
+        ).expect("Failed to create graph nodes table");
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS __graph_edges (
+                source_id BIGINT,
+                target_id BIGINT,
+                type TEXT,
+                weight DOUBLE,
+                PRIMARY KEY (source_id, target_id, type)
+            )",
+            [],
+        ).expect("Failed to create graph edges table");
+
         Self { ctx, registry, cache_dir }
     }
 
@@ -232,6 +252,29 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 physical_inputs[0].clone(),
                 self.ctx.clone(),
                 self.event_tx.clone(),
+            ))));
+        }
+        if let Some(entity_port) = node.as_any().downcast_ref::<crate::nodes::ai::graph::EntityPortLogical>() {
+            return Ok(Some(Arc::new(crate::nodes::ai::graph::EntityExtractorExec::new(
+                physical_inputs[0].clone(),
+                entity_port.base.entity_types.clone(),
+                entity_port.base.relation_types.clone(),
+                entity_port.base.provider.clone(),
+                entity_port.port,
+            ))));
+        }
+        if let Some(_indexer) = node.as_any().downcast_ref::<crate::nodes::io::GraphIndexWriterLogical>() {
+            return Ok(Some(Arc::new(crate::nodes::io::GraphIndexWriterExec::new(
+                physical_inputs[0].clone(),
+                physical_inputs[1].clone(),
+                self.cache_dir.clone(),
+            ))));
+        }
+        if let Some(retriever) = node.as_any().downcast_ref::<crate::nodes::ai::graph::GraphRetrieverLogical>() {
+            return Ok(Some(Arc::new(crate::nodes::ai::graph::GraphRetrieverExec::new(
+                physical_inputs[0].clone(),
+                retriever.depth,
+                self.cache_dir.clone(),
             ))));
         }
         if let Some(excel_scan) = node.as_any().downcast_ref::<ExcelScanLogical>() {

@@ -32,6 +32,12 @@ async fn run_and_print_events(engine: &SwanFlowEngine, workflow: &Workflow, titl
             } => {
                 println!("Node[{}] -> Progress: {:.1}%", node_id, percentage);
             }
+            NodeEvent::Materialized { node_id, .. } => {
+                println!("Node[{}] -> Materialized", node_id);
+            }
+            NodeEvent::Error { node_id, message } => {
+                println!("Node[{}] -> ERROR: {}", node_id, message);
+            }
         }
     }
 }
@@ -61,6 +67,7 @@ david,4500,Sales",
         type_id: "core.io.csv".into(),
         config: json!({ "path": csv_path }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
 
@@ -69,6 +76,7 @@ david,4500,Sales",
         type_id: "core.sql".into(),
         config: json!({ "query": "SELECT name, salary * 1.1 as new_salary, dept FROM input_0" }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
 
@@ -77,6 +85,7 @@ david,4500,Sales",
         type_id: "core.transform.filter".into(),
         config: json!({ "expr": "new_salary > 5000" }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
 
@@ -117,6 +126,7 @@ async fn demo_reusable_metanode() {
         type_id: "core.input".into(),
         config: json!({ "port_index": 0 }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
     let sub_filter = cleaner_sub.add_node(NodeInstance {
@@ -124,6 +134,7 @@ async fn demo_reusable_metanode() {
         type_id: "core.transform.filter".into(),
         config: json!({ "expr": "dept = 'IT'" }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
     let sub_out = cleaner_sub.add_node(NodeInstance {
@@ -131,6 +142,7 @@ async fn demo_reusable_metanode() {
         type_id: "core.output".into(),
         config: json!({ "port_index": 0 }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
     cleaner_sub
@@ -161,6 +173,7 @@ async fn demo_reusable_metanode() {
         type_id: "core.sql".into(),
         config: json!({ "query": "SELECT 'alice' as name, 'IT' as dept UNION ALL SELECT 'bob', 'HR'" }),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: None,
     });
     let n_meta = main_flow.add_node(NodeInstance {
@@ -168,6 +181,7 @@ async fn demo_reusable_metanode() {
         type_id: "core.metanode".into(),
         config: json!({}),
         state: NodeState::Configured,
+        materialize: true,
         sub_workflow: Some(Box::new(cleaner_sub)),
     });
     main_flow

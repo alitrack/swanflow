@@ -6,6 +6,8 @@ use datafusion::logical_expr::LogicalPlan;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use std::sync::Arc;
 
 pub mod ai;
 pub mod boundary;
@@ -59,6 +61,28 @@ pub struct InferredMetadata {
     pub schemas: Vec<DFSchemaRef>,
     /// Optional sample data for each output port.
     pub sample_data: Option<Vec<RecordBatch>>,
+}
+
+/// Standard Graph Data Protocol
+pub struct GraphSchemas;
+
+impl GraphSchemas {
+    pub fn node_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, true),
+            Field::new("properties", DataType::Utf8, true), // JSON string
+        ]))
+    }
+
+    pub fn edge_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("source_id", DataType::Int64, false),
+            Field::new("target_id", DataType::Int64, false),
+            Field::new("type", DataType::Utf8, true),
+            Field::new("weight", DataType::Float64, true),
+        ]))
+    }
 }
 
 /// The core interface for all nodes in SwanFlow.
