@@ -38,9 +38,9 @@ async fn test_rag_query_workflow() -> Result<()> {
     let entities_id = Uuid::new_v4();
     let entities_idx = workflow.add_node(NodeInstance {
         id: entities_id,
-        type_id: "core.flow.foreach".to_string(),
+        type_id: "core.sql".to_string(),
         config: json!({
-            "items": ["Alice"]
+            "query": "SELECT 'Alice' as entity"
         }),
         state: NodeState::Configured,
         materialize: true,
@@ -57,7 +57,8 @@ async fn test_rag_query_workflow() -> Result<()> {
         materialize: true,
         sub_workflow: None,
     });
-    workflow.add_edge(entities_idx, retriever_idx, rustflow::core::graph::EdgeInstance {
+    let _ = workflow.add_edge
+(entities_idx, retriever_idx, rustflow::core::graph::EdgeInstance {
         source_port: 0,
         target_port: 0,
     });
@@ -72,7 +73,8 @@ async fn test_rag_query_workflow() -> Result<()> {
         materialize: false,
         sub_workflow: None,
     });
-    workflow.add_edge(retriever_idx, output_idx, rustflow::core::graph::EdgeInstance {
+    let _ = workflow.add_edge
+(retriever_idx, output_idx, rustflow::core::graph::EdgeInstance {
         source_port: 0,
         target_port: 0,
     });
@@ -84,5 +86,57 @@ async fn test_rag_query_workflow() -> Result<()> {
     }
 
     // Success if it ran without error
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_research_loop_workflow() -> Result<()> {
+    let tmp = tempdir()?;
+    let cache_dir = tmp.path().to_str().unwrap().to_string();
+    
+    let registry = Arc::new(NodeRegistry::default());
+    let engine = SwanFlowEngine::with_cache_dir(registry, cache_dir.clone());
+    
+    let mut workflow = Workflow::new("recursive_research");
+    
+    // 1. Initial Query
+    let query_id = Uuid::new_v4();
+    let query_idx = workflow.add_node(NodeInstance {
+        id: query_id,
+        type_id: "core.sql".to_string(),
+        config: json!({"query": "SELECT 'Future of AI' as query"}),
+        state: NodeState::Configured,
+        materialize: true,
+        sub_workflow: None,
+    });
+
+    // 2. Research Loop
+    let loop_id = Uuid::new_v4();
+    let loop_idx = workflow.add_node(NodeInstance {
+        id: loop_id,
+        type_id: "core.ai.research_loop".to_string(),
+        config: json!({
+            "max_depth": 2,
+            "max_pages_per_step": 3
+        }),
+        state: NodeState::Configured,
+        materialize: true,
+        sub_workflow: None,
+    });
+    let _ = workflow.add_edge
+(query_idx, loop_idx, rustflow::core::graph::EdgeInstance {
+        source_port: 0,
+        target_port: 0,
+    });
+
+    let rx = engine.execute_workflow(&workflow).await?;
+    let mut rx = rx;
+    let mut events_received = 0;
+    while let Some(event) = rx.recv().await {
+        println!("DEBUG: [Test] Got event: {:?}", event);
+        events_received += 1;
+    }
+
+    assert!(events_received > 0, "Should have received workflow execution events");
     Ok(())
 }

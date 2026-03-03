@@ -152,7 +152,7 @@ impl SwanFlowEngine {
         let cache_dir_clone = self.cache_dir.clone();
         let query_planner_clone = query_planner.clone();
         let hook_shared = self.hook.clone();
-        let registry_shared = self.registry.clone();
+        let _registry_shared = self.registry.clone();
 
         tokio::spawn(async move {
             // STAGED TOPOLOGICAL EXECUTION: run each level stage in order
@@ -179,6 +179,19 @@ impl SwanFlowEngine {
                                     if let Some(hook) = &hook_shared {
                                         if !batches.is_empty() {
                                             let _ = hook.on_data_quality(node_id, &batches[0]).await;
+                                        }
+                                    }
+                                    
+                                    // MANUAL MATERIALIZATION: Register as table so it's queryable
+                                    if !batches.is_empty() {
+                                        let table_name = format!("node_{}", &node_id.to_string()[..8]);
+                                        if let Ok(df) = ctx_shared.read_batches(batches.clone()) {
+                                            let _ = ctx_shared.register_table(&table_name, df.into_view());
+                                            let _ = tx.send(NodeEvent::Materialized { 
+                                                node_id, 
+                                                table_name, 
+                                                parquet_path: "".to_string() // In-memory for now
+                                            });
                                         }
                                     }
                                 }
@@ -322,6 +335,33 @@ impl ExtensionPlanner for SwanFlowPlanner {
             return Ok(Some(Arc::new(crate::nodes::ai::graph::GraphRetrieverExec::new(
                 physical_inputs[0].clone(),
                 retriever.depth,
+                self.cache_dir.clone(),
+            ))));
+        }
+        if let Some(mcp) = node.as_any().downcast_ref::<crate::nodes::ai::mcp::McpInvokeLogical>() {
+            let arguments = serde_json::from_str(&mcp.arguments).unwrap_or(serde_json::Value::Null);
+            return Ok(Some(Arc::new(crate::nodes::ai::mcp::McpInvokeExec::new(
+                mcp.tool_name.clone(),
+                arguments,
+                mcp.server_command.clone(),
+                mcp.server_args.clone(),
+                Arc::new(mcp.schema.as_arrow().clone()),
+            ))));
+        }
+        if let Some(gap) = node.as_any().downcast_ref::<crate::nodes::ai::graph::InformationGapLogical>() {
+            return Ok(Some(Arc::new(crate::nodes::ai::graph::InformationGapExec::new(
+                physical_inputs[0].clone(),
+                physical_inputs[1].clone(),
+                gap.provider.clone(),
+            ))));
+        }
+        if let Some(research) = node.as_any().downcast_ref::<crate::nodes::ai::graph::ResearchLoopLogical>() {
+            return Ok(Some(Arc::new(crate::nodes::ai::graph::ResearchLoopExec::new(
+                physical_inputs[0].clone(),
+                research.max_depth,
+                research.max_pages,
+                research.state.clone(),
+                research.port,
                 self.cache_dir.clone(),
             ))));
         }

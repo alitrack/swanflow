@@ -11,22 +11,21 @@ graph:
       materialize: false
       sub_workflow: null
 
-    # 2. Deep Research MetaNode
+    # 2. Recursive Research Loop (Autonomous agentic loop)
     - id: 22222222-2222-2222-2222-222222222222
       type_id: core.ai.research_loop
       config:
-        query: "Current trends in Rust-based Data Science 2026"
-        max_depth: 2
-        max_pages_per_step: 3
+        max_depth: 3
+        max_pages_per_step: 5
       state: Configured
       materialize: true
       sub_workflow: null
 
-    # 3. Table Schema Validator (Standardizing Research Output)
+    # 3. Final Insight Retrieval
     - id: 33333333-3333-3333-3333-333333333333
-      type_id: core.transform.table_schema_validator
+      type_id: ai.graph_retriever
       config:
-        mode: "auto"
+        depth: 2
       state: Configured
       materialize: true
       sub_workflow: null

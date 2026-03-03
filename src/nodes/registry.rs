@@ -87,7 +87,7 @@ impl NodeRegistry {
         self.register_node(Arc::new(GraphRetrieverNode));
         self.register_node(Arc::new(ContextFuserNode));
         self.register_node(Arc::new(McpInvokeNode));
-        self.register_node(Arc::new(ResearchLoopMetaNode));
+        self.register_node(Arc::new(ResearchLoopMetaNode::new()));
         
         // Register EntityExtractor if environment variables are set
         if let Ok(model) = std::env::var("LLM_MODEL") {

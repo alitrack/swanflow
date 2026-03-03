@@ -3,7 +3,7 @@ use uuid::Uuid;
 use crate::core::engine::IntelligenceHook;
 use crate::nodes::ai::ConfigWizard;
 use std::sync::Arc;
-use serde_json::{json, Value as JsonValue};
+use serde_json::Value as JsonValue;
 
 pub struct DefaultIntelligenceHook {
     pub wizard: Arc<ConfigWizard>,
@@ -15,7 +15,7 @@ impl IntelligenceHook for DefaultIntelligenceHook {
         &self,
         node_id: Uuid,
         type_id: &str,
-        config: &JsonValue,
+        _config: &JsonValue,
         error: &str,
     ) -> Option<JsonValue> {
         println!("[Intelligence] Analyzing error for node {}: {}", node_id, error);
