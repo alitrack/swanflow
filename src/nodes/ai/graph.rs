@@ -262,7 +262,8 @@ impl Stream for EntityExtractionStream {
                                     );
 
                                     if let Ok(result) = provider.complete(&prompt).await {
-                                        if let Ok(json) = serde_json::from_str::<JsonValue>(&result) {
+                                        let json_str = crate::nodes::ai::ConfigWizard::extract_json_from_response(&result).unwrap_or(&result);
+                                        if let Ok(json) = serde_json::from_str::<JsonValue>(json_str) {
                                             if let Some(nodes) = json["nodes"].as_array() {
                                                 for n in nodes {
                                                     let name = n["name"].as_str().unwrap_or("");

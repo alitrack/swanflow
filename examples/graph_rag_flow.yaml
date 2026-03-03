@@ -1,0 +1,37 @@
+id: 00000000-0000-0000-0000-000000000001
+name: Graph RAG Knowledge Ingestion
+graph:
+  nodes:
+    - id: 11111111-1111-1111-1111-111111111111
+      type_id: core.sql
+      config:
+        query: "SELECT 'Alice works for ACME Corp as a Senior Software Engineer.' as input UNION ALL SELECT 'ACME Corp is based in San Francisco and specializes in workflow automation.' UNION ALL SELECT 'Bob is the CTO of ACME Corp and he hired Alice last year.'"
+      state: Configured
+      materialize: true
+      sub_workflow: null
+
+    - id: 22222222-2222-2222-2222-222222222222
+      type_id: ai.entity_extractor
+      config:
+        model: ${env.LLM_MODEL}
+        api_key: ${env.LLM_API_KEY}
+        api_base: ${env.LLM_API_BASE}
+        prompt: "Extract entities (PERSON, ORG, JOB, CITY) and their relationships from the text."
+      state: Configured
+      materialize: true
+      sub_workflow: null
+
+    - id: 33333333-3333-3333-3333-333333333333
+      type_id: io.graph_index_writer
+      config:
+        table_name: __graph_index
+      state: Configured
+      materialize: false
+      sub_workflow: null
+
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 1, target_port: 1 }]
+  node_holes: []
+  edge_property: "directed"

@@ -48,7 +48,8 @@ impl NodeRegistry {
         use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode, ProfilerNode, VariableCreatorNode, TableToVariableNode, GraphMergerNode};
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
         use crate::nodes::ai::mcp::McpNode;
-        use crate::nodes::ai::graph::{GraphRetrieverNode, ContextFuserNode};
+        use crate::nodes::ai::graph::{GraphRetrieverNode, ContextFuserNode, EntityExtractorNode};
+        use crate::nodes::ai::providers::{OpenAiProvider, LlmConfig, ProviderKind};
 
         self.register_node(Arc::new(SqlNode));
         self.register_node(Arc::new(CsvReadNode));
@@ -82,6 +83,34 @@ impl NodeRegistry {
         self.register_node(Arc::new(PythonUdfNode));
         self.register_node(Arc::new(GraphRetrieverNode));
         self.register_node(Arc::new(ContextFuserNode));
+        
+        // Register EntityExtractor if environment variables are set
+        if let Ok(model) = std::env::var("LLM_MODEL") {
+            println!("[DEBUG] Found LLM_MODEL: {}", model);
+            let config = LlmConfig {
+                provider: ProviderKind::OpenAI,
+                api_key: std::env::var("LLM_API_KEY").ok(),
+                model,
+                endpoint: std::env::var("LLM_API_BASE").ok(),
+            };
+            match OpenAiProvider::new(config) {
+                Ok(provider) => {
+                    println!("[DEBUG] Registering EntityExtractorNode");
+                    self.register_node(Arc::new(EntityExtractorNode { provider: Arc::new(provider) }));
+                }
+                Err(e) => println!("[DEBUG] Failed to create OpenAiProvider: {}", e),
+            }
+        } else if let Ok(provider) = OpenAiProvider::new(LlmConfig {
+            provider: ProviderKind::OpenAI,
+            api_key: std::env::var("OPENAI_API_KEY").ok(), 
+            model: "gpt-4o".to_string(),
+            endpoint: None,
+        }) {
+             println!("[DEBUG] Registering EntityExtractorNode (Fallback)");
+             self.register_node(Arc::new(EntityExtractorNode { provider: Arc::new(provider) }));
+        } else {
+            println!("[DEBUG] No LLM_MODEL or OPENAI_API_KEY found, EntityExtractor skip");
+        }
         // Register common MCP tools for tutorial support
         self.register_node(Arc::new(McpNode { tool_name: "google_search".to_string() }));
     }
