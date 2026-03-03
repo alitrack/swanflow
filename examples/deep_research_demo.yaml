@@ -1,0 +1,38 @@
+id: 00000000-0000-0000-0000-000000000003
+name: Deep Research and Self-Healing Demo
+graph:
+  nodes:
+    # 1. Self-Healing SQL Node (contains intentional error)
+    - id: 11111111-1111-1111-1111-111111111111
+      type_id: core.sql
+      config:
+        query: "SELECT invalid_col FROM non_existent_table"
+      state: Configured
+      materialize: false
+      sub_workflow: null
+
+    # 2. Deep Research MetaNode
+    - id: 22222222-2222-2222-2222-222222222222
+      type_id: core.ai.research_loop
+      config:
+        query: "Current trends in Rust-based Data Science 2026"
+        max_depth: 2
+        max_pages_per_step: 3
+      state: Configured
+      materialize: true
+      sub_workflow: null
+
+    # 3. Table Schema Validator (Standardizing Research Output)
+    - id: 33333333-3333-3333-3333-333333333333
+      type_id: core.transform.table_schema_validator
+      config:
+        mode: "auto"
+      state: Configured
+      materialize: true
+      sub_workflow: null
+
+  edges:
+    - [1, 2, { source_port: 0, target_port: 0 }]
+    - [2, 3, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

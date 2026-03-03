@@ -584,3 +584,63 @@ impl NodeBehavior for ContextFuserNode {
         Ok(vec![fused.into_optimized_plan()?])
     }
 }
+
+pub struct ResearchLoopMetaNode;
+
+#[async_trait]
+impl NodeBehavior for ResearchLoopMetaNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.ai.research_loop".to_string(),
+            display_name: "Deep Research Loop".to_string(),
+            description: "Orchestrate recursive web research, extraction, and graph indexing.".to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "query".into(),
+                description: "Initial research topic".into(),
+            }],
+            output_ports: vec![
+                PortSpec { id: 0, name: "nodes".into(), description: "Extracted Entities".into() },
+                PortSpec { id: 1, name: "edges".into(), description: "Extracted Relationships".into() },
+            ],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "max_depth": { "type": "integer", "default": 2 },
+                    "max_pages_per_step": { "type": "integer", "default": 5 }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        // ResearchLoop is a MetaNode. It returns a plan that combines
+        // its internal ingestion and extraction nodes.
+        // For the MVP, we return empty plans matching GraphSchemas.
+        use crate::nodes::GraphSchemas;
+        
+        let node_plan = LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+            produce_one_row: false,
+            schema: datafusion::common::DFSchemaRef::new(
+                datafusion::common::DFSchema::try_from(GraphSchemas::node_schema().as_ref().clone())?
+            ),
+        });
+
+        let edge_plan = LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+            produce_one_row: false,
+            schema: datafusion::common::DFSchemaRef::new(
+                datafusion::common::DFSchema::try_from(GraphSchemas::edge_schema().as_ref().clone())?
+            ),
+        });
+
+        Ok(vec![node_plan, edge_plan])
+    }
+}

@@ -6,23 +6,16 @@ use serde_json::Value as JsonValue;
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
 /// A node that bridges to an external MCP (Model Context Protocol) tool.
-pub struct McpNode {
-    pub tool_name: String,
-    // In a real system, this would hold a reference to an McpRegistry
-}
+pub struct McpInvokeNode;
 
 #[async_trait]
-impl NodeBehavior for McpNode {
+impl NodeBehavior for McpInvokeNode {
     fn spec(&self) -> NodeSpec {
         NodeSpec {
-            type_id: format!("core.ai.mcp.{}", self.tool_name),
-            display_name: format!("MCP Tool: {}", self.tool_name),
+            type_id: "core.ai.mcp_invoke".to_string(),
+            display_name: "MCP Tool Invoke".to_string(),
             description: "Execute an external AI tool via MCP".to_string(),
-            input_ports: vec![PortSpec {
-                id: 0,
-                name: "input".into(),
-                description: "Optional Input Data".into(),
-            }],
+            input_ports: vec![],
             output_ports: vec![PortSpec {
                 id: 0,
                 name: "output".into(),
@@ -31,13 +24,16 @@ impl NodeBehavior for McpNode {
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "tool_name": { "type": "string" },
                     "arguments": { "type": "object" }
-                }
+                },
+                "required": ["tool_name"]
             }),
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> {
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["tool_name"].as_str().ok_or_else(|| anyhow::anyhow!("tool_name is required"))?;
         Ok(())
     }
 
@@ -46,12 +42,10 @@ impl NodeBehavior for McpNode {
         _inputs: Vec<LogicalPlan>,
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        // MCP results are typically JSON strings or structured data.
-        // We'll need a specialized 'TableProvider' to wrap the MCP call during execution.
-        // For Phase 4 MVP, we return a placeholder empty relation with a basic schema.
-        let schema = arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("result", arrow::datatypes::DataType::Utf8, true),
-            arrow::datatypes::Field::new("relevance", arrow::datatypes::DataType::Float64, true),
+        // Placeholder schema for MCP results
+        let schema = datafusion::arrow::datatypes::Schema::new(vec![
+            datafusion::arrow::datatypes::Field::new("content", datafusion::arrow::datatypes::DataType::Utf8, true),
+            datafusion::arrow::datatypes::Field::new("source", datafusion::arrow::datatypes::DataType::Utf8, true),
         ]);
         let df_schema = datafusion::common::DFSchema::try_from(schema)?;
         

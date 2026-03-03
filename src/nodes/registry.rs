@@ -45,10 +45,10 @@ impl NodeRegistry {
         use crate::nodes::sql::SqlNode;
         use crate::nodes::io::{CsvReadNode, ParquetReadNode, UniversalReadNode, DbConnectorNode, ExcelReadNode, ExcelWriteNode, ExcelTemplateNode, ExcelReportNode, ExcelSheetNamesNode, DuckDBReadNode, DuckDBWriteNode, HttpFetchNode, GraphIndexWriterNode};
         use crate::nodes::boundary::{InputNode, OutputNode, DuckDBExtensionNode};
-        use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode, ProfilerNode, VariableCreatorNode, TableToVariableNode, GraphMergerNode};
+        use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode, ProfilerNode, VariableCreatorNode, TableToVariableNode, GraphMergerNode, TableSchemaValidatorNode, SemanticCleanerNode, AiRouterNode};
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
-        use crate::nodes::ai::mcp::McpNode;
-        use crate::nodes::ai::graph::{GraphRetrieverNode, ContextFuserNode, EntityExtractorNode};
+        use crate::nodes::ai::mcp::McpInvokeNode;
+        use crate::nodes::ai::graph::{GraphRetrieverNode, ContextFuserNode, EntityExtractorNode, ResearchLoopMetaNode};
         use crate::nodes::ai::providers::{OpenAiProvider, LlmConfig, ProviderKind};
 
         self.register_node(Arc::new(SqlNode));
@@ -78,11 +78,16 @@ impl NodeRegistry {
         self.register_node(Arc::new(VariableCreatorNode));
         self.register_node(Arc::new(TableToVariableNode));
         self.register_node(Arc::new(GraphMergerNode));
+        self.register_node(Arc::new(TableSchemaValidatorNode));
+        self.register_node(Arc::new(SemanticCleanerNode));
+        self.register_node(Arc::new(AiRouterNode));
         self.register_node(Arc::new(PythonNode));
         // Note: PythonUdfNode is registered but currently returns empty plan (stub implementation)
         self.register_node(Arc::new(PythonUdfNode));
         self.register_node(Arc::new(GraphRetrieverNode));
         self.register_node(Arc::new(ContextFuserNode));
+        self.register_node(Arc::new(McpInvokeNode));
+        self.register_node(Arc::new(ResearchLoopMetaNode));
         
         // Register EntityExtractor if environment variables are set
         if let Ok(model) = std::env::var("LLM_MODEL") {
@@ -111,8 +116,6 @@ impl NodeRegistry {
         } else {
             println!("[DEBUG] No LLM_MODEL or OPENAI_API_KEY found, EntityExtractor skip");
         }
-        // Register common MCP tools for tutorial support
-        self.register_node(Arc::new(McpNode { tool_name: "google_search".to_string() }));
     }
 }
 

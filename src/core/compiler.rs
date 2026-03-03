@@ -56,7 +56,7 @@ impl WorkflowCompiler {
         workflow: &Workflow,
         registry: &NodeRegistry,
         ctx_override: Option<Arc<SessionContext>>,
-    ) -> Result<Vec<Vec<(usize, LogicalPlan)>>> {
+    ) -> Result<Vec<Vec<(Uuid, usize, LogicalPlan)>>> {
         let ctx = ctx_override.unwrap_or_else(|| self.ctx.clone());
         
         // 1. Topological Sort
@@ -65,7 +65,7 @@ impl WorkflowCompiler {
         
         // We will group nodes into levels for staged execution
         let mut node_levels: HashMap<Uuid, usize> = HashMap::new();
-        let mut stages: Vec<Vec<(usize, LogicalPlan)>> = Vec::new();
+        let mut stages: Vec<Vec<(Uuid, usize, LogicalPlan)>> = Vec::new();
 
         // 2. Process nodes in topological order
         for node_idx in sorted_indices {
@@ -142,7 +142,7 @@ impl WorkflowCompiler {
             
             // Add to its corresponding stage
             for (port, plan) in compiled_node_outputs {
-                stages[level].push((port, plan));
+                stages[level].push((node.id, port, plan));
             }
         }
 

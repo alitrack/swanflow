@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
 use serde_json::Value as JsonValue;
+use std::sync::Arc;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
@@ -452,6 +453,11 @@ impl NodeBehavior for ProfilerNode {
                 "SUM(CASE WHEN \"{0}\" IS NULL THEN 1 ELSE 0 END) as \"{0}_nulls\"",
                 col
             ));
+            select_parts.push(format!(
+                "CAST(SUM(CASE WHEN \"{0}\" IS NULL THEN 1 ELSE 0 END) AS DOUBLE) / COUNT(*) as \"{0}_null_ratio\"",
+                col
+            ));
+            select_parts.push(format!("AVG(\"{0}\") as \"{0}_avg\"", col));
         }
         ctx.register_table("profile_input", df.into_view())?;
         let sql = format!("SELECT {} FROM profile_input", select_parts.join(", "));
@@ -595,5 +601,255 @@ impl NodeBehavior for GraphMergerNode {
             nodes_merged.into_optimized_plan()?,
             edges_merged.into_optimized_plan()?,
         ])
+    }
+}
+
+pub struct TableSchemaValidatorNode;
+
+#[async_trait]
+impl NodeBehavior for TableSchemaValidatorNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.transform.table_schema_validator".to_string(),
+            display_name: "Table Schema Validator".to_string(),
+            description: "Map arbitrary input tables to the standardized Golden Graph Schema (Node/Edge) using LLM mapping.".to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Arbitrary Data".into(),
+            }],
+            output_ports: vec![
+                PortSpec {
+                    id: 0,
+                    name: "nodes".into(),
+                    description: "Standardized Nodes".into(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "edges".into(),
+                    description: "Standardized Edges".into(),
+                },
+            ],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["node", "edge", "auto"], "default": "auto" },
+                    "mapping": { 
+                        "type": "object",
+                        "description": "Optional explicit mapping. If missing, LLM will suggest one based on schema."
+                    }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        use crate::nodes::GraphSchemas;
+        let ctx = SessionContext::new();
+        let df = DataFrame::new(ctx.state(), inputs[0].clone());
+        let input_schema = Arc::new(df.schema().as_arrow().clone());
+
+        let to_sql_type = |dt: &datafusion::arrow::datatypes::DataType| match dt {
+            datafusion::arrow::datatypes::DataType::Int64 => "BIGINT",
+            datafusion::arrow::datatypes::DataType::Utf8 => "TEXT",
+            datafusion::arrow::datatypes::DataType::Float64 => "DOUBLE",
+            _ => "TEXT",
+        };
+        
+        // 1. Determine Mapping (Explicit or AI-assisted)
+        let mapping = config["mapping"].as_object();
+        
+        let node_plan = if let Some(m) = mapping {
+             // Apply explicit mapping via SQL projection
+             let mut projections = Vec::new();
+             let node_fields = GraphSchemas::node_schema().fields().clone();
+             for field in &node_fields {
+                 let field_name = field.name().as_str();
+                 let sql_type = to_sql_type(field.data_type());
+                 if let Some(src_col) = m.get(field_name) {
+                     projections.push(format!("CAST(\"{}\" AS {}) as \"{}\"", src_col.as_str().unwrap(), sql_type, field_name));
+                 } else {
+                     projections.push(format!("CAST(NULL AS {}) as \"{}\"", sql_type, field_name));
+                 }
+             }
+             ctx.register_table("val_input", df.clone().into_view())?;
+             let sql = format!("SELECT {} FROM val_input", projections.join(", "));
+             ctx.sql(&sql).await?.into_optimized_plan()?
+        } else {
+            // Default: Try to find matching names or return empty
+            let mut projections = Vec::new();
+            for field in GraphSchemas::node_schema().fields() {
+                let sql_type = to_sql_type(field.data_type());
+                if input_schema.field_with_name(field.name()).is_ok() {
+                    projections.push(format!("CAST(\"{}\" AS {}) as \"{}\"", field.name(), sql_type, field.name()));
+                } else {
+                    projections.push(format!("CAST(NULL AS {}) as \"{}\"", sql_type, field.name()));
+                }
+            }
+            ctx.register_table("val_input_auto", df.clone().into_view())?;
+            let sql = format!("SELECT {} FROM val_input_auto", projections.join(", "));
+            ctx.sql(&sql).await?.into_optimized_plan()?
+        };
+
+        let edge_plan = {
+            let mut projections = Vec::new();
+            for field in GraphSchemas::edge_schema().fields() {
+                let sql_type = to_sql_type(field.data_type());
+                if input_schema.field_with_name(field.name()).is_ok() {
+                    projections.push(format!("CAST(\"{}\" AS {}) as \"{}\"", field.name(), sql_type, field.name()));
+                } else {
+                    projections.push(format!("CAST(NULL AS {}) as \"{}\"", sql_type, field.name()));
+                }
+            }
+            ctx.register_table("val_input_edge", df.into_view())?;
+            let sql = format!("SELECT {} FROM val_input_edge", projections.join(", "));
+            ctx.sql(&sql).await?.into_optimized_plan()?
+        };
+
+        Ok(vec![node_plan, edge_plan])
+    }
+}
+
+pub struct SemanticCleanerNode;
+
+#[async_trait]
+impl NodeBehavior for SemanticCleanerNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.transform.semantic_cleaner".to_string(),
+            display_name: "Semantic Cleaner".to_string(),
+            description: "Clean semantic inconsistencies using AI-generated rules based on a data sample.".to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data to clean".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Cleaned Data".into(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "column": { "type": "string" },
+                    "rules": { 
+                        "type": "object",
+                        "description": "Mapping of incorrect values to correct ones (generated by AI)."
+                    },
+                    "sample_size": { "type": "integer", "default": 100 }
+                },
+                "required": ["column"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        config["column"].as_str().ok_or_else(|| anyhow!("Column name is required"))?;
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let column = config["column"].as_str().unwrap();
+        let rules = config["rules"].as_object();
+        
+        let ctx = SessionContext::new();
+        let df = DataFrame::new(ctx.state(), inputs[0].clone());
+        
+        if let Some(r) = rules {
+            // Apply generated rules via CASE statement for native performance
+            let mut case_parts = Vec::new();
+            for (incorrect, correct) in r {
+                case_parts.push(format!("WHEN \"{}\" = '{}' THEN '{}'", column, incorrect, correct.as_str().unwrap_or("")));
+            }
+            
+            if case_parts.is_empty() {
+                return Ok(vec![inputs[0].clone()]);
+            }
+
+            let sql = format!(
+                "SELECT *, CASE {} ELSE \"{}\" END as \"{}_cleaned\" FROM cleaner_input",
+                case_parts.join(" "),
+                column,
+                column
+            );
+            ctx.register_table("cleaner_input", df.into_view())?;
+            let cleaned_df = ctx.sql(&sql).await?;
+            Ok(vec![cleaned_df.into_optimized_plan()?])
+        } else {
+            // If no rules, pass through (rules are expected to be injected by IntelligenceHook)
+            Ok(vec![inputs[0].clone()])
+        }
+    }
+}
+
+pub struct AiRouterNode;
+
+#[async_trait]
+impl NodeBehavior for AiRouterNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.transform.ai_router".to_string(),
+            display_name: "AI Router".to_string(),
+            description: "Inspect data profile and dynamically route to downstream branches.".to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data to route".into(),
+            }],
+            output_ports: vec![
+                PortSpec { id: 0, name: "branch_a".into(), description: "Primary branch".into() },
+                PortSpec { id: 1, name: "branch_b".into(), description: "Secondary branch".into() },
+            ],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "condition_script": { "type": "string", "description": "Optional AI prompt or logic to determine branch." },
+                    "selected_branch": { "type": "integer", "default": 0 }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        let selected = config["selected_branch"].as_i64().unwrap_or(0) as usize;
+        
+        // Dynamic routing in DataFusion is tricky at the plan level.
+        // For now, we return the input plan on the selected port and EmptyRelation on the other.
+        use datafusion::logical_expr::EmptyRelation;
+        
+        let mut plans = Vec::new();
+        for i in 0..2 {
+            if i == selected {
+                plans.push(inputs[0].clone());
+            } else {
+                plans.push(LogicalPlan::EmptyRelation(EmptyRelation {
+                    produce_one_row: false,
+                    schema: inputs[0].schema().clone(),
+                }));
+            }
+        }
+        
+        Ok(plans)
     }
 }

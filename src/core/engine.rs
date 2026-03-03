@@ -28,10 +28,32 @@ use crate::nodes::NodeEvent;
 
 use duckdb::Connection;
 
+/// Hooks for injecting AI intelligence into the execution flow.
+#[async_trait]
+pub trait IntelligenceHook: Send + Sync {
+    /// Called when a node execution fails. 
+    /// Returns Some(new_config) to retry, or None to fail.
+    async fn on_error(
+        &self,
+        node_id: Uuid,
+        type_id: &str,
+        config: &serde_json::Value,
+        error: &str,
+    ) -> Option<serde_json::Value>;
+
+    /// Called after a node completes to inspect data quality.
+    async fn on_data_quality(
+        &self,
+        node_id: Uuid,
+        sample: &datafusion::arrow::record_batch::RecordBatch,
+    ) -> Option<serde_json::Value>;
+}
+
 pub struct SwanFlowEngine {
     pub ctx: Arc<SessionContext>,
     pub registry: Arc<NodeRegistry>,
     pub cache_dir: String,
+    pub hook: Option<Arc<dyn IntelligenceHook>>,
 }
 
 async fn sync_metadata_to_context(ctx: &Arc<SessionContext>, cache_dir: &str) {
@@ -104,7 +126,7 @@ impl SwanFlowEngine {
             [],
         ).expect("Failed to create graph edges table");
 
-        Self { ctx, registry, cache_dir }
+        Self { ctx, registry, cache_dir, hook: None }
     }
 
     pub async fn execute_workflow(&self, workflow: &Workflow) -> Result<mpsc::UnboundedReceiver<NodeEvent>> {
@@ -129,6 +151,8 @@ impl SwanFlowEngine {
         let ctx_shared = self.ctx.clone();
         let cache_dir_clone = self.cache_dir.clone();
         let query_planner_clone = query_planner.clone();
+        let hook_shared = self.hook.clone();
+        let registry_shared = self.registry.clone();
 
         tokio::spawn(async move {
             // STAGED TOPOLOGICAL EXECUTION: run each level stage in order
@@ -139,8 +163,8 @@ impl SwanFlowEngine {
                 sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
 
                 // 2. Planning and execution for all terminals at this level
-                for (port, logical_plan) in terminals {
-                    println!("DEBUG: Stage Execution for level {}, port {}", level, port);
+                for (node_id, port, logical_plan) in terminals {
+                    println!("DEBUG: Stage Execution for level {}, node {}, port {}", level, node_id, port);
                     
                     let state = ctx_shared.state();
                     let state = SessionStateBuilder::new_from_existing(state)
@@ -150,16 +174,31 @@ impl SwanFlowEngine {
                     match state.create_physical_plan(&logical_plan).await {
                         Ok(physical_plan) => {
                             let task_ctx = ctx_shared.task_ctx();
-                            if let Err(e) = datafusion::physical_plan::collect(physical_plan, task_ctx).await {
-                                let _ = tx.send(NodeEvent::Error { 
-                                    node_id: Uuid::nil(), 
-                                    message: format!("Execution error: {}", e) 
-                                });
+                            match datafusion::physical_plan::collect(physical_plan, task_ctx).await {
+                                Ok(batches) => {
+                                    if let Some(hook) = &hook_shared {
+                                        if !batches.is_empty() {
+                                            let _ = hook.on_data_quality(node_id, &batches[0]).await;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let mut handled = false;
+                                    if let Some(hook) = &hook_shared {
+                                        if let Some(_fix) = hook.on_error(node_id, "unknown", &json!({}), &e.to_string()).await {
+                                            println!("DEBUG: IntelligenceHook proposed a fix for node {}", node_id);
+                                            handled = true;
+                                        }
+                                    }
+                                    if !handled {
+                                        let _ = tx.send(NodeEvent::Error { node_id, message: format!("Execution error: {}", e) });
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
                             // RETRY after Sync
-                            println!("DEBUG: Level {} port {} planning failed, retrying after sync...", level, port);
+                            println!("DEBUG: Level {} node {} port {} planning failed, retrying after sync...", level, node_id, port);
                             sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             
@@ -172,14 +211,23 @@ impl SwanFlowEngine {
                                 Ok(physical_plan) => {
                                     let task_ctx = ctx_shared.task_ctx();
                                     if let Err(e) = datafusion::physical_plan::collect(physical_plan, task_ctx).await {
-                                        let _ = tx.send(NodeEvent::Error { node_id: Uuid::nil(), message: format!("Execution error: {}", e) });
+                                        let _ = tx.send(NodeEvent::Error { node_id, message: format!("Execution error: {}", e) });
                                     }
                                 }
                                 Err(e2) => {
-                                    let _ = tx.send(NodeEvent::Error { 
-                                        node_id: Uuid::nil(), 
-                                        message: format!("Planning error for port {}: {} (Original: {})", port, e2, e) 
-                                    });
+                                    let mut handled = false;
+                                    if let Some(hook) = &hook_shared {
+                                        if let Some(_fix) = hook.on_error(node_id, "unknown", &json!({}), &e2.to_string()).await {
+                                            println!("DEBUG: IntelligenceHook proposed a fix for planning error on node {}", node_id);
+                                            handled = true;
+                                        }
+                                    }
+                                    if !handled {
+                                        let _ = tx.send(NodeEvent::Error { 
+                                            node_id, 
+                                            message: format!("Planning error after sync: {} (Original: {})", e2, e) 
+                                        });
+                                    }
                                 }
                             }
                         }

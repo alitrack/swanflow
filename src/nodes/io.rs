@@ -27,7 +27,7 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 
 use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
-use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec, GraphSchemas};
+use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec};
 
 pub struct ExcelReadNode;
 
