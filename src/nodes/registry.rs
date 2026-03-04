@@ -57,6 +57,10 @@ impl NodeRegistry {
         };
         use crate::nodes::ai::tool_executor::ToolExecutorNode;
         use crate::nodes::ai::privacy::{PiiDetectorNode, PiiMaskerNode, PolicyPrivacyGateNode};
+        use crate::nodes::ai::runtime::{
+            AgentLoopOrchestratorNode, CheckpointResumeControllerNode, ObservabilityAuditLedgerNode,
+            RetryBackoffGuardNode, RunStateStoreNode,
+        };
         use crate::nodes::ai::verification::FactClaimVerifierNode;
         use crate::nodes::ai::providers::{OpenAiProvider, LlmConfig, ProviderKind};
 
@@ -110,6 +114,11 @@ impl NodeRegistry {
         self.register_node(Arc::new(PiiDetectorNode));
         self.register_node(Arc::new(PiiMaskerNode));
         self.register_node(Arc::new(PolicyPrivacyGateNode));
+        self.register_node(Arc::new(RetryBackoffGuardNode));
+        self.register_node(Arc::new(CheckpointResumeControllerNode::default()));
+        self.register_node(Arc::new(RunStateStoreNode::default()));
+        self.register_node(Arc::new(ObservabilityAuditLedgerNode::default()));
+        self.register_node(Arc::new(AgentLoopOrchestratorNode));
         self.register_node(Arc::new(FactClaimVerifierNode));
         self.register_node(Arc::new(ResearchLoopMetaNode::new()));
 

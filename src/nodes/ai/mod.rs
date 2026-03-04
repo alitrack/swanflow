@@ -3,6 +3,7 @@ pub mod mcp;
 pub mod providers;
 pub mod graph;
 pub mod privacy;
+pub mod runtime;
 pub mod retrieval;
 pub mod tool_executor;
 pub mod verification;
