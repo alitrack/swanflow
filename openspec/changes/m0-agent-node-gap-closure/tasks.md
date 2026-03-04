@@ -6,7 +6,7 @@
 
 ## 2. Nodes and Integration
 
-- [ ] 2.1 Implement Structured IO Contract node.
+- [x] 2.1 Implement Structured IO Contract node.
 - [ ] 2.2 Implement Citation Tracker node.
 - [ ] 2.3 Implement Query Planning node.
 - [ ] 2.4 Implement Semantic Chunker node.

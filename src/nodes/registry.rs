@@ -49,6 +49,7 @@ impl NodeRegistry {
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
         use crate::nodes::script::boxed_python::BoxedPythonNode;
         use crate::nodes::ai::mcp::McpInvokeNode;
+        use crate::nodes::ai::contracts::StructuredIoContractNode;
         use crate::nodes::ai::graph::{GraphRetrieverNode, ContextFuserNode, EntityExtractorNode, ResearchLoopMetaNode};
         use crate::nodes::ai::providers::{OpenAiProvider, LlmConfig, ProviderKind};
 
@@ -89,6 +90,7 @@ impl NodeRegistry {
         self.register_node(Arc::new(GraphRetrieverNode));
         self.register_node(Arc::new(ContextFuserNode));
         self.register_node(Arc::new(McpInvokeNode));
+        self.register_node(Arc::new(StructuredIoContractNode));
         self.register_node(Arc::new(ResearchLoopMetaNode::new()));
 
         // Backward-compatible type aliases used by existing workflow JSON/YAML.
