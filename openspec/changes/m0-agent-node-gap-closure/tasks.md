@@ -12,7 +12,7 @@
 - [x] 2.4 Implement Semantic Chunker node.
 - [x] 2.5 Unify Vector Index Writer / Retriever contract output.
 - [x] 2.6 Add Tool Executor wrapper node for MCP normalization.
-- [ ] 2.7 Extend Universal Resolver routing contract.
+- [x] 2.7 Extend Universal Resolver routing contract.
 
 ## 3. Verification
 

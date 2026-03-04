@@ -756,6 +756,57 @@ impl NodeBehavior for CsvReadNode {
 pub struct UniversalReadNode;
 
 impl UniversalReadNode {
+    fn resolve_source(config: &JsonValue) -> Result<String> {
+        if let Some(source) = cfg::optional_string(config, "source") {
+            if source.trim().is_empty() {
+                return Err(anyhow!("source must not be empty"));
+            }
+            Ok(source)
+        } else {
+            cfg::required_string(config, "path")
+        }
+    }
+
+    pub fn resolve_route_metadata(config: &JsonValue) -> Result<JsonValue> {
+        let source = Self::resolve_source(config)?;
+        let source_type = cfg::optional_string(config, "source_type").unwrap_or_else(|| "auto".to_string());
+        let lowered = source.to_lowercase();
+
+        let resolved_source_type = match source_type.as_str() {
+            "auto" => {
+                if lowered.starts_with("http://") || lowered.starts_with("https://") {
+                    "url"
+                } else if lowered.starts_with("select ")
+                    || lowered.starts_with("with ")
+                    || lowered.starts_with("table:")
+                {
+                    "table"
+                } else {
+                    "file"
+                }
+            }
+            "url" | "file" | "table" => source_type.as_str(),
+            _ => {
+                return Err(anyhow!(
+                    "source_type must be one of auto|url|file|table, got {}",
+                    source_type
+                ))
+            }
+        };
+
+        let normalized_source = if resolved_source_type == "table" && lowered.starts_with("table:") {
+            source[6..].trim().to_string()
+        } else {
+            source
+        };
+
+        Ok(json!({
+            "source": normalized_source,
+            "requested_source_type": source_type,
+            "resolved_source_type": resolved_source_type
+        }))
+    }
+
     fn detect_format(path: &str) -> Option<FileFormat> {
         let path = path.to_lowercase();
         if path.ends_with(".parquet") {
@@ -818,19 +869,24 @@ impl NodeBehavior for UniversalReadNode {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
+                    "source": { "type": "string" },
+                    "source_type": { "type": "string", "default": "auto", "enum": ["auto", "url", "file", "table"] },
                     "format": { "type": "string", "default": "auto", "enum": ["auto", "parquet", "csv", "json", "avro", "arrow"] },
                     "recursive": { "type": "boolean", "default": false },
                     "has_header": { "type": "boolean", "default": true },
                     "delimiter": { "type": "string", "default": "," },
                     "multi_line": { "type": "boolean", "default": false }
                 },
-                "required": ["path"]
+                "anyOf": [
+                    { "required": ["path"] },
+                    { "required": ["source"] }
+                ]
             }),
         }
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        cfg::required_string(config, "path")?;
+        let _route = Self::resolve_route_metadata(config)?;
         Ok(())
     }
 
@@ -839,7 +895,32 @@ impl NodeBehavior for UniversalReadNode {
         _input_schemas: Vec<DFSchemaRef>,
         config: &JsonValue,
     ) -> Result<InferredMetadata> {
-        let path = cfg::required_string(config, "path")?;
+        let route = Self::resolve_route_metadata(config)?;
+        let source = route["source"]
+            .as_str()
+            .ok_or_else(|| anyhow!("route source missing"))?
+            .to_string();
+        let resolved_source_type = route["resolved_source_type"]
+            .as_str()
+            .ok_or_else(|| anyhow!("resolved_source_type missing"))?;
+
+        if resolved_source_type == "table" {
+            let sess_config = SessionConfig::new().with_target_partitions(1);
+            let ctx = SessionContext::new_with_config(sess_config);
+            let df = ctx.sql(&source).await?;
+            return Ok(InferredMetadata {
+                schemas: vec![Arc::new(df.schema().clone())],
+                sample_data: None,
+            });
+        }
+        if resolved_source_type == "url" {
+            return Err(anyhow!(
+                "URL route is not directly executable by universal_read; use core.io.http_fetch first ({})",
+                source
+            ));
+        }
+
+        let path = source;
         let format_str = cfg::optional_string(config, "format").unwrap_or_else(|| "auto".to_string());
         
         let format = if format_str == "auto" {
@@ -908,7 +989,29 @@ impl NodeBehavior for UniversalReadNode {
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let path = cfg::required_string(config, "path")?;
+        let route = Self::resolve_route_metadata(config)?;
+        let source = route["source"]
+            .as_str()
+            .ok_or_else(|| anyhow!("route source missing"))?
+            .to_string();
+        let resolved_source_type = route["resolved_source_type"]
+            .as_str()
+            .ok_or_else(|| anyhow!("resolved_source_type missing"))?;
+
+        if resolved_source_type == "table" {
+            let sess_config = SessionConfig::new().with_target_partitions(1);
+            let ctx = SessionContext::new_with_config(sess_config);
+            let df = ctx.sql(&source).await?;
+            return Ok(vec![df.into_optimized_plan()?]);
+        }
+        if resolved_source_type == "url" {
+            return Err(anyhow!(
+                "URL route is not directly executable by universal_read; use core.io.http_fetch first ({})",
+                source
+            ));
+        }
+
+        let path = source;
         let format_str = cfg::optional_string(config, "format").unwrap_or_else(|| "auto".to_string());
         let recursive = cfg::optional_bool(config, "recursive").unwrap_or(false);
         
