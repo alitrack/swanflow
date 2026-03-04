@@ -47,6 +47,7 @@ impl NodeRegistry {
         use crate::nodes::boundary::{InputNode, OutputNode, DuckDBExtensionNode};
         use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode, ProfilerNode, VariableCreatorNode, TableToVariableNode, GraphMergerNode, TableSchemaValidatorNode, SemanticCleanerNode, AiRouterNode};
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
+        use crate::nodes::script::boxed_python::BoxedPythonNode;
         use crate::nodes::ai::mcp::McpInvokeNode;
         use crate::nodes::ai::graph::{GraphRetrieverNode, ContextFuserNode, EntityExtractorNode, ResearchLoopMetaNode};
         use crate::nodes::ai::providers::{OpenAiProvider, LlmConfig, ProviderKind};
@@ -82,6 +83,7 @@ impl NodeRegistry {
         self.register_node(Arc::new(SemanticCleanerNode));
         self.register_node(Arc::new(AiRouterNode));
         self.register_node(Arc::new(PythonNode));
+        self.register_node(Arc::new(BoxedPythonNode));
         // Note: PythonUdfNode is registered but currently returns empty plan (stub implementation)
         self.register_node(Arc::new(PythonUdfNode));
         self.register_node(Arc::new(GraphRetrieverNode));

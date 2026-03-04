@@ -1,0 +1,13 @@
+[project]
+name = "boxlite-mcp"
+version = "0.1.0"
+description = "MCP server for managing BoxLite micro-VMs"
+dependencies = [
+    "mcp>=1.0.0",
+    "boxlite>=0.1.0",
+    "python-dotenv",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

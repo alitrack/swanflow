@@ -1,5 +1,4 @@
 pub mod mcp;
-pub mod mcp_client;
 pub mod providers;
 pub mod graph;
 

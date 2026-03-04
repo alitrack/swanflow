@@ -4,6 +4,11 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
+
+use aws_sdk_s3::presigning::PresigningConfig;
+use aws_sdk_s3::Client as S3Client;
+use aws_sdk_s3::primitives::ByteStream;
 
 use datafusion::arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray, StringBuilder, Int64Builder, Float64Builder, BooleanBuilder, TimestampNanosecondBuilder};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
@@ -1622,5 +1627,50 @@ impl ExcelReportWritingStream {
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
         
         Ok(())
+    }
+}
+
+pub struct S3Manager {
+    client: S3Client,
+    bucket: String,
+}
+
+impl S3Manager {
+    pub async fn new(bucket: String) -> anyhow::Result<Self> {
+        let config = aws_config::load_from_env().await;
+        let client = S3Client::new(&config);
+        Ok(Self { client, bucket })
+    }
+
+    pub async fn upload_file(&self, key: &str, path: &str) -> anyhow::Result<()> {
+        let body = ByteStream::from_path(std::path::Path::new(path)).await?;
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .body(body)
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_presigned_url(&self, key: &str, expires_in: Duration) -> anyhow::Result<String> {
+        let presigned = self.client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .presigned(PresigningConfig::expires_in(expires_in)?)
+            .await?;
+        Ok(presigned.uri().to_string())
+    }
+
+    pub async fn put_presigned_url(&self, key: &str, expires_in: Duration) -> anyhow::Result<String> {
+        let presigned = self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .presigned(PresigningConfig::expires_in(expires_in)?)
+            .await?;
+        Ok(presigned.uri().to_string())
     }
 }

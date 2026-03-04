@@ -1,0 +1,42 @@
+id: 00000000-0000-0000-0000-000000000004
+name: Secure Code Interpreter Demo
+graph:
+  nodes:
+    # 1. Generate Input Data
+    - id: 11111111-1111-1111-1111-111111111111
+      type_id: core.sql
+      config:
+        query: "SELECT 'Alice' as name, 30 as age UNION ALL SELECT 'Bob', 25"
+      state: Configured
+      materialize: true
+      sub_workflow: null
+
+    # 2. Boxed Python execution (Hardware isolated)
+    - id: 22222222-2222-2222-2222-222222222222
+      type_id: core.script.boxed_python
+      config:
+        code: |
+          print("Hello from BoxLite sandbox!")
+          df = db.execute("SELECT * FROM input_table").fetchdf()
+          print(f"Data received: {df}")
+          db.execute("CREATE VIEW results AS SELECT name, age * 2 as age_doubled FROM input_table")
+        s3_bucket: "swanflow-demo"
+        image: "python:3.11-slim"
+      state: Configured
+      materialize: true
+      sub_workflow: null
+
+    # 3. Final Output
+    - id: 33333333-3333-3333-3333-333333333333
+      type_id: core.output
+      config:
+        port_index: 0
+      state: Configured
+      materialize: false
+      sub_workflow: null
+
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

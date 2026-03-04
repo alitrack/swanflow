@@ -365,6 +365,15 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 self.cache_dir.clone(),
             ))));
         }
+        if let Some(boxed) = node.as_any().downcast_ref::<crate::nodes::script::boxed_python::BoxedPythonLogical>() {
+            return Ok(Some(Arc::new(crate::nodes::script::boxed_python::BoxedPythonExec::new(
+                physical_inputs[0].clone(),
+                boxed.code.clone(),
+                boxed.image.clone(),
+                boxed.s3_bucket.clone(),
+                boxed.schema.as_arrow().clone(),
+            ))));
+        }
         if let Some(excel_scan) = node.as_any().downcast_ref::<ExcelScanLogical>() {
             let fields = excel_scan.schema.fields().iter()
                 .map(|f| datafusion::arrow::datatypes::Field::new(f.name(), f.data_type().clone(), f.is_nullable()))
