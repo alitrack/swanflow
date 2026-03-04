@@ -3,6 +3,7 @@ pub mod mcp;
 pub mod providers;
 pub mod graph;
 pub mod retrieval;
+pub mod tool_executor;
 
 use self::providers::LlmProvider;
 use crate::nodes::NodeSpec;

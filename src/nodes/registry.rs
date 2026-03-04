@@ -54,6 +54,7 @@ impl NodeRegistry {
         use crate::nodes::ai::retrieval::{
             QueryPlanningNode, SemanticChunkerNode, VectorIndexWriterNode, VectorRetrieverNode,
         };
+        use crate::nodes::ai::tool_executor::ToolExecutorNode;
         use crate::nodes::ai::providers::{OpenAiProvider, LlmConfig, ProviderKind};
 
         self.register_node(Arc::new(SqlNode));
@@ -99,6 +100,7 @@ impl NodeRegistry {
         self.register_node(Arc::new(SemanticChunkerNode));
         self.register_node(Arc::new(VectorIndexWriterNode));
         self.register_node(Arc::new(VectorRetrieverNode));
+        self.register_node(Arc::new(ToolExecutorNode));
         self.register_node(Arc::new(ResearchLoopMetaNode::new()));
 
         // Backward-compatible type aliases used by existing workflow JSON/YAML.
