@@ -1,5 +1,8 @@
 use rustflow::nodes::ai::contracts::{CitationTrackerNode, StructuredIoContractNode};
-use rustflow::nodes::ai::retrieval::{QueryPlanningNode, SemanticChunkerNode, VectorIndexWriterNode, VectorRetrieverNode};
+use rustflow::nodes::ai::retrieval::{
+    EmbeddingGeneratorNode, QueryPlanningNode, SemanticChunkerNode, VectorIndexWriterNode,
+    VectorRetrieverNode,
+};
 use rustflow::nodes::ai::tool_executor::ToolExecutorNode;
 use rustflow::nodes::io::UniversalReadNode;
 use rustflow::nodes::NodeBehavior;
@@ -43,6 +46,12 @@ fn test_semantic_chunker_rejects_overlap_not_less_than_chunk_size() {
 
 #[test]
 fn test_vector_nodes_reject_zero_embedding_dim() {
+    let embedder = EmbeddingGeneratorNode;
+    let embedder_err = embedder
+        .validate(&json!({ "embedding_dim": 0 }))
+        .expect_err("embedding generator embedding_dim=0 should fail");
+    assert!(embedder_err.to_string().contains("greater than zero"));
+
     let writer = VectorIndexWriterNode;
     let writer_err = writer
         .validate(&json!({ "embedding_dim": 0 }))

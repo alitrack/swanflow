@@ -4,6 +4,8 @@ use datafusion::logical_expr::LogicalPlan;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use crate::nodes::ai::ConfigWizard;
 
@@ -105,6 +107,124 @@ impl NodeBehavior for QueryPlanningNode {
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
             return Err(anyhow!("Query Planning requires one input plan"));
+        }
+        Ok(vec![inputs[0].clone()])
+    }
+}
+
+pub struct EmbeddingGeneratorNode;
+
+impl EmbeddingGeneratorNode {
+    pub fn generate_embeddings(
+        &self,
+        texts: &[String],
+        config: &JsonValue,
+    ) -> Result<Vec<Vec<f32>>> {
+        self.validate(config)?;
+
+        let embedding_dim = config["embedding_dim"].as_u64().unwrap_or(384) as usize;
+        let normalize = config["normalize"].as_bool().unwrap_or(true);
+        let features_per_token = config["features_per_token"].as_u64().unwrap_or(2) as usize;
+
+        let mut output = Vec::with_capacity(texts.len());
+        for text in texts {
+            let mut vector = vec![0.0_f32; embedding_dim];
+            let lowered = text.to_lowercase();
+            for (position, token) in lowered.split_whitespace().enumerate() {
+                for feature_idx in 0..features_per_token {
+                    let mut hasher = DefaultHasher::new();
+                    token.hash(&mut hasher);
+                    position.hash(&mut hasher);
+                    feature_idx.hash(&mut hasher);
+                    let hash = hasher.finish();
+                    let index = (hash as usize) % embedding_dim;
+                    let sign = if ((hash >> 63) & 1) == 0 { 1.0 } else { -1.0 };
+                    let position_decay = 1.0 / (1.0 + position as f32 * 0.01);
+                    vector[index] += sign * position_decay;
+                }
+            }
+
+            if normalize {
+                let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+                if norm > 0.0 {
+                    for value in &mut vector {
+                        *value /= norm;
+                    }
+                }
+            }
+
+            output.push(vector);
+        }
+
+        Ok(output)
+    }
+}
+
+#[async_trait]
+impl NodeBehavior for EmbeddingGeneratorNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.ai.embedding_generator".to_string(),
+            display_name: "Embedding Generator".to_string(),
+            description: "Generate deterministic embedding vectors for text payloads.".to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".to_string(),
+                description: "Text input plan".to_string(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".to_string(),
+                description: "Embedding output plan".to_string(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "embedding_dim": { "type": "integer", "minimum": 1, "default": 384 },
+                    "normalize": { "type": "boolean", "default": true },
+                    "features_per_token": { "type": "integer", "minimum": 1, "maximum": 8, "default": 2 }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        if let Some(dim) = config["embedding_dim"].as_u64() {
+            if dim == 0 {
+                return Err(anyhow!("embedding_dim must be greater than zero"));
+            }
+            if dim > 8192 {
+                return Err(anyhow!("embedding_dim must be <= 8192"));
+            }
+        } else if config.get("embedding_dim").is_some() {
+            return Err(anyhow!("embedding_dim must be an integer"));
+        }
+
+        if config.get("normalize").is_some() && config["normalize"].as_bool().is_none() {
+            return Err(anyhow!("normalize must be a boolean"));
+        }
+
+        if let Some(features) = config["features_per_token"].as_u64() {
+            if features == 0 {
+                return Err(anyhow!("features_per_token must be greater than zero"));
+            }
+            if features > 8 {
+                return Err(anyhow!("features_per_token must be <= 8"));
+            }
+        } else if config.get("features_per_token").is_some() {
+            return Err(anyhow!("features_per_token must be an integer"));
+        }
+
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            return Err(anyhow!("Embedding Generator requires one input plan"));
         }
         Ok(vec![inputs[0].clone()])
     }
