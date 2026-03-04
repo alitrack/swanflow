@@ -56,7 +56,7 @@ impl NodeRegistry {
             VectorIndexWriterNode, VectorRetrieverNode,
         };
         use crate::nodes::ai::tool_executor::ToolExecutorNode;
-        use crate::nodes::ai::privacy::{PiiDetectorNode, PiiMaskerNode};
+        use crate::nodes::ai::privacy::{PiiDetectorNode, PiiMaskerNode, PolicyPrivacyGateNode};
         use crate::nodes::ai::verification::FactClaimVerifierNode;
         use crate::nodes::ai::providers::{OpenAiProvider, LlmConfig, ProviderKind};
 
@@ -109,6 +109,7 @@ impl NodeRegistry {
         self.register_node(Arc::new(ToolExecutorNode));
         self.register_node(Arc::new(PiiDetectorNode));
         self.register_node(Arc::new(PiiMaskerNode));
+        self.register_node(Arc::new(PolicyPrivacyGateNode));
         self.register_node(Arc::new(FactClaimVerifierNode));
         self.register_node(Arc::new(ResearchLoopMetaNode::new()));
 

@@ -370,3 +370,126 @@ impl NodeBehavior for PiiMaskerNode {
         Ok(vec![inputs[0].clone()])
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PolicyDecision {
+    pub allow: bool,
+    pub reason: String,
+    pub requires_approval: bool,
+}
+
+pub struct PolicyPrivacyGateNode;
+
+impl PolicyPrivacyGateNode {
+    fn parse_action_set(config: &JsonValue, field: &str) -> Result<HashSet<String>> {
+        if let Some(values) = config.get(field) {
+            let array = values
+                .as_array()
+                .ok_or_else(|| anyhow!("{} must be an array of strings", field))?;
+            let mut actions = HashSet::new();
+            for value in array {
+                let action = value
+                    .as_str()
+                    .ok_or_else(|| anyhow!("{} must contain only strings", field))?;
+                actions.insert(action.to_string());
+            }
+            Ok(actions)
+        } else {
+            Ok(HashSet::new())
+        }
+    }
+
+    pub fn evaluate_policy(
+        &self,
+        action: &str,
+        has_pii: bool,
+        config: &JsonValue,
+    ) -> Result<PolicyDecision> {
+        self.validate(config)?;
+
+        let block_when_pii = config["block_when_pii"].as_bool().unwrap_or(true);
+        let blocked_actions = Self::parse_action_set(config, "blocked_actions")?;
+        let approval_actions = Self::parse_action_set(config, "approval_actions")?;
+
+        if block_when_pii && has_pii {
+            return Ok(PolicyDecision {
+                allow: false,
+                reason: "pii_detected".to_string(),
+                requires_approval: false,
+            });
+        }
+
+        if blocked_actions.contains(action) {
+            return Ok(PolicyDecision {
+                allow: false,
+                reason: "action_blocked".to_string(),
+                requires_approval: false,
+            });
+        }
+
+        Ok(PolicyDecision {
+            allow: true,
+            reason: "allowed".to_string(),
+            requires_approval: approval_actions.contains(action),
+        })
+    }
+}
+
+#[async_trait]
+impl NodeBehavior for PolicyPrivacyGateNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.ai.policy_privacy_gate".to_string(),
+            display_name: "Policy & Privacy Gate".to_string(),
+            description: "Apply deterministic privacy and policy decisions for action execution."
+                .to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".to_string(),
+                description: "Input plan for guarded execution".to_string(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".to_string(),
+                description: "Output plan with policy decision metadata".to_string(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "block_when_pii": { "type": "boolean", "default": true },
+                    "blocked_actions": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "approval_actions": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        if let Some(value) = config.get("block_when_pii") {
+            if value.as_bool().is_none() {
+                return Err(anyhow!("block_when_pii must be a boolean"));
+            }
+        }
+
+        let _ = Self::parse_action_set(config, "blocked_actions")?;
+        let _ = Self::parse_action_set(config, "approval_actions")?;
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            return Err(anyhow!("Policy & Privacy Gate requires one input plan"));
+        }
+        Ok(vec![inputs[0].clone()])
+    }
+}
