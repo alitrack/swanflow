@@ -199,3 +199,193 @@ impl NodeBehavior for SemanticChunkerNode {
         Ok(vec![inputs[0].clone()])
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VectorContractRow {
+    pub index_id: String,
+    pub source_id: String,
+    pub chunk_id: String,
+    pub content: String,
+    pub embedding_dim: u32,
+    pub score: f32,
+}
+
+pub struct VectorIndexWriterNode;
+pub struct VectorRetrieverNode;
+
+fn validate_vector_contract_inputs(
+    index_id: &str,
+    source_id: &str,
+    chunk_id: &str,
+    embedding_dim: u32,
+) -> Result<()> {
+    if index_id.trim().is_empty() {
+        return Err(anyhow!("index_id must not be empty"));
+    }
+    if source_id.trim().is_empty() {
+        return Err(anyhow!("source_id must not be empty"));
+    }
+    if chunk_id.trim().is_empty() {
+        return Err(anyhow!("chunk_id must not be empty"));
+    }
+    if embedding_dim == 0 {
+        return Err(anyhow!("embedding_dim must be greater than zero"));
+    }
+    Ok(())
+}
+
+impl VectorIndexWriterNode {
+    pub fn build_contract_row(
+        &self,
+        index_id: &str,
+        source_id: &str,
+        chunk_id: &str,
+        content: &str,
+        embedding_dim: u32,
+        score: Option<f32>,
+    ) -> Result<VectorContractRow> {
+        validate_vector_contract_inputs(index_id, source_id, chunk_id, embedding_dim)?;
+        let normalized_score = score.unwrap_or(1.0);
+        if !(0.0..=1.0).contains(&normalized_score) {
+            return Err(anyhow!("score must be within [0.0, 1.0]"));
+        }
+
+        Ok(VectorContractRow {
+            index_id: index_id.to_string(),
+            source_id: source_id.to_string(),
+            chunk_id: chunk_id.to_string(),
+            content: content.to_string(),
+            embedding_dim,
+            score: normalized_score,
+        })
+    }
+}
+
+impl VectorRetrieverNode {
+    pub fn build_contract_row(
+        &self,
+        index_id: &str,
+        source_id: &str,
+        chunk_id: &str,
+        content: &str,
+        embedding_dim: u32,
+        score: Option<f32>,
+    ) -> Result<VectorContractRow> {
+        validate_vector_contract_inputs(index_id, source_id, chunk_id, embedding_dim)?;
+        let normalized_score = score.unwrap_or(0.0);
+        if !(0.0..=1.0).contains(&normalized_score) {
+            return Err(anyhow!("score must be within [0.0, 1.0]"));
+        }
+
+        Ok(VectorContractRow {
+            index_id: index_id.to_string(),
+            source_id: source_id.to_string(),
+            chunk_id: chunk_id.to_string(),
+            content: content.to_string(),
+            embedding_dim,
+            score: normalized_score,
+        })
+    }
+}
+
+#[async_trait]
+impl NodeBehavior for VectorIndexWriterNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.ai.vector_index_writer".to_string(),
+            display_name: "Vector Index Writer".to_string(),
+            description: "Normalize vector index write output contract.".to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".to_string(),
+                description: "Input plan".to_string(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".to_string(),
+                description: "Vector contract output".to_string(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "embedding_dim": { "type": "integer", "minimum": 1 }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        if let Some(dim) = config["embedding_dim"].as_u64() {
+            if dim == 0 {
+                return Err(anyhow!("embedding_dim must be greater than zero"));
+            }
+            return Ok(());
+        }
+        if config.get("embedding_dim").is_some() {
+            return Err(anyhow!("embedding_dim must be an integer"));
+        }
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            return Err(anyhow!("Vector Index Writer requires one input plan"));
+        }
+        Ok(vec![inputs[0].clone()])
+    }
+}
+
+#[async_trait]
+impl NodeBehavior for VectorRetrieverNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.ai.vector_retriever".to_string(),
+            display_name: "Vector Retriever".to_string(),
+            description: "Normalize vector retrieval output contract.".to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".to_string(),
+                description: "Input plan".to_string(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".to_string(),
+                description: "Retrieved context output".to_string(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "embedding_dim": { "type": "integer", "minimum": 1 }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        if let Some(dim) = config["embedding_dim"].as_u64() {
+            if dim == 0 {
+                return Err(anyhow!("embedding_dim must be greater than zero"));
+            }
+            return Ok(());
+        }
+        if config.get("embedding_dim").is_some() {
+            return Err(anyhow!("embedding_dim must be an integer"));
+        }
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            return Err(anyhow!("Vector Retriever requires one input plan"));
+        }
+        Ok(vec![inputs[0].clone()])
+    }
+}

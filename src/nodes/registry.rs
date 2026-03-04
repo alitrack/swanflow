@@ -51,7 +51,9 @@ impl NodeRegistry {
         use crate::nodes::ai::mcp::McpInvokeNode;
         use crate::nodes::ai::contracts::{CitationTrackerNode, StructuredIoContractNode};
         use crate::nodes::ai::graph::{GraphRetrieverNode, ContextFuserNode, EntityExtractorNode, ResearchLoopMetaNode};
-        use crate::nodes::ai::retrieval::{QueryPlanningNode, SemanticChunkerNode};
+        use crate::nodes::ai::retrieval::{
+            QueryPlanningNode, SemanticChunkerNode, VectorIndexWriterNode, VectorRetrieverNode,
+        };
         use crate::nodes::ai::providers::{OpenAiProvider, LlmConfig, ProviderKind};
 
         self.register_node(Arc::new(SqlNode));
@@ -95,6 +97,8 @@ impl NodeRegistry {
         self.register_node(Arc::new(CitationTrackerNode));
         self.register_node(Arc::new(QueryPlanningNode));
         self.register_node(Arc::new(SemanticChunkerNode));
+        self.register_node(Arc::new(VectorIndexWriterNode));
+        self.register_node(Arc::new(VectorRetrieverNode));
         self.register_node(Arc::new(ResearchLoopMetaNode::new()));
 
         // Backward-compatible type aliases used by existing workflow JSON/YAML.

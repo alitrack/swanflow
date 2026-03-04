@@ -10,7 +10,7 @@
 - [x] 2.2 Implement Citation Tracker node.
 - [x] 2.3 Implement Query Planning node.
 - [x] 2.4 Implement Semantic Chunker node.
-- [ ] 2.5 Unify Vector Index Writer / Retriever contract output.
+- [x] 2.5 Unify Vector Index Writer / Retriever contract output.
 - [ ] 2.6 Add Tool Executor wrapper node for MCP normalization.
 - [ ] 2.7 Extend Universal Resolver routing contract.
 
