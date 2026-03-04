@@ -4,6 +4,56 @@ use rustflow::nodes::ai::retrieval::{
 use rustflow::nodes::registry::NodeRegistry;
 use rustflow::nodes::NodeBehavior;
 use serde_json::json;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+fn spawn_mock_rerank_server(responses: Vec<(u16, String)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+    let address = listener.local_addr().expect("local addr");
+    listener
+        .set_nonblocking(false)
+        .expect("set blocking mode");
+
+    let queue = Arc::new(Mutex::new(responses));
+    let queue_ref = Arc::clone(&queue);
+    thread::spawn(move || {
+        loop {
+            let next = {
+                let mut guard = queue_ref.lock().expect("lock queue");
+                if guard.is_empty() {
+                    break;
+                }
+                guard.remove(0)
+            };
+
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+
+            let reason = if (200..300).contains(&next.0) {
+                "OK"
+            } else {
+                "ERROR"
+            };
+            let response = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                next.0,
+                reason,
+                next.1.len(),
+                next.1
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        }
+    });
+
+    format!("http://{}", address)
+}
 
 #[test]
 fn test_hybrid_retriever_fuses_sparse_and_semantic_scores() {
@@ -153,4 +203,85 @@ fn test_reranker_supports_model_and_llm_backends() {
         )
         .expect("llm backend rerank should succeed");
     assert_eq!(ranked_llm[0].source_id, "doc-2");
+}
+
+#[test]
+fn test_reranker_model_backend_calls_http_endpoint() {
+    let endpoint = spawn_mock_rerank_server(vec![(
+        200,
+        r#"{"results":[{"source_id":"doc-2","score":0.93},{"source_id":"doc-1","score":0.11}]}"#
+            .to_string(),
+    )]);
+
+    let node = RerankerNode;
+    let ranked = node
+        .rerank_candidates(
+            "rust tutorial",
+            vec![
+                RetrievalCandidate {
+                    source_id: "doc-1".to_string(),
+                    content: "python tutorial".to_string(),
+                    score: 0.80,
+                },
+                RetrievalCandidate {
+                    source_id: "doc-2".to_string(),
+                    content: "rust async tutorial".to_string(),
+                    score: 0.75,
+                },
+            ],
+            &json!({
+                "backend": "model",
+                "model_endpoint": endpoint,
+                "timeout_ms": 1000,
+                "max_retries": 0,
+                "fail_open": false,
+                "top_k": 1
+            }),
+        )
+        .expect("model backend should return ranked output from HTTP endpoint");
+
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].source_id, "doc-2");
+}
+
+#[test]
+fn test_reranker_model_backend_retries_after_failure() {
+    let endpoint = spawn_mock_rerank_server(vec![
+        (500, r#"{"error":"temporary"}"#.to_string()),
+        (
+            200,
+            r#"{"results":[{"source_id":"doc-1","score":0.91},{"source_id":"doc-2","score":0.21}]}"#
+                .to_string(),
+        ),
+    ]);
+
+    let node = RerankerNode;
+    let ranked = node
+        .rerank_candidates(
+            "rust tutorial",
+            vec![
+                RetrievalCandidate {
+                    source_id: "doc-1".to_string(),
+                    content: "python tutorial".to_string(),
+                    score: 0.20,
+                },
+                RetrievalCandidate {
+                    source_id: "doc-2".to_string(),
+                    content: "rust async tutorial".to_string(),
+                    score: 0.19,
+                },
+            ],
+            &json!({
+                "backend": "model",
+                "model_endpoint": endpoint,
+                "timeout_ms": 1000,
+                "max_retries": 1,
+                "fail_open": false,
+                "top_k": 1
+            }),
+        )
+        .expect("model backend should succeed after one retry");
+
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].source_id, "doc-1");
 }

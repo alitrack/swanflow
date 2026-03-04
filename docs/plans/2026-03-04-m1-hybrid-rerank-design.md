@@ -44,7 +44,8 @@ Config:
 - `model_term_boost` / `llm_term_boost` (>=0, optional)
 
 Ranking:
-- 当前三种 backend 统一走确定性 overlap 排序核心（后续替换为真实 model/llm 后端）
+- `model` backend 支持 HTTP 调用通道（timeout/retry/fail-open）
+- `rule`/`llm` backend 当前走确定性 overlap 排序核心
 - `final = base_score + overlap_count * query_term_boost`
 - 稳定排序并截断 `top_k`
 
@@ -58,6 +59,6 @@ Ranking:
 
 ## Non-goals
 
-- 本轮不接入真实外部模型 provider 调用
+- 本轮不接入特定厂商 SDK（仅通用 HTTP model backend 通道）
 - 不做跨节点 runtime 批处理优化
 - 不引入额外存储或新执行引擎算子

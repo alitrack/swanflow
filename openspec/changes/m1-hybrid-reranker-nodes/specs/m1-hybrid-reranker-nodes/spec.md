@@ -18,5 +18,10 @@ The system SHALL support a reranker node that reorders candidate contexts for a 
 
 #### Scenario: Backend selection contract
 - **WHEN** reranker config sets `backend` to `rule`, `model`, or `llm`
-- **THEN** the node SHALL accept the value and execute a deterministic ranking path
+- **THEN** the node SHALL accept the value and execute backend-specific ranking logic
 - **AND** unknown backend values SHALL be rejected by validation.
+
+#### Scenario: Model backend HTTP call with resilience
+- **WHEN** reranker config sets `backend=model` and provides `model_endpoint`
+- **THEN** the node SHALL call the endpoint with timeout and retry controls
+- **AND** fallback to deterministic ranking only when `fail_open=true`.

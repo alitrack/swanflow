@@ -4,6 +4,7 @@ use datafusion::logical_expr::LogicalPlan;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
@@ -330,6 +331,167 @@ impl RerankerNode {
         reranked
     }
 
+    fn rerank_with_external_scores(
+        &self,
+        mut candidates: Vec<RetrievalCandidate>,
+        external_scores: &HashMap<String, f32>,
+        top_k: usize,
+    ) -> Vec<RetrievalCandidate> {
+        for candidate in &mut candidates {
+            if let Some(score) = external_scores.get(&candidate.source_id) {
+                candidate.score = *score;
+            }
+        }
+
+        candidates.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.source_id.cmp(&right.source_id))
+        });
+        candidates.truncate(top_k);
+        candidates
+    }
+
+    fn rerank_with_model_backend(
+        &self,
+        query: &str,
+        candidates: Vec<RetrievalCandidate>,
+        config: &JsonValue,
+        top_k: usize,
+        fallback_term_boost: f32,
+    ) -> Result<Vec<RetrievalCandidate>> {
+        let endpoint = config["model_endpoint"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if endpoint.is_none() {
+            // Allow gradual rollout: if model endpoint is not configured, keep deterministic ranking.
+            return Ok(self.rerank_with_overlap(
+                query,
+                candidates,
+                top_k,
+                fallback_term_boost,
+            ));
+        }
+        let endpoint = endpoint.unwrap();
+
+        let timeout_ms = config["timeout_ms"].as_u64().unwrap_or(3_000);
+        let max_retries = config["max_retries"].as_u64().unwrap_or(2);
+        let fail_open = config["fail_open"].as_bool().unwrap_or(true);
+        let api_key = config["model_api_key"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| std::env::var("RERANK_MODEL_API_KEY").ok());
+
+        let model_payload = serde_json::json!({
+            "query": query,
+            "top_k": top_k,
+            "model_id": config["model_id"].as_str().unwrap_or("default"),
+            "candidates": candidates.iter().map(|candidate| {
+                serde_json::json!({
+                    "source_id": candidate.source_id,
+                    "content": candidate.content,
+                    "score": candidate.score
+                })
+            }).collect::<Vec<_>>()
+        });
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()?;
+
+        let mut last_error = None;
+        for attempt in 0..=max_retries {
+            let mut request = client.post(endpoint).json(&model_payload);
+            if let Some(key) = api_key.as_ref() {
+                request = request.bearer_auth(key);
+            }
+
+            match request.send() {
+                Ok(response) => {
+                    let status = response.status();
+                    let text = response.text()?;
+                    if !status.is_success() {
+                        last_error = Some(anyhow!(
+                            "model backend returned non-success status {}: {}",
+                            status,
+                            text
+                        ));
+                    } else {
+                        let body: JsonValue = serde_json::from_str(&text).map_err(|error| {
+                            anyhow!(
+                                "failed to parse model backend JSON: {}. response: {}",
+                                error,
+                                text
+                            )
+                        })?;
+
+                        let mut external_scores = HashMap::new();
+                        if let Some(results) = body["results"].as_array() {
+                            for (rank, item) in results.iter().enumerate() {
+                                if let Some(source_id) = item["source_id"].as_str() {
+                                    let score = item["score"]
+                                        .as_f64()
+                                        .map(|value| value as f32)
+                                        .unwrap_or((results.len().saturating_sub(rank)) as f32);
+                                    external_scores.insert(source_id.to_string(), score);
+                                }
+                            }
+                        } else if let Some(ranked_ids) = body["ranked_ids"].as_array() {
+                            for (rank, value) in ranked_ids.iter().enumerate() {
+                                if let Some(source_id) = value.as_str() {
+                                    external_scores.insert(
+                                        source_id.to_string(),
+                                        (ranked_ids.len().saturating_sub(rank)) as f32,
+                                    );
+                                }
+                            }
+                        } else {
+                            last_error = Some(anyhow!(
+                                "model backend response missing 'results' or 'ranked_ids'"
+                            ));
+                            continue;
+                        }
+
+                        if external_scores.is_empty() {
+                            last_error =
+                                Some(anyhow!("model backend response does not contain usable candidates"));
+                            continue;
+                        }
+
+                        return Ok(self.rerank_with_external_scores(
+                            candidates,
+                            &external_scores,
+                            top_k,
+                        ));
+                    }
+                }
+                Err(error) => {
+                    last_error = Some(anyhow!("model backend request failed: {}", error));
+                }
+            }
+
+            if attempt < max_retries {
+                let sleep_ms = 100u64.saturating_mul(2u64.pow((attempt as u32).min(4)));
+                std::thread::sleep(Duration::from_millis(sleep_ms));
+            }
+        }
+
+        if fail_open {
+            return Ok(self.rerank_with_overlap(
+                query,
+                candidates,
+                top_k,
+                fallback_term_boost,
+            ));
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("model backend rerank failed")))
+    }
+
     pub fn rerank_candidates(
         &self,
         query: &str,
@@ -342,14 +504,21 @@ impl RerankerNode {
         let backend = self.resolve_backend(config)?;
 
         let reranked = match backend {
-            RerankBackend::Rule => self.rerank_with_overlap(query, candidates, top_k, query_term_boost),
-            // Placeholder: model backend currently shares deterministic overlap ranking path.
+            RerankBackend::Rule => {
+                self.rerank_with_overlap(query, candidates, top_k, query_term_boost)
+            }
             RerankBackend::Model => {
                 let model_term_boost = config["model_term_boost"]
                     .as_f64()
                     .map(|v| v as f32)
                     .unwrap_or(query_term_boost);
-                self.rerank_with_overlap(query, candidates, top_k, model_term_boost)
+                self.rerank_with_model_backend(
+                    query,
+                    candidates,
+                    config,
+                    top_k,
+                    model_term_boost,
+                )?
             }
             // Placeholder: llm backend currently shares deterministic overlap ranking path.
             RerankBackend::Llm => {
@@ -459,7 +628,12 @@ impl NodeBehavior for RerankerNode {
                     "model_term_boost": { "type": "number", "minimum": 0.0, "default": 0.1 },
                     "llm_term_boost": { "type": "number", "minimum": 0.0, "default": 0.1 },
                     "model_id": { "type": "string" },
-                    "llm_model": { "type": "string" }
+                    "llm_model": { "type": "string" },
+                    "model_endpoint": { "type": "string" },
+                    "model_api_key": { "type": "string" },
+                    "timeout_ms": { "type": "integer", "minimum": 1, "default": 3000 },
+                    "max_retries": { "type": "integer", "minimum": 0, "default": 2 },
+                    "fail_open": { "type": "boolean", "default": true }
                 }
             }),
         }
@@ -506,6 +680,38 @@ impl NodeBehavior for RerankerNode {
             }
         } else if config.get("model_id").is_some() {
             return Err(anyhow!("model_id must be a string"));
+        }
+
+        if let Some(model_endpoint) = config["model_endpoint"].as_str() {
+            if model_endpoint.trim().is_empty() {
+                return Err(anyhow!("model_endpoint must not be empty when provided"));
+            }
+        } else if config.get("model_endpoint").is_some() {
+            return Err(anyhow!("model_endpoint must be a string"));
+        }
+
+        if let Some(model_api_key) = config["model_api_key"].as_str() {
+            if model_api_key.trim().is_empty() {
+                return Err(anyhow!("model_api_key must not be empty when provided"));
+            }
+        } else if config.get("model_api_key").is_some() {
+            return Err(anyhow!("model_api_key must be a string"));
+        }
+
+        if let Some(timeout_ms) = config["timeout_ms"].as_u64() {
+            if timeout_ms == 0 {
+                return Err(anyhow!("timeout_ms must be greater than zero"));
+            }
+        } else if config.get("timeout_ms").is_some() {
+            return Err(anyhow!("timeout_ms must be an integer"));
+        }
+
+        if config.get("max_retries").is_some() && config["max_retries"].as_u64().is_none() {
+            return Err(anyhow!("max_retries must be an integer"));
+        }
+
+        if config.get("fail_open").is_some() && config["fail_open"].as_bool().is_none() {
+            return Err(anyhow!("fail_open must be a boolean"));
         }
 
         if let Some(llm_model) = config["llm_model"].as_str() {
