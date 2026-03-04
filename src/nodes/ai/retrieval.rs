@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
+use crate::nodes::ai::ConfigWizard;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
@@ -354,6 +355,49 @@ impl RerankerNode {
         candidates
     }
 
+    fn extract_external_scores(&self, body: &JsonValue) -> Result<HashMap<String, f32>> {
+        let mut external_scores = HashMap::new();
+
+        if let Some(results) = body["results"].as_array() {
+            for (rank, item) in results.iter().enumerate() {
+                if let Some(source_id) = item["source_id"].as_str() {
+                    let score = item["score"]
+                        .as_f64()
+                        .map(|value| value as f32)
+                        .unwrap_or((results.len().saturating_sub(rank)) as f32);
+                    external_scores.insert(source_id.to_string(), score);
+                }
+            }
+            return Ok(external_scores);
+        }
+
+        if let Some(ranked_ids) = body["ranked_ids"].as_array() {
+            for (rank, value) in ranked_ids.iter().enumerate() {
+                if let Some(source_id) = value.as_str() {
+                    external_scores.insert(
+                        source_id.to_string(),
+                        (ranked_ids.len().saturating_sub(rank)) as f32,
+                    );
+                }
+            }
+            return Ok(external_scores);
+        }
+
+        if let Some(content) = body["choices"][0]["message"]["content"].as_str() {
+            let json_str = ConfigWizard::extract_json_from_response(content).unwrap_or(content);
+            if let Ok(nested_json) = serde_json::from_str::<JsonValue>(json_str) {
+                return self.extract_external_scores(&nested_json);
+            }
+            return Err(anyhow!(
+                "llm response content is not valid rerank JSON payload"
+            ));
+        }
+
+        Err(anyhow!(
+            "response missing 'results', 'ranked_ids', or chat completion content"
+        ))
+    }
+
     fn rerank_with_model_backend(
         &self,
         query: &str,
@@ -428,33 +472,16 @@ impl RerankerNode {
                                 text
                             )
                         })?;
-
-                        let mut external_scores = HashMap::new();
-                        if let Some(results) = body["results"].as_array() {
-                            for (rank, item) in results.iter().enumerate() {
-                                if let Some(source_id) = item["source_id"].as_str() {
-                                    let score = item["score"]
-                                        .as_f64()
-                                        .map(|value| value as f32)
-                                        .unwrap_or((results.len().saturating_sub(rank)) as f32);
-                                    external_scores.insert(source_id.to_string(), score);
-                                }
+                        let external_scores = match self.extract_external_scores(&body) {
+                            Ok(scores) => scores,
+                            Err(error) => {
+                                last_error = Some(anyhow!(
+                                    "model backend response parse failed: {}",
+                                    error
+                                ));
+                                continue;
                             }
-                        } else if let Some(ranked_ids) = body["ranked_ids"].as_array() {
-                            for (rank, value) in ranked_ids.iter().enumerate() {
-                                if let Some(source_id) = value.as_str() {
-                                    external_scores.insert(
-                                        source_id.to_string(),
-                                        (ranked_ids.len().saturating_sub(rank)) as f32,
-                                    );
-                                }
-                            }
-                        } else {
-                            last_error = Some(anyhow!(
-                                "model backend response missing 'results' or 'ranked_ids'"
-                            ));
-                            continue;
-                        }
+                        };
 
                         if external_scores.is_empty() {
                             last_error =
@@ -492,6 +519,145 @@ impl RerankerNode {
         Err(last_error.unwrap_or_else(|| anyhow!("model backend rerank failed")))
     }
 
+    fn rerank_with_llm_backend(
+        &self,
+        query: &str,
+        candidates: Vec<RetrievalCandidate>,
+        config: &JsonValue,
+        top_k: usize,
+        fallback_term_boost: f32,
+    ) -> Result<Vec<RetrievalCandidate>> {
+        let endpoint = config["llm_endpoint"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if endpoint.is_none() {
+            return Ok(self.rerank_with_overlap(
+                query,
+                candidates,
+                top_k,
+                fallback_term_boost,
+            ));
+        }
+        let endpoint = endpoint.unwrap();
+
+        let timeout_ms = config["timeout_ms"].as_u64().unwrap_or(3_000);
+        let max_retries = config["max_retries"].as_u64().unwrap_or(2);
+        let fail_open = config["fail_open"].as_bool().unwrap_or(true);
+        let llm_model = config["llm_model"].as_str().unwrap_or("gpt-4o-mini");
+        let llm_api_key = config["llm_api_key"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| std::env::var("LLM_RERANK_API_KEY").ok());
+        let llm_max_candidates = config["llm_max_candidates"].as_u64().unwrap_or(20) as usize;
+
+        let limited: Vec<&RetrievalCandidate> = candidates
+            .iter()
+            .take(llm_max_candidates.max(1))
+            .collect();
+        let candidate_lines = limited
+            .iter()
+            .map(|candidate| {
+                format!(
+                    "- source_id: {}\n  score: {}\n  content: {}",
+                    candidate.source_id, candidate.score, candidate.content
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let system_prompt = "You are a reranking engine. Return ONLY JSON with either `ranked_ids` (array of source_id in best-first order) or `results` (array of {source_id,score}).";
+        let user_prompt = format!(
+            "Query:\n{}\n\nCandidates:\n{}\n\nReturn top {} ids.",
+            query, candidate_lines, top_k
+        );
+        let payload = serde_json::json!({
+            "model": llm_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.0
+        });
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()?;
+
+        let mut last_error = None;
+        for attempt in 0..=max_retries {
+            let mut request = client.post(endpoint).json(&payload);
+            if let Some(key) = llm_api_key.as_ref() {
+                request = request.bearer_auth(key);
+            }
+
+            match request.send() {
+                Ok(response) => {
+                    let status = response.status();
+                    let text = response.text()?;
+                    if !status.is_success() {
+                        last_error = Some(anyhow!(
+                            "llm backend returned non-success status {}: {}",
+                            status,
+                            text
+                        ));
+                    } else {
+                        let body: JsonValue = serde_json::from_str(&text).map_err(|error| {
+                            anyhow!(
+                                "failed to parse llm backend JSON: {}. response: {}",
+                                error,
+                                text
+                            )
+                        })?;
+
+                        let external_scores = match self.extract_external_scores(&body) {
+                            Ok(scores) => scores,
+                            Err(error) => {
+                                last_error = Some(anyhow!(
+                                    "llm backend response parse failed: {}",
+                                    error
+                                ));
+                                continue;
+                            }
+                        };
+
+                        if external_scores.is_empty() {
+                            last_error =
+                                Some(anyhow!("llm backend response does not contain usable candidates"));
+                            continue;
+                        }
+
+                        return Ok(self.rerank_with_external_scores(
+                            candidates,
+                            &external_scores,
+                            top_k,
+                        ));
+                    }
+                }
+                Err(error) => {
+                    last_error = Some(anyhow!("llm backend request failed: {}", error));
+                }
+            }
+
+            if attempt < max_retries {
+                let sleep_ms = 100u64.saturating_mul(2u64.pow((attempt as u32).min(4)));
+                std::thread::sleep(Duration::from_millis(sleep_ms));
+            }
+        }
+
+        if fail_open {
+            return Ok(self.rerank_with_overlap(
+                query,
+                candidates,
+                top_k,
+                fallback_term_boost,
+            ));
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("llm backend rerank failed")))
+    }
+
     pub fn rerank_candidates(
         &self,
         query: &str,
@@ -526,7 +692,13 @@ impl RerankerNode {
                     .as_f64()
                     .map(|v| v as f32)
                     .unwrap_or(query_term_boost);
-                self.rerank_with_overlap(query, candidates, top_k, llm_term_boost)
+                self.rerank_with_llm_backend(
+                    query,
+                    candidates,
+                    config,
+                    top_k,
+                    llm_term_boost,
+                )?
             }
         };
 
@@ -631,6 +803,9 @@ impl NodeBehavior for RerankerNode {
                     "llm_model": { "type": "string" },
                     "model_endpoint": { "type": "string" },
                     "model_api_key": { "type": "string" },
+                    "llm_endpoint": { "type": "string" },
+                    "llm_api_key": { "type": "string" },
+                    "llm_max_candidates": { "type": "integer", "minimum": 1, "default": 20 },
                     "timeout_ms": { "type": "integer", "minimum": 1, "default": 3000 },
                     "max_retries": { "type": "integer", "minimum": 0, "default": 2 },
                     "fail_open": { "type": "boolean", "default": true }
@@ -720,6 +895,30 @@ impl NodeBehavior for RerankerNode {
             }
         } else if config.get("llm_model").is_some() {
             return Err(anyhow!("llm_model must be a string"));
+        }
+
+        if let Some(llm_endpoint) = config["llm_endpoint"].as_str() {
+            if llm_endpoint.trim().is_empty() {
+                return Err(anyhow!("llm_endpoint must not be empty when provided"));
+            }
+        } else if config.get("llm_endpoint").is_some() {
+            return Err(anyhow!("llm_endpoint must be a string"));
+        }
+
+        if let Some(llm_api_key) = config["llm_api_key"].as_str() {
+            if llm_api_key.trim().is_empty() {
+                return Err(anyhow!("llm_api_key must not be empty when provided"));
+            }
+        } else if config.get("llm_api_key").is_some() {
+            return Err(anyhow!("llm_api_key must be a string"));
+        }
+
+        if let Some(llm_max_candidates) = config["llm_max_candidates"].as_u64() {
+            if llm_max_candidates == 0 {
+                return Err(anyhow!("llm_max_candidates must be greater than zero"));
+            }
+        } else if config.get("llm_max_candidates").is_some() {
+            return Err(anyhow!("llm_max_candidates must be an integer"));
         }
 
         Ok(())

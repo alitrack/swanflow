@@ -285,3 +285,85 @@ fn test_reranker_model_backend_retries_after_failure() {
     assert_eq!(ranked.len(), 1);
     assert_eq!(ranked[0].source_id, "doc-1");
 }
+
+#[test]
+fn test_reranker_llm_backend_calls_http_endpoint() {
+    let endpoint = spawn_mock_rerank_server(vec![(
+        200,
+        r#"{"choices":[{"message":{"content":"{\"ranked_ids\":[\"doc-1\",\"doc-2\"]}"}}]}"#
+            .to_string(),
+    )]);
+
+    let node = RerankerNode;
+    let ranked = node
+        .rerank_candidates(
+            "rust tutorial",
+            vec![
+                RetrievalCandidate {
+                    source_id: "doc-1".to_string(),
+                    content: "python intro".to_string(),
+                    score: 0.10,
+                },
+                RetrievalCandidate {
+                    source_id: "doc-2".to_string(),
+                    content: "rust async tutorial".to_string(),
+                    score: 0.95,
+                },
+            ],
+            &json!({
+                "backend": "llm",
+                "llm_endpoint": endpoint,
+                "llm_model": "gpt-test",
+                "timeout_ms": 1000,
+                "max_retries": 0,
+                "fail_open": false,
+                "top_k": 1
+            }),
+        )
+        .expect("llm backend should return ranked output from HTTP endpoint");
+
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].source_id, "doc-1");
+}
+
+#[test]
+fn test_reranker_llm_backend_retries_after_failure() {
+    let endpoint = spawn_mock_rerank_server(vec![
+        (500, r#"{"error":"temporary"}"#.to_string()),
+        (
+            200,
+            r#"{"ranked_ids":["doc-2","doc-1"]}"#.to_string(),
+        ),
+    ]);
+
+    let node = RerankerNode;
+    let ranked = node
+        .rerank_candidates(
+            "rust tutorial",
+            vec![
+                RetrievalCandidate {
+                    source_id: "doc-1".to_string(),
+                    content: "python intro".to_string(),
+                    score: 0.10,
+                },
+                RetrievalCandidate {
+                    source_id: "doc-2".to_string(),
+                    content: "rust async tutorial".to_string(),
+                    score: 0.95,
+                },
+            ],
+            &json!({
+                "backend": "llm",
+                "llm_endpoint": endpoint,
+                "llm_model": "gpt-test",
+                "timeout_ms": 1000,
+                "max_retries": 1,
+                "fail_open": false,
+                "top_k": 1
+            }),
+        )
+        .expect("llm backend should succeed after retry");
+
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].source_id, "doc-2");
+}
