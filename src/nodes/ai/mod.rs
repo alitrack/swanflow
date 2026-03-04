@@ -1,3 +1,4 @@
+pub mod contracts;
 pub mod mcp;
 pub mod providers;
 pub mod graph;
