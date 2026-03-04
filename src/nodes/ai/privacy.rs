@@ -242,3 +242,131 @@ impl NodeBehavior for PiiDetectorNode {
         Ok(vec![inputs[0].clone()])
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PiiMaskReplacement {
+    pub token: String,
+    pub original: String,
+    pub pii_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PiiMaskResult {
+    pub masked_text: String,
+    pub replacements: Vec<PiiMaskReplacement>,
+}
+
+pub struct PiiMaskerNode;
+
+impl PiiMaskerNode {
+    fn token_prefix(config: &JsonValue) -> String {
+        config["token_prefix"]
+            .as_str()
+            .unwrap_or("PII")
+            .to_string()
+    }
+
+    pub fn mask_pii(&self, text: &str, config: &JsonValue) -> Result<PiiMaskResult> {
+        self.validate(config)?;
+
+        let detector = PiiDetectorNode;
+        let detection = detector.detect_pii(text, config)?;
+        if detection.matches.is_empty() {
+            return Ok(PiiMaskResult {
+                masked_text: text.to_string(),
+                replacements: Vec::new(),
+            });
+        }
+
+        let prefix = Self::token_prefix(config);
+        let mut masked_text = text.to_string();
+        let mut replacements = Vec::with_capacity(detection.matches.len());
+
+        for (index, pii_match) in detection.matches.iter().enumerate() {
+            let token = format!("<{}_{}>", prefix, format!("{:03}", index + 1));
+            replacements.push(PiiMaskReplacement {
+                token,
+                original: pii_match.value.clone(),
+                pii_type: pii_match.pii_type.clone(),
+            });
+        }
+
+        for (pii_match, replacement) in detection.matches.iter().zip(replacements.iter()).rev() {
+            masked_text.replace_range(pii_match.start..pii_match.end, &replacement.token);
+        }
+
+        Ok(PiiMaskResult {
+            masked_text,
+            replacements,
+        })
+    }
+
+    pub fn demask_pii(&self, masked_text: &str, replacements: &[PiiMaskReplacement]) -> String {
+        let mut restored = masked_text.to_string();
+        for replacement in replacements {
+            restored = restored.replace(&replacement.token, &replacement.original);
+        }
+        restored
+    }
+}
+
+#[async_trait]
+impl NodeBehavior for PiiMaskerNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.ai.pii_masker".to_string(),
+            display_name: "PII Masker / De-masker".to_string(),
+            description: "Mask and restore detected PII spans with deterministic placeholders."
+                .to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".to_string(),
+                description: "Input plan with text content".to_string(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".to_string(),
+                description: "Output plan with masked content and mappings".to_string(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "token_prefix": { "type": "string", "default": "PII" },
+                    "min_confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5 },
+                    "categories": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["email", "phone", "ssn", "credit_card"]
+                        }
+                    }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        if let Some(prefix) = config.get("token_prefix") {
+            let value = prefix
+                .as_str()
+                .ok_or_else(|| anyhow!("token_prefix must be a string"))?;
+            if value.trim().is_empty() {
+                return Err(anyhow!("token_prefix must not be empty"));
+            }
+        }
+
+        let detector = PiiDetectorNode;
+        detector.validate(config)
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            return Err(anyhow!("PII Masker requires one input plan"));
+        }
+        Ok(vec![inputs[0].clone()])
+    }
+}

@@ -1,0 +1,10 @@
+schema: spec-driven
+artifacts:
+  - id: proposal
+    path: proposal.md
+  - id: design
+    path: design.md
+  - id: specs
+    path: specs/**/spec.md
+  - id: tasks
+    path: tasks.md
