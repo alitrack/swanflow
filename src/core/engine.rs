@@ -22,9 +22,10 @@ use crate::core::datasource::{
     DuckDBScanLogical, DuckDBScanExec, SqlxScanLogical, SqlxScanExec,
 };
 use crate::nodes::sql::SqlProxyLogical;
+use crate::nodes::missing::{MissingNodeExec, MissingNodeLogical};
 use crate::nodes::script::python::{PythonLogical, PythonExec};
 use crate::nodes::registry::NodeRegistry;
-use crate::nodes::NodeEvent;
+use crate::nodes::{NodeDiagnostic, NodeErrorClass, NodeEvent};
 
 use duckdb::Connection;
 
@@ -82,6 +83,14 @@ async fn sync_metadata_to_context(ctx: &Arc<SessionContext>, cache_dir: &str) {
     }
 }
 
+fn should_invoke_self_healing(diagnostic: &NodeDiagnostic) -> bool {
+    diagnostic.class.is_recoverable()
+        && !diagnostic
+            .message
+            .to_ascii_lowercase()
+            .contains("missing node implementation")
+}
+
 impl SwanFlowEngine {
     pub fn new(registry: Arc<NodeRegistry>) -> Self {
         Self::with_cache_dir(registry, "target/swanflow_cache".to_string())
@@ -136,8 +145,29 @@ impl SwanFlowEngine {
         compiler.ctx = self.ctx.clone(); // CRITICAL: Share the same context!
         compiler.event_tx = Some(tx.clone());
         
-        let stages = compiler.compile(workflow, &self.registry, Some(self.ctx.clone())).await
-            .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
+        let stages = match compiler
+            .compile(workflow, &self.registry, Some(self.ctx.clone()))
+            .await
+        {
+            Ok(stages) => stages,
+            Err(e) => {
+                let message = e.to_string();
+                if !message.contains("\"class\"") {
+                    let fallback = NodeDiagnostic::new(
+                        Uuid::nil(),
+                        "workflow".to_string(),
+                        NodeErrorClass::Planning,
+                        message,
+                    );
+                    let _ = tx.send(NodeEvent::Error {
+                        node_id: Uuid::nil(),
+                        message: fallback.to_event_message(),
+                    });
+                }
+                drop(tx);
+                return Ok(rx);
+            }
+        };
         
         if stages.is_empty() {
             return Err(datafusion::error::DataFusionError::Plan("Workflow has no outputs".to_string()));
@@ -163,7 +193,11 @@ impl SwanFlowEngine {
                 sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
 
                 // 2. Planning and execution for all terminals at this level
-                for (node_id, port, logical_plan) in terminals {
+                for stage_plan in terminals {
+                    let node_id = stage_plan.node_id;
+                    let node_type = stage_plan.node_type.clone();
+                    let port = stage_plan.port;
+                    let logical_plan = stage_plan.plan;
                     println!("DEBUG: Stage Execution for level {}, node {}, port {}", level, node_id, port);
                     
                     let state = ctx_shared.state();
@@ -196,15 +230,29 @@ impl SwanFlowEngine {
                                     }
                                 }
                                 Err(e) => {
+                                    let diagnostic = NodeDiagnostic::new(
+                                        node_id,
+                                        node_type.clone(),
+                                        NodeErrorClass::Execution,
+                                        format!("Execution error: {}", e),
+                                    );
                                     let mut handled = false;
                                     if let Some(hook) = &hook_shared {
-                                        if let Some(_fix) = hook.on_error(node_id, "unknown", &json!({}), &e.to_string()).await {
-                                            println!("DEBUG: IntelligenceHook proposed a fix for node {}", node_id);
-                                            handled = true;
+                                        if should_invoke_self_healing(&diagnostic) {
+                                            if let Some(_fix) = hook
+                                                .on_error(node_id, &node_type, &json!({}), &diagnostic.message)
+                                                .await
+                                            {
+                                                println!("DEBUG: IntelligenceHook proposed a fix for node {}", node_id);
+                                                handled = true;
+                                            }
                                         }
                                     }
                                     if !handled {
-                                        let _ = tx.send(NodeEvent::Error { node_id, message: format!("Execution error: {}", e) });
+                                        let _ = tx.send(NodeEvent::Error {
+                                            node_id,
+                                            message: diagnostic.to_event_message(),
+                                        });
                                     }
                                 }
                             }
@@ -224,21 +272,54 @@ impl SwanFlowEngine {
                                 Ok(physical_plan) => {
                                     let task_ctx = ctx_shared.task_ctx();
                                     if let Err(e) = datafusion::physical_plan::collect(physical_plan, task_ctx).await {
-                                        let _ = tx.send(NodeEvent::Error { node_id, message: format!("Execution error: {}", e) });
+                                        let diagnostic = NodeDiagnostic::new(
+                                            node_id,
+                                            node_type.clone(),
+                                            NodeErrorClass::Execution,
+                                            format!("Execution error: {}", e),
+                                        );
+                                        let mut handled = false;
+                                        if let Some(hook) = &hook_shared {
+                                            if should_invoke_self_healing(&diagnostic) {
+                                                if let Some(_fix) = hook
+                                                    .on_error(node_id, &node_type, &json!({}), &diagnostic.message)
+                                                    .await
+                                                {
+                                                    handled = true;
+                                                }
+                                            }
+                                        }
+                                        if !handled {
+                                            let _ = tx.send(NodeEvent::Error {
+                                                node_id,
+                                                message: diagnostic.to_event_message(),
+                                            });
+                                        }
                                     }
                                 }
                                 Err(e2) => {
+                                    let diagnostic = NodeDiagnostic::new(
+                                        node_id,
+                                        node_type.clone(),
+                                        NodeErrorClass::Planning,
+                                        format!("Planning error after sync: {} (Original: {})", e2, e),
+                                    );
                                     let mut handled = false;
                                     if let Some(hook) = &hook_shared {
-                                        if let Some(_fix) = hook.on_error(node_id, "unknown", &json!({}), &e2.to_string()).await {
-                                            println!("DEBUG: IntelligenceHook proposed a fix for planning error on node {}", node_id);
-                                            handled = true;
+                                        if should_invoke_self_healing(&diagnostic) {
+                                            if let Some(_fix) = hook
+                                                .on_error(node_id, &node_type, &json!({}), &diagnostic.message)
+                                                .await
+                                            {
+                                                println!("DEBUG: IntelligenceHook proposed a fix for planning error on node {}", node_id);
+                                                handled = true;
+                                            }
                                         }
                                     }
                                     if !handled {
                                         let _ = tx.send(NodeEvent::Error { 
                                             node_id, 
-                                            message: format!("Planning error after sync: {} (Original: {})", e2, e) 
+                                            message: diagnostic.to_event_message(),
                                         });
                                     }
                                 }
@@ -269,6 +350,7 @@ impl SwanFlowEngine {
             schemas: compiler.inferred_schemas,
             sample_data: compiler.sample_data,
             profiles: HashMap::new(),
+            diagnostics: compiler.diagnostics,
         })
     }
 }
@@ -314,6 +396,9 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 self.ctx.clone(),
                 self.event_tx.clone(),
             ))));
+        }
+        if let Some(missing) = node.as_any().downcast_ref::<MissingNodeLogical>() {
+            return Ok(Some(Arc::new(MissingNodeExec::new(missing))));
         }
         if let Some(entity_port) = node.as_any().downcast_ref::<crate::nodes::ai::graph::EntityPortLogical>() {
             return Ok(Some(Arc::new(crate::nodes::ai::graph::EntityExtractorExec::new(
@@ -371,7 +456,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 boxed.code.clone(),
                 boxed.image.clone(),
                 boxed.s3_bucket.clone(),
-                boxed.schema.as_arrow().clone(),
+                Arc::new(boxed.schema.as_arrow().clone()),
             ))));
         }
         if let Some(excel_scan) = node.as_any().downcast_ref::<ExcelScanLogical>() {
@@ -544,4 +629,5 @@ pub struct WorkflowMetadata {
     pub schemas: HashMap<Uuid, Vec<DFSchemaRef>>,
     pub sample_data: HashMap<Uuid, Vec<datafusion::arrow::record_batch::RecordBatch>>,
     pub profiles: HashMap<Uuid, datafusion::arrow::record_batch::RecordBatch>,
+    pub diagnostics: HashMap<Uuid, Vec<String>>,
 }

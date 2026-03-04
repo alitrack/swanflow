@@ -25,6 +25,7 @@ use pyo3::types::{PyDict, PyModule};
 use pyo3::ffi::c_str;
 use pyo3_arrow::PyRecordBatch;
 
+use crate::nodes::config as cfg;
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
 /// Logical node for Python script execution.
@@ -273,9 +274,7 @@ impl NodeBehavior for PythonNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["script"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Python script is required"))?;
+        cfg::required_string(config, "script")?;
         Ok(())
     }
 
@@ -284,7 +283,7 @@ impl NodeBehavior for PythonNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let script = config["script"].as_str().unwrap().to_string();
+        let script = cfg::required_string(config, "script")?;
         Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
             node: Arc::new(PythonLogical {
                 script,
@@ -320,12 +319,8 @@ impl NodeBehavior for PythonUdfNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["name"]
-            .as_str()
-            .ok_or_else(|| anyhow!("UDF name is required"))?;
-        config["code"]
-            .as_str()
-            .ok_or_else(|| anyhow!("UDF code is required"))?;
+        cfg::required_string(config, "name")?;
+        cfg::required_string(config, "code")?;
         Ok(())
     }
 

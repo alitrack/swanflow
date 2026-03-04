@@ -7,6 +7,7 @@ use std::fmt;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::nodes::config as cfg;
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
 #[derive(Debug, Clone)]
@@ -111,9 +112,7 @@ impl NodeBehavior for SqlNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["query"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("SQL Query is required"))?;
+        cfg::required_string(config, "query")?;
         Ok(())
     }
 
@@ -122,9 +121,9 @@ impl NodeBehavior for SqlNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let mut query = config["query"].as_str().unwrap().to_string();
+        let mut query = cfg::required_string(config, "query")?;
         
-        let params = if let Some(p_array) = config["params"].as_array() {
+        let params = if let Some(p_array) = cfg::optional_array(config, "params") {
             p_array.iter().map(|v| {
                 if let Some(i) = v.as_i64() {
                     ScalarValue::Int64(Some(i))

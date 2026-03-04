@@ -27,6 +27,7 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 
 use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
+use crate::nodes::config as cfg;
 use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec};
 
 pub struct ExcelReadNode;
@@ -93,9 +94,7 @@ impl NodeBehavior for ExcelReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Excel Path is required"))?;
+        cfg::required_string(config, "path")?;
         Ok(())
     }
 
@@ -104,13 +103,13 @@ impl NodeBehavior for ExcelReadNode {
         _input_schemas: Vec<DFSchemaRef>,
         config: &JsonValue,
     ) -> Result<InferredMetadata> {
-        let path = config["path"].as_str().unwrap();
-        let sheet_name = config["sheet"].as_str();
-        let has_header = config["has_header"].as_bool().unwrap_or(true);
-        let sample_limit = config["sample_rows"].as_u64().unwrap_or(100) as usize;
+        let path = cfg::required_string(config, "path")?;
+        let sheet_name = cfg::optional_string(config, "sheet");
+        let has_header = cfg::optional_bool(config, "has_header").unwrap_or(true);
+        let sample_limit = cfg::optional_number(config, "sample_rows").unwrap_or(100.0).max(0.0) as usize;
 
-        let mut workbook: Xlsx<_> = open_workbook(path)?;
-        let sheet = if let Some(name) = sheet_name {
+        let mut workbook: Xlsx<_> = open_workbook(&path)?;
+        let sheet = if let Some(name) = sheet_name.as_deref() {
             workbook
                 .worksheet_range(name)
                 .map_err(|e| anyhow!("Error reading sheet {}: {}", name, e))?
@@ -191,8 +190,8 @@ impl NodeBehavior for ExcelReadNode {
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let path = PathBuf::from(config["path"].as_str().unwrap());
-        let sheet = config["sheet"].as_str().map(|s| s.to_string());
+        let path = PathBuf::from(cfg::required_string(config, "path")?);
+        let sheet = cfg::optional_string(config, "sheet");
         let mode = ExcelScanMode::Validated;
 
         let scan_node = LogicalPlan::Extension(Extension {
@@ -236,9 +235,7 @@ impl NodeBehavior for ExcelWriteNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Excel Path is required"))?;
+        cfg::required_string(config, "path")?;
         Ok(())
     }
 
@@ -247,9 +244,9 @@ impl NodeBehavior for ExcelWriteNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let path = PathBuf::from(config["path"].as_str().unwrap());
-        let sheet = config["sheet"].as_str().unwrap_or("Sheet1").to_string();
-        let convert_to_table = config["convert_to_table"].as_bool().unwrap_or(true);
+        let path = PathBuf::from(cfg::required_string(config, "path")?);
+        let sheet = cfg::optional_string(config, "sheet").unwrap_or_else(|| "Sheet1".to_string());
+        let convert_to_table = cfg::optional_bool(config, "convert_to_table").unwrap_or(true);
 
         let sink_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(ExcelSinkLogical {
@@ -301,8 +298,8 @@ impl NodeBehavior for ExcelTemplateNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["template_path"].as_str().ok_or_else(|| anyhow!("template_path is required"))?;
-        config["output_path"].as_str().ok_or_else(|| anyhow!("output_path is required"))?;
+        cfg::required_string(config, "template_path")?;
+        cfg::required_string(config, "output_path")?;
         Ok(())
     }
 
@@ -311,10 +308,10 @@ impl NodeBehavior for ExcelTemplateNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let template_path = PathBuf::from(config["template_path"].as_str().unwrap());
-        let output_path = PathBuf::from(config["output_path"].as_str().unwrap());
-        let sheet = config["sheet"].as_str().unwrap_or("Sheet1").to_string();
-        let table_start = config["table_start"].as_str().map(|s| s.to_string());
+        let template_path = PathBuf::from(cfg::required_string(config, "template_path")?);
+        let output_path = PathBuf::from(cfg::required_string(config, "output_path")?);
+        let sheet = cfg::optional_string(config, "sheet").unwrap_or_else(|| "Sheet1".to_string());
+        let table_start = cfg::optional_string(config, "table_start");
         
         let mut markers = std::collections::HashMap::new();
         if let Some(obj) = config["markers"].as_object() {
@@ -362,7 +359,7 @@ impl NodeBehavior for ExcelSheetNamesNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"].as_str().ok_or_else(|| anyhow!("path is required"))?;
+        cfg::required_string(config, "path")?;
         Ok(())
     }
 
@@ -383,7 +380,7 @@ impl NodeBehavior for ExcelSheetNamesNode {
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let path = config["path"].as_str().unwrap().to_string();
+        let path = cfg::required_string(config, "path")?;
         let workbook: Xlsx<_> = open_workbook(&path)?;
         let names = workbook.sheet_names();
         
@@ -449,7 +446,7 @@ impl NodeBehavior for ExcelReportNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"].as_str().ok_or_else(|| anyhow!("path is required"))?;
+        cfg::required_string(config, "path")?;
         Ok(())
     }
 
@@ -458,7 +455,7 @@ impl NodeBehavior for ExcelReportNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let path = PathBuf::from(config["path"].as_str().unwrap());
+        let path = PathBuf::from(cfg::required_string(config, "path")?);
         let charts = config["charts"].clone();
         
         let sink_plan = LogicalPlan::Extension(Extension {
@@ -549,9 +546,7 @@ impl NodeBehavior for DuckDBReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["query"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Query is required"))?;
+        cfg::required_string(config, "query")?;
         Ok(())
     }
 
@@ -560,11 +555,11 @@ impl NodeBehavior for DuckDBReadNode {
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let path = config["path"].as_str().unwrap_or(":memory:");
-        let query = config["query"].as_str().unwrap_or("SELECT 1");
+        let path = cfg::optional_string(config, "path").unwrap_or_else(|| ":memory:".to_string());
+        let query = cfg::required_string(config, "query")?;
         
         // Use query_arrow to get the schema reliably without holding Connection across await
-        let batches = DuckDBHelper::query_arrow(path, query, &vec![], &None).await?;
+        let batches = DuckDBHelper::query_arrow(&path, &query, &vec![], &None).await?;
         if batches.is_empty() {
             return Err(anyhow!("Query returned no data for schema inference"));
         }
@@ -608,9 +603,7 @@ impl NodeBehavior for DuckDBWriteNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["table"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Table name is required"))?;
+        cfg::required_string(config, "table")?;
         Ok(())
     }
 
@@ -650,9 +643,7 @@ impl NodeBehavior for HttpFetchNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["url"]
-            .as_str()
-            .ok_or_else(|| anyhow!("URL is required"))?;
+        cfg::required_string(config, "url")?;
         Ok(())
     }
 
@@ -661,8 +652,8 @@ impl NodeBehavior for HttpFetchNode {
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let url = config["url"].as_str().unwrap().to_string();
-        let _method = config["method"].as_str().unwrap_or("GET").to_string();
+        let url = cfg::required_string(config, "url")?;
+        let _method = cfg::optional_string(config, "method").unwrap_or_else(|| "GET".to_string());
 
         Ok(vec![LogicalPlan::Extension(Extension {
             node: Arc::new(crate::core::datasource::DuckDBScanLogical {
@@ -702,9 +693,7 @@ impl NodeBehavior for ParquetReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Parquet Path is required"))?;
+        cfg::required_string(config, "path")?;
         Ok(())
     }
 
@@ -713,10 +702,10 @@ impl NodeBehavior for ParquetReadNode {
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let path = config["path"].as_str().unwrap();
+        let path = cfg::required_string(config, "path")?;
         let ctx = SessionContext::new();
         let df = ctx
-            .read_parquet(path, ParquetReadOptions::default())
+            .read_parquet(&path, ParquetReadOptions::default())
             .await?;
         Ok(vec![df.into_optimized_plan()?])
     }
@@ -748,9 +737,7 @@ impl NodeBehavior for CsvReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"]
-            .as_str()
-            .ok_or_else(|| anyhow!("CSV Path is required"))?;
+        cfg::required_string(config, "path")?;
         Ok(())
     }
 
@@ -759,9 +746,9 @@ impl NodeBehavior for CsvReadNode {
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let path = config["path"].as_str().unwrap();
+        let path = cfg::required_string(config, "path")?;
         let ctx = SessionContext::new();
-        let df = ctx.read_csv(path, CsvReadOptions::new()).await?;
+        let df = ctx.read_csv(&path, CsvReadOptions::new()).await?;
         Ok(vec![df.into_optimized_plan()?])
     }
 }
@@ -798,6 +785,12 @@ impl UniversalReadNode {
             }
         }
         partitions
+    }
+
+    fn delimiter_byte(config: &JsonValue) -> u8 {
+        cfg::optional_string(config, "delimiter")
+            .and_then(|d| d.as_bytes().first().copied())
+            .unwrap_or(b',')
     }
 }
 
@@ -837,7 +830,7 @@ impl NodeBehavior for UniversalReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["path"].as_str().ok_or_else(|| anyhow!("Path is required"))?;
+        cfg::required_string(config, "path")?;
         Ok(())
     }
 
@@ -846,13 +839,13 @@ impl NodeBehavior for UniversalReadNode {
         _input_schemas: Vec<DFSchemaRef>,
         config: &JsonValue,
     ) -> Result<InferredMetadata> {
-        let path = config["path"].as_str().unwrap();
-        let format_str = config["format"].as_str().unwrap_or("auto");
+        let path = cfg::required_string(config, "path")?;
+        let format_str = cfg::optional_string(config, "format").unwrap_or_else(|| "auto".to_string());
         
         let format = if format_str == "auto" {
-            Self::detect_format(path).ok_or_else(|| anyhow!("Could not detect format for {}", path))?
+            Self::detect_format(&path).ok_or_else(|| anyhow!("Could not detect format for {}", path))?
         } else {
-            match format_str {
+            match format_str.as_str() {
                 "parquet" => FileFormat::Parquet,
                 "csv" => FileFormat::Csv,
                 "json" => FileFormat::Json,
@@ -862,13 +855,13 @@ impl NodeBehavior for UniversalReadNode {
 
         let sess_config = SessionConfig::new().with_target_partitions(1);
         let ctx = SessionContext::new_with_config(sess_config);
-        let is_dir = std::path::Path::new(path).is_dir();
+        let is_dir = std::path::Path::new(&path).is_dir();
 
         match format {
             FileFormat::Parquet => {
                 let mut opts = ParquetReadOptions::default();
                 if is_dir {
-                    let abs_path = std::fs::canonicalize(path)?;
+                    let abs_path = std::fs::canonicalize(&path)?;
                     let partitions = Self::discover_partitions(abs_path.to_str().unwrap());
                     if !partitions.is_empty() {
                         opts.table_partition_cols = partitions.into_iter()
@@ -876,24 +869,24 @@ impl NodeBehavior for UniversalReadNode {
                             .collect();
                     }
                 }
-                let df = ctx.read_parquet(path, opts).await?;
+                let df = ctx.read_parquet(&path, opts).await?;
                 Ok(InferredMetadata {
                     schemas: vec![Arc::new(df.schema().clone())],
                     sample_data: None,
                 })
             }
             FileFormat::Csv => {
-                let has_header = config["has_header"].as_bool().unwrap_or(true);
-                let delimiter = config["delimiter"].as_str().unwrap_or(",").as_bytes()[0];
+                let has_header = cfg::optional_bool(config, "has_header").unwrap_or(true);
+                let delimiter = Self::delimiter_byte(config);
                 let opts = CsvReadOptions::new().has_header(has_header).delimiter(delimiter);
-                let df = ctx.read_csv(path, opts).await?;
+                let df = ctx.read_csv(&path, opts).await?;
                 Ok(InferredMetadata {
                     schemas: vec![Arc::new(df.schema().clone())],
                     sample_data: None,
                 })
             }
             FileFormat::Json => {
-                let abs_path = std::fs::canonicalize(path)?;
+                let abs_path = std::fs::canonicalize(&path)?;
                 let query = format!("SELECT * FROM read_json_auto('{}')", abs_path.to_str().unwrap());
                 
                 let batches = DuckDBHelper::query_arrow(":memory:", &query, &vec![], &None).await?;
@@ -915,14 +908,14 @@ impl NodeBehavior for UniversalReadNode {
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let path = config["path"].as_str().unwrap();
-        let format_str = config["format"].as_str().unwrap_or("auto");
-        let recursive = config["recursive"].as_bool().unwrap_or(false);
+        let path = cfg::required_string(config, "path")?;
+        let format_str = cfg::optional_string(config, "format").unwrap_or_else(|| "auto".to_string());
+        let recursive = cfg::optional_bool(config, "recursive").unwrap_or(false);
         
         let format = if format_str == "auto" {
-            Self::detect_format(path).ok_or_else(|| anyhow!("Could not detect format for {}", path))?
+            Self::detect_format(&path).ok_or_else(|| anyhow!("Could not detect format for {}", path))?
         } else {
-            match format_str {
+            match format_str.as_str() {
                 "parquet" => FileFormat::Parquet,
                 "csv" => FileFormat::Csv,
                 "json" => FileFormat::Json,
@@ -934,12 +927,12 @@ impl NodeBehavior for UniversalReadNode {
         let ctx = SessionContext::new_with_config(sess_config);
 
         // Handle directory vs file
-        let is_dir = std::path::Path::new(path).is_dir();
+        let is_dir = std::path::Path::new(&path).is_dir();
         
         if is_dir {
             match format {
                 FileFormat::Parquet => {
-                    let abs_path = std::fs::canonicalize(path)?;
+                    let abs_path = std::fs::canonicalize(&path)?;
                     let table_url = ListingTableUrl::parse(abs_path.to_str().unwrap())?;
                     
                     let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
@@ -958,14 +951,14 @@ impl NodeBehavior for UniversalReadNode {
                     Ok(vec![df.into_optimized_plan()?])
                 }
                 FileFormat::Csv => {
-                    let has_header = config["has_header"].as_bool().unwrap_or(true);
-                    let delimiter = config["delimiter"].as_str().unwrap_or(",").as_bytes()[0];
+                    let has_header = cfg::optional_bool(config, "has_header").unwrap_or(true);
+                    let delimiter = Self::delimiter_byte(config);
                     let opts = CsvReadOptions::new().has_header(has_header).delimiter(delimiter);
-                    let df = ctx.read_csv(path, opts).await?;
+                    let df = ctx.read_csv(&path, opts).await?;
                     Ok(vec![df.into_optimized_plan()?])
                 }
                 FileFormat::Json => {
-                    let abs_path = std::fs::canonicalize(path)?;
+                    let abs_path = std::fs::canonicalize(&path)?;
                     let query = if recursive {
                         format!("SELECT * FROM read_json_auto('{}/**/*.json')", abs_path.to_str().unwrap())
                     } else {
@@ -993,18 +986,18 @@ impl NodeBehavior for UniversalReadNode {
             // Single file path
             match format {
                 FileFormat::Parquet => {
-                    let df = ctx.read_parquet(path, ParquetReadOptions::default()).await?;
+                    let df = ctx.read_parquet(&path, ParquetReadOptions::default()).await?;
                     Ok(vec![df.into_optimized_plan()?])
                 }
                 FileFormat::Csv => {
-                    let has_header = config["has_header"].as_bool().unwrap_or(true);
-                    let delimiter = config["delimiter"].as_str().unwrap_or(",").as_bytes()[0];
+                    let has_header = cfg::optional_bool(config, "has_header").unwrap_or(true);
+                    let delimiter = Self::delimiter_byte(config);
                     let opts = CsvReadOptions::new().has_header(has_header).delimiter(delimiter);
-                    let df = ctx.read_csv(path, opts).await?;
+                    let df = ctx.read_csv(&path, opts).await?;
                     Ok(vec![df.into_optimized_plan()?])
                 }
                 FileFormat::Json => {
-                    let abs_path = std::fs::canonicalize(path)?;
+                    let abs_path = std::fs::canonicalize(&path)?;
                     let query = format!("SELECT * FROM read_json_auto('{}')", abs_path.to_str().unwrap());
                     
                     let batches = DuckDBHelper::query_arrow(":memory:", &query, &vec![], &None).await?;
@@ -1074,8 +1067,8 @@ impl NodeBehavior for DbConnectorNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["url"].as_str().ok_or_else(|| anyhow!("Database URL is required"))?;
-        config["query"].as_str().ok_or_else(|| anyhow!("SQL query is required"))?;
+        cfg::required_string(config, "url")?;
+        cfg::required_string(config, "query")?;
         Ok(())
     }
 
@@ -1084,14 +1077,14 @@ impl NodeBehavior for DbConnectorNode {
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let url = config["url"].as_str().unwrap();
-        let query = config["query"].as_str().unwrap();
+        let url = cfg::required_string(config, "url")?;
+        let query = cfg::required_string(config, "query")?;
         
         // ENV expansion for security
         let expanded_url = if url.contains("${") {
-            let mut result = url.to_string();
+            let mut result = url.clone();
             let re = regex::Regex::new(r"\$\{([A-Z0-9_]+)\}").unwrap();
-            for cap in re.captures_iter(url) {
+            for cap in re.captures_iter(&url) {
                 let var_name = &cap[1];
                 if let Ok(val) = std::env::var(var_name) {
                     result = result.replace(&cap[0], &val);
@@ -1099,7 +1092,7 @@ impl NodeBehavior for DbConnectorNode {
             }
             result
         } else {
-            url.to_string()
+            url.clone()
         };
 
         let driver = Self::select_driver(&expanded_url);
@@ -1116,7 +1109,7 @@ impl NodeBehavior for DbConnectorNode {
                 };
                 
                 // Use query_arrow to get the schema reliably without holding Connection
-                let batches = DuckDBHelper::query_arrow(path, query, &vec![ext.to_string()], &attach_sql).await?;
+                let batches = DuckDBHelper::query_arrow(path, &query, &vec![ext.to_string()], &attach_sql).await?;
                 if batches.is_empty() {
                     return Err(anyhow!("Query returned no data for schema inference"));
                 }
@@ -1128,7 +1121,7 @@ impl NodeBehavior for DbConnectorNode {
                         connection_path: path.to_string(),
                         extensions: vec![ext.to_string()],
                         attach_sql,
-                        query: query.to_string(),
+                        query: query.clone(),
                         schema: Arc::new(df_schema),
                     }),
                 })])
@@ -1144,7 +1137,7 @@ impl NodeBehavior for DbConnectorNode {
                 let pool = sqlx::AnyPool::connect(&normalized_url).await
                     .map_err(|e| anyhow!("SQLx connection failed: {}", e))?;
                 
-                let query_obj = sqlx::query(query);
+                let query_obj = sqlx::query(&query);
                 let first_row = query_obj.fetch_one(&pool).await
                     .map_err(|e| anyhow!("SQLx query failed for schema inference: {}", e))?;
                 
@@ -1160,7 +1153,7 @@ impl NodeBehavior for DbConnectorNode {
                 Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
                     node: Arc::new(crate::core::datasource::SqlxScanLogical {
                         url: normalized_url,
-                        query: query.to_string(),
+                        query: query.clone(),
                         schema: Arc::new(df_schema),
                         params: vec![], // TODO: Support parameters in DbConnectorNode if needed
                     }),

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore, Extension};
 use datafusion::common::{DFSchema, DFSchemaRef};
@@ -7,19 +7,17 @@ use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use std::any::Any;
 use std::fmt;
-use uuid::Uuid;
 
+use crate::nodes::config as cfg;
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 use datafusion::physical_plan::{ExecutionPlan, DisplayAs, DisplayFormatType, Partitioning, PlanProperties, SendableRecordBatchStream, RecordBatchStream};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::execution::TaskContext;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::prelude::SessionContext;
 use futures::{Stream, Future, StreamExt};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use futures::future::BoxFuture;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BoxedPythonLogical {
@@ -124,10 +122,16 @@ impl Stream for BoxedPythonStream {
         if self.done { return Poll::Ready(None); }
 
         if self.fut.is_none() {
-            let code = self.code.clone();
+            let _code = self.code.clone();
             let bucket = self.s3_bucket.clone();
             let schema = self.schema.clone();
-            let mut input_stream = std::mem::replace(&mut self.input, Box::pin(datafusion::physical_plan::stream::EmptyRecordBatchStream::new(self.schema.clone())));
+            let empty_schema = self.schema.clone();
+            let mut input_stream = std::mem::replace(
+                &mut self.input,
+                Box::pin(datafusion::physical_plan::stream::EmptyRecordBatchStream::new(
+                    empty_schema,
+                )),
+            );
             
             let fut = async move {
                 // 1. Collect input batches
@@ -199,8 +203,8 @@ impl NodeBehavior for BoxedPythonNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["code"].as_str().ok_or_else(|| anyhow!("code is required"))?;
-        config["s3_bucket"].as_str().ok_or_else(|| anyhow!("s3_bucket is required"))?;
+        cfg::required_string(config, "code")?;
+        cfg::required_string(config, "s3_bucket")?;
         Ok(())
     }
 
@@ -209,11 +213,12 @@ impl NodeBehavior for BoxedPythonNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let code = config["code"].as_str().unwrap().to_string();
-        let image = config["image"].as_str().unwrap_or("python:3.11-slim").to_string();
-        let s3_bucket = config["s3_bucket"].as_str().unwrap().to_string();
+        let code = cfg::required_string(config, "code")?;
+        let image = cfg::optional_string(config, "image")
+            .unwrap_or_else(|| "python:3.11-slim".to_string());
+        let s3_bucket = cfg::required_string(config, "s3_bucket")?;
         
-        let schema = Arc::new(DFSchema::try_from(inputs[0].schema().as_ref().clone().into())?);
+        let schema = Arc::new(DFSchema::try_from(inputs[0].schema().as_arrow().clone())?);
 
         Ok(vec![LogicalPlan::Extension(Extension {
             node: Arc::new(BoxedPythonLogical {

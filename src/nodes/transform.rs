@@ -5,6 +5,7 @@ use datafusion::prelude::*;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
+use crate::nodes::config as cfg;
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
 /// Filter rows based on a SQL expression.
@@ -30,7 +31,7 @@ impl NodeBehavior for FilterNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["expr"].as_str().ok_or_else(|| anyhow!("expr is required"))?;
+        cfg::required_string(config, "expr")?;
         Ok(())
     }
 
@@ -39,11 +40,13 @@ impl NodeBehavior for FilterNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let expr_str = config["expr"].as_str().unwrap();
+        let expr_str = cfg::required_string(config, "expr")?;
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         ctx.register_table("filter_input", df.into_view())?;
-        let df = ctx.sql(&format!("SELECT * FROM filter_input WHERE {}", expr_str)).await?;
+        let df = ctx
+            .sql(&format!("SELECT * FROM filter_input WHERE {}", expr_str))
+            .await?;
         Ok(vec![df.into_optimized_plan()?])
     }
 }
@@ -71,7 +74,7 @@ impl NodeBehavior for ProjectNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["exprs"].as_array().ok_or_else(|| anyhow!("exprs array is required"))?;
+        cfg::required_array(config, "exprs")?;
         Ok(())
     }
 
@@ -80,8 +83,7 @@ impl NodeBehavior for ProjectNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let exprs = config["exprs"].as_array().unwrap();
-        let select_cols: Vec<String> = exprs.iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        let select_cols = cfg::required_string_array(config, "exprs")?;
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         ctx.register_table("project_input", df.into_view())?;
@@ -119,8 +121,8 @@ impl NodeBehavior for AggregateNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let group_by = config["group_by"].as_array().map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect::<Vec<String>>()).unwrap_or_default();
-        let aggs = config["aggs"].as_array().map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect::<Vec<String>>()).unwrap_or_default();
+        let group_by = cfg::optional_string_array(config, "group_by")?;
+        let aggs = cfg::optional_string_array(config, "aggs")?;
         
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
@@ -170,7 +172,7 @@ impl NodeBehavior for WindowNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let exprs = config["window_exprs"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect::<Vec<String>>();
+        let exprs = cfg::required_string_array(config, "window_exprs")?;
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         ctx.register_table("window_input", df.into_view())?;
@@ -469,7 +471,10 @@ impl NodeBehavior for TableSchemaValidatorNode {
                  let field_name = field.name().as_str();
                  let sql_type = to_sql_type(field.data_type());
                  if let Some(src_col) = m.get(field_name) {
-                     projections.push(format!("CAST(\"{}\" AS {}) as \"{}\"", src_col.as_str().unwrap(), sql_type, field_name));
+                     let src_col = src_col
+                         .as_str()
+                         .ok_or_else(|| anyhow!("mapping field '{}' must map to a string column name", field_name))?;
+                     projections.push(format!("CAST(\"{}\" AS {}) as \"{}\"", src_col, sql_type, field_name));
                  } else {
                      projections.push(format!("CAST(NULL AS {}) as \"{}\"", sql_type, field_name));
                  }
@@ -546,7 +551,7 @@ impl NodeBehavior for SemanticCleanerNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["column"].as_str().ok_or_else(|| anyhow!("Column name is required"))?;
+        cfg::required_string(config, "column")?;
         Ok(())
     }
 
@@ -555,7 +560,7 @@ impl NodeBehavior for SemanticCleanerNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let column = config["column"].as_str().unwrap();
+        let column = cfg::required_string(config, "column")?;
         let rules = config["rules"].as_object();
         
         let ctx = SessionContext::new();
@@ -623,7 +628,7 @@ impl NodeBehavior for AiRouterNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let selected = config["selected_branch"].as_i64().unwrap_or(0) as usize;
+        let selected = cfg::optional_number(config, "selected_branch").unwrap_or(0.0) as usize;
         
         use datafusion::logical_expr::EmptyRelation;
         

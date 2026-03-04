@@ -85,6 +85,11 @@ async fn main() -> anyhow::Result<()> {
                         samples.iter().map(|b| b.num_rows()).sum::<usize>()
                     );
                 }
+                if let Some(diagnostics) = metadata.diagnostics.get(&node_id) {
+                    for diagnostic in diagnostics {
+                        println!("    Diagnostic: {}", diagnostic);
+                    }
+                }
             }
         }
     }

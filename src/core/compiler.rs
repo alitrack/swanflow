@@ -7,18 +7,30 @@ use datafusion::error::Result;
 use datafusion::execution::session_state::SessionStateBuilder;
 use uuid::Uuid;
 use serde_json::Value as JsonValue;
+use serde_json::json;
 use petgraph::visit::EdgeRef;
 use petgraph::algo::toposort;
 
 use crate::core::graph::Workflow;
+use crate::core::templating::TemplateEngine;
 use crate::nodes::registry::NodeRegistry;
-use crate::nodes::NodeEvent;
+use crate::nodes::missing::MissingNode;
+use crate::nodes::{NodeDiagnostic, NodeErrorClass, NodeEvent};
 use crate::core::observer::{StateProbeLogical, MaterializerLogical};
+
+#[derive(Debug, Clone)]
+pub struct CompiledStagePlan {
+    pub node_id: Uuid,
+    pub node_type: String,
+    pub port: usize,
+    pub plan: LogicalPlan,
+}
 
 pub struct WorkflowCompiler {
     pub compiled_outputs: HashMap<Uuid, HashMap<usize, LogicalPlan>>,
     pub inferred_schemas: HashMap<Uuid, Vec<datafusion::common::DFSchemaRef>>,
     pub sample_data: HashMap<Uuid, Vec<datafusion::arrow::record_batch::RecordBatch>>,
+    pub diagnostics: HashMap<Uuid, Vec<String>>,
     pub node_hashes: HashMap<Uuid, String>,
     pub inject_probes: bool,
     pub dynamic_context: HashMap<String, JsonValue>,
@@ -38,6 +50,7 @@ impl WorkflowCompiler {
             compiled_outputs: HashMap::new(),
             inferred_schemas: HashMap::new(),
             sample_data: HashMap::new(),
+            diagnostics: HashMap::new(),
             node_hashes: HashMap::new(),
             inject_probes,
             dynamic_context: HashMap::new(),
@@ -56,7 +69,7 @@ impl WorkflowCompiler {
         workflow: &Workflow,
         registry: &NodeRegistry,
         ctx_override: Option<Arc<SessionContext>>,
-    ) -> Result<Vec<Vec<(Uuid, usize, LogicalPlan)>>> {
+    ) -> Result<Vec<Vec<CompiledStagePlan>>> {
         let ctx = ctx_override.unwrap_or_else(|| self.ctx.clone());
         
         // 1. Topological Sort
@@ -65,11 +78,12 @@ impl WorkflowCompiler {
         
         // We will group nodes into levels for staged execution
         let mut node_levels: HashMap<Uuid, usize> = HashMap::new();
-        let mut stages: Vec<Vec<(Uuid, usize, LogicalPlan)>> = Vec::new();
+        let mut stages: Vec<Vec<CompiledStagePlan>> = Vec::new();
 
         // 2. Process nodes in topological order
         for node_idx in sorted_indices {
             let node = workflow.graph.node_weight(node_idx).unwrap();
+            let mut is_placeholder = false;
             
             // Calculate level
             let mut level = 0;
@@ -102,39 +116,85 @@ impl WorkflowCompiler {
                 }
             }
 
+            // Resolve node behavior, falling back to placeholder for unknown types.
+            let spec = match registry.get_node(&node.type_id) {
+                Ok(spec) => spec,
+                Err(_) => {
+                    is_placeholder = true;
+                    self.diagnostics
+                        .entry(node.id)
+                        .or_default()
+                        .push(format!(
+                            "Loaded as placeholder: original type '{}' is not available",
+                            node.type_id
+                        ));
+                    Arc::new(MissingNode::new(node.id, node.type_id.clone()))
+                }
+            };
+
+            let preflight_config = self
+                .run_preflight(workflow, node.id, &node.type_id, spec.as_ref(), &node.config)
+                .map_err(|diagnostic| {
+                    self.diagnostics
+                        .entry(node.id)
+                        .or_default()
+                        .push(diagnostic.message.clone());
+                    self.emit_diagnostic(&diagnostic);
+                    datafusion::error::DataFusionError::Plan(diagnostic.to_event_message())
+                })?;
+
             // Propose plan from node
-            let spec = registry.get_node(&node.type_id)
-                .map_err(|e| datafusion::error::DataFusionError::Plan(format!("Unknown node type {}: {}", node.type_id, e)))?;
-            
-            let compiled_vec = spec.propose_plan(input_plans, &node.config).await
-                .map_err(|e| datafusion::error::DataFusionError::Plan(format!("Plan proposal failed for node {}: {}", node.id, e)))?;
+            let compiled_vec = spec
+                .propose_plan(input_plans, &preflight_config)
+                .await
+                .map_err(|e| {
+                    let diagnostic = NodeDiagnostic::new(
+                        node.id,
+                        node.type_id.clone(),
+                        NodeErrorClass::Planning,
+                        format!("Plan proposal failed: {}", e),
+                    );
+                    self.diagnostics
+                        .entry(node.id)
+                        .or_default()
+                        .push(diagnostic.message.clone());
+                    self.emit_diagnostic(&diagnostic);
+                    datafusion::error::DataFusionError::Plan(diagnostic.to_event_message())
+                })?;
+
+            self.inferred_schemas.insert(
+                node.id,
+                compiled_vec.iter().map(|p| p.schema().clone()).collect(),
+            );
             
             let mut compiled_node_outputs: HashMap<usize, LogicalPlan> = compiled_vec.into_iter().enumerate().collect();
             
             // Apply probes and materializers
-            if self.inject_probes && node.type_id != "core.output" {
+            if self.inject_probes && node.type_id != "core.output" && !is_placeholder {
                 for (port, plan) in compiled_node_outputs.iter_mut() {
                     let table_name = format!("node_{}", &node.id.to_string()[..8]);
                     let cache_key = format!("{}_{}", node.id, port);
-                    
-                    *plan = LogicalPlan::Extension(Extension {
-                        node: Arc::new(MaterializerLogical {
-                            node_id: node.id,
-                            table_name: table_name.clone(),
-                            cache_key: cache_key.clone(),
-                            cache_dir: self.cache_dir.clone(),
-                            input: plan.clone(),
-                            ctx: ctx.clone(),
-                            event_tx: self.event_tx.clone().unwrap(),
-                        }),
-                    });
-                    
-                    *plan = LogicalPlan::Extension(Extension { 
-                        node: Arc::new(StateProbeLogical { 
-                            node_id: node.id, 
-                            input: plan.clone() 
-                        }) 
-                    });
+
+                    if let Some(event_tx) = self.event_tx.clone() {
+                        *plan = LogicalPlan::Extension(Extension {
+                            node: Arc::new(MaterializerLogical {
+                                node_id: node.id,
+                                table_name: table_name.clone(),
+                                cache_key: cache_key.clone(),
+                                cache_dir: self.cache_dir.clone(),
+                                input: plan.clone(),
+                                ctx: ctx.clone(),
+                                event_tx,
+                            }),
+                        });
+
+                        *plan = LogicalPlan::Extension(Extension {
+                            node: Arc::new(StateProbeLogical {
+                                node_id: node.id,
+                                input: plan.clone(),
+                            }),
+                        });
+                    }
                 }
             }
 
@@ -142,7 +202,12 @@ impl WorkflowCompiler {
             
             // Add to its corresponding stage
             for (port, plan) in compiled_node_outputs {
-                stages[level].push((node.id, port, plan));
+                stages[level].push(CompiledStagePlan {
+                    node_id: node.id,
+                    node_type: node.type_id.clone(),
+                    port,
+                    plan,
+                });
             }
         }
 
@@ -165,5 +230,139 @@ impl WorkflowCompiler {
             
         let physical_plan = state.create_physical_plan(plan).await?;
         datafusion::physical_plan::collect(physical_plan, state.task_ctx()).await
+    }
+
+    fn emit_diagnostic(&self, diagnostic: &NodeDiagnostic) {
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(NodeEvent::Error {
+                node_id: diagnostic.node_id,
+                message: diagnostic.to_event_message(),
+            });
+        }
+    }
+
+    fn parse_version(
+        &self,
+        node_id: Uuid,
+        node_type: &str,
+        config: &serde_json::Map<String, JsonValue>,
+        key: &str,
+        default: u32,
+    ) -> std::result::Result<u32, NodeDiagnostic> {
+        match config.get(key) {
+            None => Ok(default),
+            Some(value) => {
+                if let Some(version) = value.as_u64() {
+                    Ok(version as u32)
+                } else {
+                    Err(NodeDiagnostic::new(
+                        node_id,
+                        node_type.to_string(),
+                        NodeErrorClass::Migration,
+                        format!("'{}' must be an unsigned integer", key),
+                    ))
+                }
+            }
+        }
+    }
+
+    fn run_preflight(
+        &mut self,
+        workflow: &Workflow,
+        node_id: Uuid,
+        node_type: &str,
+        behavior: &dyn crate::nodes::NodeBehavior,
+        raw_config: &JsonValue,
+    ) -> std::result::Result<JsonValue, NodeDiagnostic> {
+        // Template resolution runs first so migration/validation sees stable config values.
+        let rendered_config = TemplateEngine::render_json(raw_config, &workflow.context);
+        let config_obj = rendered_config.as_object().ok_or_else(|| {
+            NodeDiagnostic::new(
+                node_id,
+                node_type.to_string(),
+                NodeErrorClass::Validation,
+                "node config must be a JSON object",
+            )
+        })?;
+
+        let source_impl_version =
+            self.parse_version(node_id, node_type, config_obj, "impl_version", 1)?;
+        let source_config_version =
+            self.parse_version(node_id, node_type, config_obj, "config_version", 1)?;
+
+        let target_impl_version = behavior.impl_version();
+        let target_config_version = behavior.config_version();
+
+        if source_impl_version > target_impl_version {
+            return Err(
+                NodeDiagnostic::new(
+                    node_id,
+                    node_type.to_string(),
+                    NodeErrorClass::Migration,
+                    format!(
+                        "config impl_version={} is newer than runtime impl_version={}",
+                        source_impl_version, target_impl_version
+                    ),
+                )
+                .with_versions(source_impl_version, target_impl_version),
+            );
+        }
+
+        if source_config_version > target_config_version {
+            return Err(
+                NodeDiagnostic::new(
+                    node_id,
+                    node_type.to_string(),
+                    NodeErrorClass::Migration,
+                    format!(
+                        "config_version={} is newer than supported target={}",
+                        source_config_version, target_config_version
+                    ),
+                )
+                .with_versions(source_config_version, target_config_version),
+            );
+        }
+
+        let mut migrated = rendered_config.clone();
+        let mut current = source_config_version;
+        while current < target_config_version {
+            let next = current + 1;
+            migrated = behavior
+                .migrate_config(migrated, current, next)
+                .map_err(|e| {
+                    NodeDiagnostic::new(
+                        node_id,
+                        node_type.to_string(),
+                        NodeErrorClass::Migration,
+                        format!("migration failed: {}", e),
+                    )
+                    .with_versions(current, next)
+                    .with_failed_step(format!("{}->{}", current, next))
+                })?;
+            current = next;
+        }
+
+        if let Some(obj) = migrated.as_object_mut() {
+            obj.insert("impl_version".to_string(), json!(target_impl_version));
+            obj.insert("config_version".to_string(), json!(target_config_version));
+        }
+
+        behavior.validate(&migrated).map_err(|e| {
+            NodeDiagnostic::new(
+                node_id,
+                node_type.to_string(),
+                NodeErrorClass::Validation,
+                format!("validation failed: {}", e),
+            )
+            .with_versions(source_config_version, target_config_version)
+            .with_metadata(json!({
+                "impl_version": {
+                    "source": source_impl_version,
+                    "target": target_impl_version
+                }
+            }))
+        })?;
+
+        Ok(migrated)
     }
 }

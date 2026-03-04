@@ -90,6 +90,14 @@ impl NodeRegistry {
         self.register_node(Arc::new(ContextFuserNode));
         self.register_node(Arc::new(McpInvokeNode));
         self.register_node(Arc::new(ResearchLoopMetaNode::new()));
+
+        // Backward-compatible type aliases used by existing workflow JSON/YAML.
+        if let Some(csv) = self.nodes.get("core.io.csv_read").cloned() {
+            self.nodes.insert("core.io.csv".to_string(), csv);
+        }
+        if let Some(parquet) = self.nodes.get("core.io.parquet_read").cloned() {
+            self.nodes.insert("core.io.parquet".to_string(), parquet);
+        }
         
         // Register EntityExtractor if environment variables are set
         if let Ok(model) = std::env::var("LLM_MODEL") {
