@@ -9,3 +9,4 @@ test_data.csv
 *.hpp
 .env
 *.xlsx
+.worktrees/
