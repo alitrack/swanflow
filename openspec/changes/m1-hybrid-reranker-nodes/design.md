@@ -6,6 +6,7 @@ This change extends retrieval quality while staying contract-first and determini
 
 - Reuse `retrieval.rs` as M1 retrieval extension module.
 - Keep node runtime behavior pass-through initially, with deterministic helper methods for scoring logic.
+- Reranker exposes pluggable backend contract (`rule|model|llm`) so runtime provider integration can be added without changing workflow contracts.
 - Enforce config validation for guardrails.
 
 ## Rollout

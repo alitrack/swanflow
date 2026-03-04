@@ -1,4 +1,6 @@
-use rustflow::nodes::ai::retrieval::{HybridRetrieverNode, RetrievalCandidate, RerankerNode};
+use rustflow::nodes::ai::retrieval::{
+    HybridRetrieverNode, RerankBackend, RetrievalCandidate, RerankerNode,
+};
 use rustflow::nodes::registry::NodeRegistry;
 use rustflow::nodes::NodeBehavior;
 use serde_json::json;
@@ -89,4 +91,66 @@ fn test_hybrid_rejects_invalid_alpha() {
         .validate(&json!({ "alpha": 2.0 }))
         .expect_err("alpha out of range should fail");
     assert!(err.to_string().contains("alpha"));
+}
+
+#[test]
+fn test_reranker_resolves_backend_variants() {
+    let node = RerankerNode;
+
+    assert_eq!(
+        node.resolve_backend(&json!({ "backend": "rule" })).unwrap(),
+        RerankBackend::Rule
+    );
+    assert_eq!(
+        node.resolve_backend(&json!({ "backend": "model" })).unwrap(),
+        RerankBackend::Model
+    );
+    assert_eq!(
+        node.resolve_backend(&json!({ "backend": "llm" })).unwrap(),
+        RerankBackend::Llm
+    );
+}
+
+#[test]
+fn test_reranker_rejects_invalid_backend() {
+    let node = RerankerNode;
+    let err = node
+        .validate(&json!({ "backend": "legacy_ranker" }))
+        .expect_err("unknown backend should fail");
+    assert!(err.to_string().contains("backend"));
+}
+
+#[test]
+fn test_reranker_supports_model_and_llm_backends() {
+    let node = RerankerNode;
+    let candidates = vec![
+        RetrievalCandidate {
+            source_id: "doc-1".to_string(),
+            content: "python tutorial".to_string(),
+            score: 0.80,
+        },
+        RetrievalCandidate {
+            source_id: "doc-2".to_string(),
+            content: "rust async tutorial".to_string(),
+            score: 0.75,
+        },
+    ];
+
+    let ranked_model = node
+        .rerank_candidates(
+            "rust tutorial",
+            candidates.clone(),
+            &json!({ "backend": "model", "top_k": 1, "query_term_boost": 0.12 }),
+        )
+        .expect("model backend rerank should succeed");
+    assert_eq!(ranked_model[0].source_id, "doc-2");
+
+    let ranked_llm = node
+        .rerank_candidates(
+            "rust tutorial",
+            candidates,
+            &json!({ "backend": "llm", "top_k": 1, "query_term_boost": 0.12 }),
+        )
+        .expect("llm backend rerank should succeed");
+    assert_eq!(ranked_llm[0].source_id, "doc-2");
 }

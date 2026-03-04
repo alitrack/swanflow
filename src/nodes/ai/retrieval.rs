@@ -211,6 +211,14 @@ pub struct RetrievalCandidate {
 pub struct HybridRetrieverNode;
 pub struct RerankerNode;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankBackend {
+    Rule,
+    Model,
+    Llm,
+}
+
 impl HybridRetrieverNode {
     pub fn fuse_candidates(
         &self,
@@ -271,16 +279,23 @@ impl HybridRetrieverNode {
 }
 
 impl RerankerNode {
-    pub fn rerank_candidates(
+    pub fn resolve_backend(&self, config: &JsonValue) -> Result<RerankBackend> {
+        let backend = config["backend"].as_str().unwrap_or("rule");
+        match backend {
+            "rule" => Ok(RerankBackend::Rule),
+            "model" => Ok(RerankBackend::Model),
+            "llm" => Ok(RerankBackend::Llm),
+            _ => Err(anyhow!("backend must be one of rule|model|llm")),
+        }
+    }
+
+    fn rerank_with_overlap(
         &self,
         query: &str,
         candidates: Vec<RetrievalCandidate>,
-        config: &JsonValue,
-    ) -> Result<Vec<RetrievalCandidate>> {
-        self.validate(config)?;
-        let top_k = config["top_k"].as_u64().unwrap_or(10) as usize;
-        let query_term_boost = config["query_term_boost"].as_f64().unwrap_or(0.1) as f32;
-
+        top_k: usize,
+        term_boost: f32,
+    ) -> Vec<RetrievalCandidate> {
         let query_terms: HashSet<String> = query
             .to_lowercase()
             .split_whitespace()
@@ -299,7 +314,7 @@ impl RerankerNode {
                     .filter(|token| !token.is_empty() && query_terms.contains(token))
                     .count();
 
-                candidate.score += overlap as f32 * query_term_boost;
+                candidate.score += overlap as f32 * term_boost;
                 candidate
             })
             .collect();
@@ -312,6 +327,40 @@ impl RerankerNode {
                 .then_with(|| left.source_id.cmp(&right.source_id))
         });
         reranked.truncate(top_k);
+        reranked
+    }
+
+    pub fn rerank_candidates(
+        &self,
+        query: &str,
+        candidates: Vec<RetrievalCandidate>,
+        config: &JsonValue,
+    ) -> Result<Vec<RetrievalCandidate>> {
+        self.validate(config)?;
+        let top_k = config["top_k"].as_u64().unwrap_or(10) as usize;
+        let query_term_boost = config["query_term_boost"].as_f64().unwrap_or(0.1) as f32;
+        let backend = self.resolve_backend(config)?;
+
+        let reranked = match backend {
+            RerankBackend::Rule => self.rerank_with_overlap(query, candidates, top_k, query_term_boost),
+            // Placeholder: model backend currently shares deterministic overlap ranking path.
+            RerankBackend::Model => {
+                let model_term_boost = config["model_term_boost"]
+                    .as_f64()
+                    .map(|v| v as f32)
+                    .unwrap_or(query_term_boost);
+                self.rerank_with_overlap(query, candidates, top_k, model_term_boost)
+            }
+            // Placeholder: llm backend currently shares deterministic overlap ranking path.
+            RerankBackend::Llm => {
+                let llm_term_boost = config["llm_term_boost"]
+                    .as_f64()
+                    .map(|v| v as f32)
+                    .unwrap_or(query_term_boost);
+                self.rerank_with_overlap(query, candidates, top_k, llm_term_boost)
+            }
+        };
+
         Ok(reranked)
     }
 }
@@ -404,14 +453,21 @@ impl NodeBehavior for RerankerNode {
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "backend": { "type": "string", "enum": ["rule", "model", "llm"], "default": "rule" },
                     "top_k": { "type": "integer", "minimum": 1, "default": 10 },
-                    "query_term_boost": { "type": "number", "minimum": 0.0, "default": 0.1 }
+                    "query_term_boost": { "type": "number", "minimum": 0.0, "default": 0.1 },
+                    "model_term_boost": { "type": "number", "minimum": 0.0, "default": 0.1 },
+                    "llm_term_boost": { "type": "number", "minimum": 0.0, "default": 0.1 },
+                    "model_id": { "type": "string" },
+                    "llm_model": { "type": "string" }
                 }
             }),
         }
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
+        let _ = self.resolve_backend(config)?;
+
         if let Some(top_k) = config["top_k"].as_u64() {
             if top_k == 0 {
                 return Err(anyhow!("top_k must be greater than zero"));
@@ -426,6 +482,38 @@ impl NodeBehavior for RerankerNode {
             }
         } else if config.get("query_term_boost").is_some() {
             return Err(anyhow!("query_term_boost must be a number"));
+        }
+
+        if let Some(boost) = config["model_term_boost"].as_f64() {
+            if boost < 0.0 {
+                return Err(anyhow!("model_term_boost must be >= 0.0"));
+            }
+        } else if config.get("model_term_boost").is_some() {
+            return Err(anyhow!("model_term_boost must be a number"));
+        }
+
+        if let Some(boost) = config["llm_term_boost"].as_f64() {
+            if boost < 0.0 {
+                return Err(anyhow!("llm_term_boost must be >= 0.0"));
+            }
+        } else if config.get("llm_term_boost").is_some() {
+            return Err(anyhow!("llm_term_boost must be a number"));
+        }
+
+        if let Some(model_id) = config["model_id"].as_str() {
+            if model_id.trim().is_empty() {
+                return Err(anyhow!("model_id must not be empty when provided"));
+            }
+        } else if config.get("model_id").is_some() {
+            return Err(anyhow!("model_id must be a string"));
+        }
+
+        if let Some(llm_model) = config["llm_model"].as_str() {
+            if llm_model.trim().is_empty() {
+                return Err(anyhow!("llm_model must not be empty when provided"));
+            }
+        } else if config.get("llm_model").is_some() {
+            return Err(anyhow!("llm_model must be a string"));
         }
 
         Ok(())

@@ -38,11 +38,13 @@ Fusion:
 Type ID: `core.ai.reranker`
 
 Config:
+- `backend` (`rule|model|llm`)
 - `top_k` (>0)
 - `query_term_boost` (>=0)
+- `model_term_boost` / `llm_term_boost` (>=0, optional)
 
 Ranking:
-- 对候选文本做 query token overlap 加权
+- 当前三种 backend 统一走确定性 overlap 排序核心（后续替换为真实 model/llm 后端）
 - `final = base_score + overlap_count * query_term_boost`
 - 稳定排序并截断 `top_k`
 
