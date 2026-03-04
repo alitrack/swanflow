@@ -186,8 +186,13 @@ impl SwanFlowEngine {
 
         tokio::spawn(async move {
             // STAGED TOPOLOGICAL EXECUTION: run each level stage in order
-            for (level, terminals) in stages.into_iter().enumerate() {
+            for (level, mut terminals) in stages.into_iter().enumerate() {
                 println!("DEBUG: Executing Stage Level {}", level);
+                terminals.sort_by(|a, b| {
+                    a.node_id
+                        .cmp(&b.node_id)
+                        .then_with(|| a.port.cmp(&b.port))
+                });
                 
                 // 1. Initial Sync for this level
                 sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
@@ -228,6 +233,11 @@ impl SwanFlowEngine {
                                             });
                                         }
                                     }
+
+                                    let _ = tx.send(NodeEvent::StateChanged {
+                                        node_id,
+                                        state: crate::nodes::NodeState::Executed,
+                                    });
                                 }
                                 Err(e) => {
                                     let diagnostic = NodeDiagnostic::new(
@@ -271,29 +281,37 @@ impl SwanFlowEngine {
                             match state.create_physical_plan(&logical_plan).await {
                                 Ok(physical_plan) => {
                                     let task_ctx = ctx_shared.task_ctx();
-                                    if let Err(e) = datafusion::physical_plan::collect(physical_plan, task_ctx).await {
-                                        let diagnostic = NodeDiagnostic::new(
-                                            node_id,
-                                            node_type.clone(),
-                                            NodeErrorClass::Execution,
-                                            format!("Execution error: {}", e),
-                                        );
-                                        let mut handled = false;
-                                        if let Some(hook) = &hook_shared {
-                                            if should_invoke_self_healing(&diagnostic) {
-                                                if let Some(_fix) = hook
-                                                    .on_error(node_id, &node_type, &json!({}), &diagnostic.message)
-                                                    .await
-                                                {
-                                                    handled = true;
+                                    match datafusion::physical_plan::collect(physical_plan, task_ctx).await {
+                                        Ok(_batches) => {
+                                            let _ = tx.send(NodeEvent::StateChanged {
+                                                node_id,
+                                                state: crate::nodes::NodeState::Executed,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            let diagnostic = NodeDiagnostic::new(
+                                                node_id,
+                                                node_type.clone(),
+                                                NodeErrorClass::Execution,
+                                                format!("Execution error: {}", e),
+                                            );
+                                            let mut handled = false;
+                                            if let Some(hook) = &hook_shared {
+                                                if should_invoke_self_healing(&diagnostic) {
+                                                    if let Some(_fix) = hook
+                                                        .on_error(node_id, &node_type, &json!({}), &diagnostic.message)
+                                                        .await
+                                                    {
+                                                        handled = true;
+                                                    }
                                                 }
                                             }
-                                        }
-                                        if !handled {
-                                            let _ = tx.send(NodeEvent::Error {
-                                                node_id,
-                                                message: diagnostic.to_event_message(),
-                                            });
+                                            if !handled {
+                                                let _ = tx.send(NodeEvent::Error {
+                                                    node_id,
+                                                    message: diagnostic.to_event_message(),
+                                                });
+                                            }
                                         }
                                     }
                                 }
@@ -393,8 +411,6 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 materializer.cache_key.clone(),
                 materializer.cache_dir.clone(),
                 physical_inputs[0].clone(),
-                self.ctx.clone(),
-                self.event_tx.clone(),
             ))));
         }
         if let Some(missing) = node.as_any().downcast_ref::<MissingNodeLogical>() {

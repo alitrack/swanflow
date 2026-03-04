@@ -6,14 +6,13 @@ use std::task::{Context, Poll};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{DFSchemaRef, Result};
-use datafusion::execution::context::{SessionContext, TaskContext};
+use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::prelude::ParquetReadOptions;
 use futures::Stream;
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -124,8 +123,6 @@ pub struct MaterializerLogical {
     pub cache_key: String,
     pub cache_dir: String,
     pub input: LogicalPlan,
-    pub ctx: Arc<SessionContext>,
-    pub event_tx: mpsc::UnboundedSender<NodeEvent>,
 }
 
 impl std::fmt::Debug for MaterializerLogical {
@@ -172,8 +169,6 @@ impl UserDefinedLogicalNodeCore for MaterializerLogical {
             cache_key: self.cache_key.clone(), 
             cache_dir: self.cache_dir.clone(),
             input: inputs[0].clone(),
-            ctx: self.ctx.clone(),
-            event_tx: self.event_tx.clone(),
         })
     }
 }
@@ -184,8 +179,6 @@ pub struct MaterializerExec {
     pub cache_key: String,
     pub cache_dir: String,
     pub input: Arc<dyn ExecutionPlan>,
-    pub ctx: Arc<SessionContext>,
-    pub event_tx: mpsc::UnboundedSender<NodeEvent>,
     cache: PlanProperties,
 }
 
@@ -199,7 +192,13 @@ impl std::fmt::Debug for MaterializerExec {
 }
 
 impl MaterializerExec {
-    pub fn new(node_id: Uuid, table_name: String, cache_key: String, cache_dir: String, input: Arc<dyn ExecutionPlan>, ctx: Arc<SessionContext>, event_tx: mpsc::UnboundedSender<NodeEvent>) -> Self {
+    pub fn new(
+        node_id: Uuid,
+        table_name: String,
+        cache_key: String,
+        cache_dir: String,
+        input: Arc<dyn ExecutionPlan>,
+    ) -> Self {
         let input_props = input.properties();
         let cache = PlanProperties::new(
             EquivalenceProperties::new(input.schema()),
@@ -207,7 +206,7 @@ impl MaterializerExec {
             input_props.emission_type,
             input_props.boundedness,
         );
-        Self { node_id, table_name, cache_key, cache_dir, input, ctx, event_tx, cache }
+        Self { node_id, table_name, cache_key, cache_dir, input, cache }
     }
 }
 
@@ -222,7 +221,13 @@ impl ExecutionPlan for MaterializerExec {
     fn schema(&self) -> SchemaRef { self.input.schema() }
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.input] }
     fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(Self::new(self.node_id, self.table_name.clone(), self.cache_key.clone(), self.cache_dir.clone(), children[0].clone(), self.ctx.clone(), self.event_tx.clone())))
+        Ok(Arc::new(Self::new(
+            self.node_id,
+            self.table_name.clone(),
+            self.cache_key.clone(),
+            self.cache_dir.clone(),
+            children[0].clone(),
+        )))
     }
     fn execute(&self, partition: usize, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
         let input = self.input.execute(partition, context)?;
@@ -233,8 +238,6 @@ impl ExecutionPlan for MaterializerExec {
             cache_dir: self.cache_dir.clone(), 
             input, 
             batches: Vec::new(),
-            ctx: self.ctx.clone(),
-            event_tx: self.event_tx.clone(),
         }))
     }
     fn properties(&self) -> &PlanProperties { &self.cache }
@@ -248,8 +251,6 @@ struct MaterializingStream {
     cache_dir: String,
     input: SendableRecordBatchStream,
     batches: Vec<RecordBatch>,
-    ctx: Arc<SessionContext>,
-    event_tx: mpsc::UnboundedSender<NodeEvent>,
 }
 
 impl Stream for MaterializingStream {
@@ -269,41 +270,26 @@ impl Stream for MaterializingStream {
                     let schema = batches[0].schema();
                     let path = format!("{}/{}.parquet", cache_dir, self.cache_key);
                     let node_id = self.node_id;
-                    let ctx_clone = self.ctx.clone();
 
-                    let tx_clone = self.event_tx.clone();
-
-                    // Offload blocking IO to a separate thread pool
-                    tokio::task::spawn_blocking(move || {
-                        if let Ok(f) = std::fs::File::create(&path) {
-                            let mut writer = parquet::arrow::ArrowWriter::try_new(f, schema.clone(), None).unwrap();
-                            for batch in &batches {
-                                writer.write(batch).unwrap();
-                            }
-                            writer.close().unwrap();
-
-                            if let Ok(conn) = duckdb::Connection::open(&metadata_path) {
-                                println!("DEBUG: Recording materialization for node {} into table {}", node_id, table_name);
-                                conn.execute(
-                                    "INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES (?, ?, ?, ?)",
-                                    [node_id.to_string(), table_name.clone(), path.clone(), "{}".to_string()],
-                                ).ok();
-                                
-                                // Live register in the shared context
-                                // We can use block_on here because we are in spawn_blocking thread
-                                futures::executor::block_on(async {
-                                    ctx_clone.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
-                                });
-
-                                // EMIT COMPLETION EVENT
-                                let _ = tx_clone.send(NodeEvent::Materialized { 
-                                    node_id, 
-                                    table_name, 
-                                    parquet_path: path 
-                                });
-                            }
+                    if let Ok(f) = std::fs::File::create(&path) {
+                        let mut writer =
+                            parquet::arrow::ArrowWriter::try_new(f, schema.clone(), None).unwrap();
+                        for batch in &batches {
+                            writer.write(batch).unwrap();
                         }
-                    });
+                        writer.close().unwrap();
+
+                        if let Ok(conn) = duckdb::Connection::open(&metadata_path) {
+                            println!(
+                                "DEBUG: Recording materialization for node {} into table {}",
+                                node_id, table_name
+                            );
+                            conn.execute(
+                                "INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES (?, ?, ?, ?)",
+                                [node_id.to_string(), table_name.clone(), path.clone(), "{}".to_string()],
+                            ).ok();
+                        }
+                    }
                 }
                 Poll::Ready(None)
             }

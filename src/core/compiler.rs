@@ -70,7 +70,7 @@ impl WorkflowCompiler {
         registry: &NodeRegistry,
         ctx_override: Option<Arc<SessionContext>>,
     ) -> Result<Vec<Vec<CompiledStagePlan>>> {
-        let ctx = ctx_override.unwrap_or_else(|| self.ctx.clone());
+        let _ctx = ctx_override.unwrap_or_else(|| self.ctx.clone());
         
         // 1. Topological Sort
         let sorted_indices = toposort(&workflow.graph, None)
@@ -175,7 +175,7 @@ impl WorkflowCompiler {
                     let table_name = format!("node_{}", &node.id.to_string()[..8]);
                     let cache_key = format!("{}_{}", node.id, port);
 
-                    if let Some(event_tx) = self.event_tx.clone() {
+                    if self.event_tx.is_some() {
                         *plan = LogicalPlan::Extension(Extension {
                             node: Arc::new(MaterializerLogical {
                                 node_id: node.id,
@@ -183,8 +183,6 @@ impl WorkflowCompiler {
                                 cache_key: cache_key.clone(),
                                 cache_dir: self.cache_dir.clone(),
                                 input: plan.clone(),
-                                ctx: ctx.clone(),
-                                event_tx,
                             }),
                         });
 
