@@ -52,7 +52,8 @@ impl NodeRegistry {
         use crate::nodes::ai::contracts::{CitationTrackerNode, StructuredIoContractNode};
         use crate::nodes::ai::graph::{GraphRetrieverNode, ContextFuserNode, EntityExtractorNode, ResearchLoopMetaNode};
         use crate::nodes::ai::retrieval::{
-            QueryPlanningNode, SemanticChunkerNode, VectorIndexWriterNode, VectorRetrieverNode,
+            HybridRetrieverNode, QueryPlanningNode, RerankerNode, SemanticChunkerNode,
+            VectorIndexWriterNode, VectorRetrieverNode,
         };
         use crate::nodes::ai::tool_executor::ToolExecutorNode;
         use crate::nodes::ai::providers::{OpenAiProvider, LlmConfig, ProviderKind};
@@ -98,6 +99,8 @@ impl NodeRegistry {
         self.register_node(Arc::new(CitationTrackerNode));
         self.register_node(Arc::new(QueryPlanningNode));
         self.register_node(Arc::new(SemanticChunkerNode));
+        self.register_node(Arc::new(HybridRetrieverNode));
+        self.register_node(Arc::new(RerankerNode));
         self.register_node(Arc::new(VectorIndexWriterNode));
         self.register_node(Arc::new(VectorRetrieverNode));
         self.register_node(Arc::new(ToolExecutorNode));

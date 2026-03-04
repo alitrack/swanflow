@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::collections::{HashMap, HashSet};
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
@@ -195,6 +196,248 @@ impl NodeBehavior for SemanticChunkerNode {
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
             return Err(anyhow!("Semantic Chunker requires one input plan"));
+        }
+        Ok(vec![inputs[0].clone()])
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetrievalCandidate {
+    pub source_id: String,
+    pub content: String,
+    pub score: f32,
+}
+
+pub struct HybridRetrieverNode;
+pub struct RerankerNode;
+
+impl HybridRetrieverNode {
+    pub fn fuse_candidates(
+        &self,
+        sparse_candidates: Vec<RetrievalCandidate>,
+        semantic_candidates: Vec<RetrievalCandidate>,
+        config: &JsonValue,
+    ) -> Result<Vec<RetrievalCandidate>> {
+        self.validate(config)?;
+        let alpha = config["alpha"].as_f64().unwrap_or(0.5) as f32;
+        let top_k = config["top_k"].as_u64().unwrap_or(20) as usize;
+
+        #[derive(Default)]
+        struct FusionEntry {
+            content: String,
+            sparse_score: f32,
+            semantic_score: f32,
+        }
+
+        let mut merged: HashMap<String, FusionEntry> = HashMap::new();
+        for candidate in sparse_candidates {
+            let entry = merged.entry(candidate.source_id.clone()).or_default();
+            if entry.content.is_empty() && !candidate.content.is_empty() {
+                entry.content = candidate.content.clone();
+            }
+            if candidate.score > entry.sparse_score {
+                entry.sparse_score = candidate.score;
+            }
+        }
+        for candidate in semantic_candidates {
+            let entry = merged.entry(candidate.source_id.clone()).or_default();
+            if entry.content.is_empty() && !candidate.content.is_empty() {
+                entry.content = candidate.content.clone();
+            }
+            if candidate.score > entry.semantic_score {
+                entry.semantic_score = candidate.score;
+            }
+        }
+
+        let mut fused: Vec<RetrievalCandidate> = merged
+            .into_iter()
+            .map(|(source_id, entry)| RetrievalCandidate {
+                source_id,
+                content: entry.content,
+                score: (1.0 - alpha) * entry.sparse_score + alpha * entry.semantic_score,
+            })
+            .collect();
+
+        fused.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.source_id.cmp(&right.source_id))
+        });
+        fused.truncate(top_k);
+        Ok(fused)
+    }
+}
+
+impl RerankerNode {
+    pub fn rerank_candidates(
+        &self,
+        query: &str,
+        candidates: Vec<RetrievalCandidate>,
+        config: &JsonValue,
+    ) -> Result<Vec<RetrievalCandidate>> {
+        self.validate(config)?;
+        let top_k = config["top_k"].as_u64().unwrap_or(10) as usize;
+        let query_term_boost = config["query_term_boost"].as_f64().unwrap_or(0.1) as f32;
+
+        let query_terms: HashSet<String> = query
+            .to_lowercase()
+            .split_whitespace()
+            .map(|token| token.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+            .filter(|token| !token.is_empty())
+            .collect();
+
+        let mut reranked: Vec<RetrievalCandidate> = candidates
+            .into_iter()
+            .map(|mut candidate| {
+                let overlap = candidate
+                    .content
+                    .to_lowercase()
+                    .split_whitespace()
+                    .map(|token| token.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+                    .filter(|token| !token.is_empty() && query_terms.contains(token))
+                    .count();
+
+                candidate.score += overlap as f32 * query_term_boost;
+                candidate
+            })
+            .collect();
+
+        reranked.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.source_id.cmp(&right.source_id))
+        });
+        reranked.truncate(top_k);
+        Ok(reranked)
+    }
+}
+
+#[async_trait]
+impl NodeBehavior for HybridRetrieverNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.ai.hybrid_retriever".to_string(),
+            display_name: "Hybrid Retriever".to_string(),
+            description: "Fuse sparse and semantic retrieval results.".to_string(),
+            input_ports: vec![
+                PortSpec {
+                    id: 0,
+                    name: "sparse".to_string(),
+                    description: "Sparse retrieval input".to_string(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "semantic".to_string(),
+                    description: "Semantic retrieval input".to_string(),
+                },
+            ],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".to_string(),
+                description: "Fused retrieval output".to_string(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "alpha": { "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5 },
+                    "top_k": { "type": "integer", "minimum": 1, "default": 20 }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        if let Some(alpha) = config["alpha"].as_f64() {
+            if !(0.0..=1.0).contains(&alpha) {
+                return Err(anyhow!("alpha must be within [0.0, 1.0]"));
+            }
+        } else if config.get("alpha").is_some() {
+            return Err(anyhow!("alpha must be a number"));
+        }
+
+        if let Some(top_k) = config["top_k"].as_u64() {
+            if top_k == 0 {
+                return Err(anyhow!("top_k must be greater than zero"));
+            }
+        } else if config.get("top_k").is_some() {
+            return Err(anyhow!("top_k must be an integer"));
+        }
+
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            return Err(anyhow!(
+                "Hybrid Retriever requires at least one input plan"
+            ));
+        }
+        Ok(vec![inputs[0].clone()])
+    }
+}
+
+#[async_trait]
+impl NodeBehavior for RerankerNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.ai.reranker".to_string(),
+            display_name: "Reranker".to_string(),
+            description: "Re-rank retrieval candidates by query relevance.".to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".to_string(),
+                description: "Candidate input".to_string(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".to_string(),
+                description: "Re-ranked output".to_string(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "top_k": { "type": "integer", "minimum": 1, "default": 10 },
+                    "query_term_boost": { "type": "number", "minimum": 0.0, "default": 0.1 }
+                }
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        if let Some(top_k) = config["top_k"].as_u64() {
+            if top_k == 0 {
+                return Err(anyhow!("top_k must be greater than zero"));
+            }
+        } else if config.get("top_k").is_some() {
+            return Err(anyhow!("top_k must be an integer"));
+        }
+
+        if let Some(boost) = config["query_term_boost"].as_f64() {
+            if boost < 0.0 {
+                return Err(anyhow!("query_term_boost must be >= 0.0"));
+            }
+        } else if config.get("query_term_boost").is_some() {
+            return Err(anyhow!("query_term_boost must be a number"));
+        }
+
+        Ok(())
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        _config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            return Err(anyhow!("Reranker requires one input plan"));
         }
         Ok(vec![inputs[0].clone()])
     }
