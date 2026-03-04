@@ -16,6 +16,6 @@
 
 ## 3. Verification
 
-- [ ] 3.1 Add M0 end-to-end integration tests.
-- [ ] 3.2 Run compiler/engine/stability regression suites.
-- [ ] 3.3 Mark change complete and prepare for archive.
+- [x] 3.1 Add M0 end-to-end integration tests.
+- [x] 3.2 Run compiler/engine/stability regression suites.
+- [x] 3.3 Mark change complete and prepare for archive.
