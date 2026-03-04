@@ -2,6 +2,7 @@ pub mod contracts;
 pub mod mcp;
 pub mod providers;
 pub mod graph;
+pub mod retrieval;
 
 use self::providers::LlmProvider;
 use crate::nodes::NodeSpec;
