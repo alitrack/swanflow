@@ -4,6 +4,7 @@ pub mod providers;
 pub mod graph;
 pub mod retrieval;
 pub mod tool_executor;
+pub mod verification;
 
 use self::providers::LlmProvider;
 use crate::nodes::NodeSpec;
