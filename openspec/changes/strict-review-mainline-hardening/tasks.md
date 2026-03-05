@@ -11,9 +11,9 @@
 
 ## 3. Findings Classification and Tracking
 
-- [ ] 3.1 Produce initial strict-audit report with `P0/P1/P2` sections and evidence links.
-- [ ] 3.2 Classify each finding with file-level scope, impact, and reproduction notes.
-- [ ] 3.3 Synchronize finding status between report and OpenSpec tasks.
+- [x] 3.1 Produce initial strict-audit report with `P0/P1/P2` sections and evidence links.
+- [x] 3.2 Classify each finding with file-level scope, impact, and reproduction notes.
+- [x] 3.3 Synchronize finding status between report and OpenSpec tasks.
 
 ## 4. P0 Immediate Remediation Loop
 
