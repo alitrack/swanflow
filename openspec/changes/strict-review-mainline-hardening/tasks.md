@@ -6,8 +6,8 @@
 ## 2. Toolchain and Baseline Audit
 
 - [x] 2.1 Add deterministic Rust stable bootstrap script with required components.
-- [ ] 2.2 Add full-repo audit runner that captures `fmt`, `clippy`, `test`, and static scan logs.
-- [ ] 2.3 Execute baseline audit and persist timestamped evidence artifacts.
+- [x] 2.2 Add full-repo audit runner that captures `fmt`, `clippy`, `test`, and static scan logs.
+- [x] 2.3 Execute baseline audit and persist timestamped evidence artifacts.
 
 ## 3. Findings Classification and Tracking
 
