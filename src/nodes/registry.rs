@@ -49,7 +49,19 @@ impl NodeRegistry {
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
         use crate::nodes::script::boxed_python::BoxedPythonNode;
         use crate::nodes::ai::mcp::McpInvokeNode;
+        use crate::nodes::ai::contracts::{CitationTrackerNode, StructuredIoContractNode};
         use crate::nodes::ai::graph::{GraphRetrieverNode, ContextFuserNode, EntityExtractorNode, ResearchLoopMetaNode};
+        use crate::nodes::ai::retrieval::{
+            EmbeddingGeneratorNode, HybridRetrieverNode, QueryPlanningNode, RerankerNode, SemanticChunkerNode,
+            VectorIndexWriterNode, VectorRetrieverNode,
+        };
+        use crate::nodes::ai::tool_executor::ToolExecutorNode;
+        use crate::nodes::ai::privacy::{PiiDetectorNode, PiiMaskerNode, PolicyPrivacyGateNode};
+        use crate::nodes::ai::runtime::{
+            AgentLoopOrchestratorNode, CheckpointResumeControllerNode, ObservabilityAuditLedgerNode,
+            RetryBackoffGuardNode, RunStateStoreNode,
+        };
+        use crate::nodes::ai::verification::FactClaimVerifierNode;
         use crate::nodes::ai::providers::{OpenAiProvider, LlmConfig, ProviderKind};
 
         self.register_node(Arc::new(SqlNode));
@@ -89,6 +101,25 @@ impl NodeRegistry {
         self.register_node(Arc::new(GraphRetrieverNode));
         self.register_node(Arc::new(ContextFuserNode));
         self.register_node(Arc::new(McpInvokeNode));
+        self.register_node(Arc::new(StructuredIoContractNode));
+        self.register_node(Arc::new(CitationTrackerNode));
+        self.register_node(Arc::new(EmbeddingGeneratorNode));
+        self.register_node(Arc::new(QueryPlanningNode));
+        self.register_node(Arc::new(SemanticChunkerNode));
+        self.register_node(Arc::new(HybridRetrieverNode));
+        self.register_node(Arc::new(RerankerNode));
+        self.register_node(Arc::new(VectorIndexWriterNode));
+        self.register_node(Arc::new(VectorRetrieverNode));
+        self.register_node(Arc::new(ToolExecutorNode));
+        self.register_node(Arc::new(PiiDetectorNode));
+        self.register_node(Arc::new(PiiMaskerNode));
+        self.register_node(Arc::new(PolicyPrivacyGateNode));
+        self.register_node(Arc::new(RetryBackoffGuardNode));
+        self.register_node(Arc::new(CheckpointResumeControllerNode::default()));
+        self.register_node(Arc::new(RunStateStoreNode::default()));
+        self.register_node(Arc::new(ObservabilityAuditLedgerNode::default()));
+        self.register_node(Arc::new(AgentLoopOrchestratorNode));
+        self.register_node(Arc::new(FactClaimVerifierNode));
         self.register_node(Arc::new(ResearchLoopMetaNode::new()));
 
         // Backward-compatible type aliases used by existing workflow JSON/YAML.
