@@ -13,20 +13,26 @@ Full repository audit covering `src/`, `tests/`, `sidecars/`, `scripts/`, `examp
 
 ## Evidence
 
-Audit run directory: `artifacts/audit/20260305-143809/`
+Baseline audit run: `artifacts/audit/20260305-143809/`
 
 - `fmt.log` (`8366` lines): formatting gate failed with diffs across multiple files.
 - `clippy.log` (`1310` lines): lint gate failed with `29` errors under `-D warnings`.
 - `test.log` (`503` lines): test gate blocked by link error `unable to find library -lduckdb`.
 - `risk.log` (`335` lines): high-risk pattern scan findings (`src`: 64, `tests`: 262, `examples`: 9).
 
+Post-P0-fix audit run: `artifacts/audit/20260305-150333/`
+
+- `native_env.log`: confirms `DUCKDB_LIB_DIR=/home/coder/workspace/rustflow/libs`.
+- `test.log` (`125` lines): `-lduckdb` link error no longer appears; next blockers are test compile/API mismatches.
+
 ## P0
 
-- [ ] `SR-P0-001`: Full test gate blocked by missing DuckDB linker dependency.
+- [x] `SR-P0-001`: Full test gate blocked by missing DuckDB linker dependency.
   - Evidence: `artifacts/audit/20260305-143809/test.log` contains `rust-lld: error: unable to find library -lduckdb`.
   - Impact: `cargo test --all-targets --all-features` cannot complete; all runtime/test verification is blocked.
   - Reproduction: `source "$HOME/.cargo/env" && cargo test --all-targets --all-features`.
-  - Candidate fix direction: enforce DuckDB shared library installation and loader path setup before test gate.
+  - Fix implemented: `scripts/dev/ensure_duckdb.sh` + `scripts/audit/full_repo_audit.sh` native dependency bootstrap.
+  - Verification: `artifacts/audit/20260305-150333/test.log` proceeds past DuckDB link stage and surfaces next test-code issues.
 
 ## P1
 
@@ -40,6 +46,16 @@ Audit run directory: `artifacts/audit/20260305-143809/`
   - Impact: strict lint gate remains red; reliability and maintainability risks persist.
   - Reproduction: `source "$HOME/.cargo/env" && cargo clippy --all-targets --all-features -- -D warnings`.
 
+- [ ] `SR-P1-003`: Agent integration tests reference removed/renamed API (`AnalystAgent`).
+  - Evidence: `artifacts/audit/20260305-150333/test.log` reports `error[E0432]: unresolved import rustflow::agent::AnalystAgent`.
+  - Impact: test compilation fails before execution for agent integration suites.
+  - Reproduction: `source "$HOME/.cargo/env" && cargo test --all-targets --all-features --no-run`.
+
+- [ ] `SR-P1-004`: DataFusion API drift in tests (`field_with_name` signature mismatch).
+  - Evidence: `artifacts/audit/20260305-150333/test.log` reports `error[E0061]` for calls missing `Option<&TableReference>`.
+  - Impact: intelligence integration tests fail to compile.
+  - Reproduction: `source "$HOME/.cargo/env" && cargo test --all-targets --all-features --no-run`.
+
 ## P2
 
 - [ ] `SR-P2-001`: High density of panic-prone patterns in tests/examples and non-critical code paths.
@@ -49,7 +65,7 @@ Audit run directory: `artifacts/audit/20260305-143809/`
 
 ## Next Remediation Order
 
-1. Resolve `SR-P0-001` to unblock test verification.
+1. Clear `SR-P1-003` and `SR-P1-004` test compile blockers in one compatibility batch.
 2. Clear `SR-P1-001` (`cargo fmt --check`) in one formatting batch.
 3. Reduce `SR-P1-002` clippy violations in subsystem batches.
 4. Triage `SR-P2-001` and convert critical cases into tracked fixes.

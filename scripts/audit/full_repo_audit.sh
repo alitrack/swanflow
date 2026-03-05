@@ -7,6 +7,7 @@ mkdir -p "$OUT"
 
 # shellcheck disable=SC1090
 source "$HOME/.cargo/env"
+source scripts/dev/ensure_duckdb.sh >"$OUT/native_env.log" 2>&1
 
 cargo fmt --check >"$OUT/fmt.log" 2>&1 || true
 cargo clippy --all-targets --all-features -- -D warnings >"$OUT/clippy.log" 2>&1 || true

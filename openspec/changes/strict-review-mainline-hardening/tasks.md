@@ -17,9 +17,9 @@
 
 ## 4. P0 Immediate Remediation Loop
 
-- [ ] 4.1 For each P0 finding, add a failing repro/regression test first.
-- [ ] 4.2 Implement minimal fix and verify targeted tests pass.
-- [ ] 4.3 Commit and push each verified P0 fix immediately to `origin/main`.
+- [x] 4.1 For each P0 finding, add a failing repro/regression test first.
+- [x] 4.2 Implement minimal fix and verify targeted tests pass.
+- [x] 4.3 Commit and push each verified P0 fix immediately to `origin/main`.
 
 ## 5. P1/P2 Batched Remediation Loop
 
