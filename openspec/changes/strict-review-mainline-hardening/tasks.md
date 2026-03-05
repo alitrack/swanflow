@@ -23,8 +23,8 @@
 
 ## 5. P1/P2 Batched Remediation Loop
 
-- [ ] 5.1 Group P1/P2 findings by subsystem and add regression coverage.
-- [ ] 5.2 Implement minimal subsystem fixes and run verification gates.
+- [x] 5.1 Group P1/P2 findings by subsystem and add regression coverage.
+- [x] 5.2 Implement minimal subsystem fixes and run verification gates.
 - [ ] 5.3 Commit and push each verified subsystem batch to `origin/main`.
 
 ## 6. Final Verification and Closure

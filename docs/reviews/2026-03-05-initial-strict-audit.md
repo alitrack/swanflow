@@ -25,6 +25,13 @@ Post-P0-fix audit run: `artifacts/audit/20260305-150333/`
 - `native_env.log`: confirms `DUCKDB_LIB_DIR=/home/coder/workspace/rustflow/libs`.
 - `test.log` (`125` lines): `-lduckdb` link error no longer appears; next blockers are test compile/API mismatches.
 
+Post-P1 compatibility batch run: `artifacts/audit/20260305-235225/`
+
+- `agent_tests.log`: `test_agent_reasoning_loop_foundation ... ok` (1 passed).
+- `ai_integration_no_run.log`: integration target compiles to executable test binary.
+- `agent_variable_no_run.log`: integration target compiles to executable test binary.
+- `intelligence_no_run.log`: integration target compiles to executable test binary after DataFusion API compatibility fix.
+
 ## P0
 
 - [x] `SR-P0-001`: Full test gate blocked by missing DuckDB linker dependency.
@@ -46,15 +53,19 @@ Post-P0-fix audit run: `artifacts/audit/20260305-150333/`
   - Impact: strict lint gate remains red; reliability and maintainability risks persist.
   - Reproduction: `source "$HOME/.cargo/env" && cargo clippy --all-targets --all-features -- -D warnings`.
 
-- [ ] `SR-P1-003`: Agent integration tests reference removed/renamed API (`AnalystAgent`).
+- [x] `SR-P1-003`: Agent integration tests reference removed/renamed API (`AnalystAgent`).
   - Evidence: `artifacts/audit/20260305-150333/test.log` reports `error[E0432]: unresolved import rustflow::agent::AnalystAgent`.
   - Impact: test compilation fails before execution for agent integration suites.
   - Reproduction: `source "$HOME/.cargo/env" && cargo test --all-targets --all-features --no-run`.
+  - Fix implemented: restore compatibility surface in `src/agent/mod.rs` (`AnalystAgent`, `AgentResponse`, and minimal tool-call workflow construction).
+  - Verification: `artifacts/audit/20260305-235225/agent_tests.log`, `ai_integration_no_run.log`, `agent_variable_no_run.log`.
 
-- [ ] `SR-P1-004`: DataFusion API drift in tests (`field_with_name` signature mismatch).
+- [x] `SR-P1-004`: DataFusion API drift in tests (`field_with_name` signature mismatch).
   - Evidence: `artifacts/audit/20260305-150333/test.log` reports `error[E0061]` for calls missing `Option<&TableReference>`.
   - Impact: intelligence integration tests fail to compile.
   - Reproduction: `source "$HOME/.cargo/env" && cargo test --all-targets --all-features --no-run`.
+  - Fix implemented: update `tests/intelligence_integration.rs` to call `field_with_name(None, "...")`.
+  - Verification: `artifacts/audit/20260305-235225/intelligence_no_run.log`.
 
 ## P2
 
@@ -63,9 +74,15 @@ Post-P0-fix audit run: `artifacts/audit/20260305-150333/`
   - Impact: higher flake/debug cost; weaker resilience in auxiliary paths.
   - Reproduction: `bash scripts/audit/static_risk_scan.sh`.
 
+## P1/P2 Subsystem Batches
+
+- `agent-compatibility` (done): `SR-P1-003`; regression/verification coverage via `agent_tests` plus agent integration `--no-run` compile gates.
+- `datafusion-test-compatibility` (done): `SR-P1-004`; regression/verification coverage via `intelligence_integration --no-run`.
+- `quality-gates` (pending): `SR-P1-001`, `SR-P1-002`; requires repository formatting + clippy cleanup batches.
+- `panic-risk-triage` (pending): `SR-P2-001`; requires converting critical panic-prone patterns into tracked fixes.
+
 ## Next Remediation Order
 
-1. Clear `SR-P1-003` and `SR-P1-004` test compile blockers in one compatibility batch.
-2. Clear `SR-P1-001` (`cargo fmt --check`) in one formatting batch.
-3. Reduce `SR-P1-002` clippy violations in subsystem batches.
-4. Triage `SR-P2-001` and convert critical cases into tracked fixes.
+1. Clear `SR-P1-001` (`cargo fmt --check`) in one formatting batch.
+2. Reduce `SR-P1-002` clippy violations in subsystem batches.
+3. Triage `SR-P2-001` and convert critical cases into tracked fixes.

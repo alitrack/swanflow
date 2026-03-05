@@ -53,8 +53,8 @@ async fn test_validator_explicit_mapping() -> Result<()> {
     let config = json!({"mapping": {"label": "person_name", "properties": "organization"}});
     let output_plans = validator.propose_plan(vec![input_plan], &config).await?;
     let node_schema = output_plans[0].schema();
-    assert!(node_schema.field_with_name("label").is_ok());
-    assert!(node_schema.field_with_name("id").is_ok());
+    assert!(node_schema.field_with_name(None, "label").is_ok());
+    assert!(node_schema.field_with_name(None, "id").is_ok());
     Ok(())
 }
 
