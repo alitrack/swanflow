@@ -23,6 +23,9 @@ SwanFlow is a high-performance, modular data science engine designed to surpass 
 ### 1. Prerequisites
 Ensure you have the Rust toolchain and Python dependencies installed:
 ```bash
+# Install Rust stable toolchain and required components
+bash scripts/dev/install_rust_stable.sh
+
 # Install DuckDB shared library
 bash setup_duckdb.sh
 
