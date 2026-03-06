@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(workflow.graph.node_count(), 0);
         assert_eq!(workflow.graph.edge_count(), 0);
     }
-    
+
     #[test]
     fn test_add_node() {
         let mut workflow = Workflow::new("Test");
@@ -117,12 +117,12 @@ mod tests {
             materialize: false,
             sub_workflow: None,
         };
-        
+
         let idx = workflow.add_node(node);
         assert_eq!(workflow.graph.node_count(), 1);
         assert!(workflow.get_node(idx).is_some());
     }
-    
+
     #[test]
     fn test_remove_node() {
         let mut workflow = Workflow::new("Test");
@@ -134,14 +134,14 @@ mod tests {
             materialize: false,
             sub_workflow: None,
         };
-        
+
         let idx = workflow.add_node(node);
         let removed = workflow.remove_node(idx);
-        
+
         assert!(removed.is_some());
         assert_eq!(workflow.graph.node_count(), 0);
     }
-    
+
     #[test]
     fn test_update_config() {
         let mut workflow = Workflow::new("Test");
@@ -153,10 +153,10 @@ mod tests {
             materialize: false,
             sub_workflow: None,
         };
-        
+
         let idx = workflow.add_node(node);
         let result = workflow.update_config(idx, json!({"new": "config"}));
-        
+
         assert!(result.is_ok());
         let updated = workflow.get_node(idx).unwrap();
         assert_eq!(updated.config["new"], "config");

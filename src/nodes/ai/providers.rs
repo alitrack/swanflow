@@ -27,22 +27,22 @@ impl LlmConfig {
         if self.api_key.is_some() {
             return Ok(());
         }
-        
+
         let env_key = match self.provider {
             ProviderKind::OpenAI => "OPENAI_API_KEY",
             ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
             ProviderKind::Gemini => "GEMINI_API_KEY",
         };
-        
+
         self.api_key = std::env::var(env_key).ok();
-        
+
         if self.api_key.is_none() {
             anyhow::bail!(
                 "API key not provided in config and {} environment variable not set",
                 env_key
             );
         }
-        
+
         Ok(())
     }
 }
@@ -89,7 +89,10 @@ impl LlmProvider for OpenAiProvider {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key.as_ref().unwrap()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.api_key.as_ref().unwrap()),
+            )
             .json(&serde_json::json!({
                 "model": self.config.model,
                 "messages": [{"role": "user", "content": prompt}],

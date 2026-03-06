@@ -2,7 +2,7 @@ use duckdb::Connection;
 
 fn main() -> anyhow::Result<()> {
     let conn = Connection::open("target/swanflow_cache/metadata.duckdb")?;
-    
+
     println!("--- NODES ---");
     let mut stmt = conn.prepare("SELECT * FROM __graph_nodes")?;
     let rows = stmt.query_map([], |row| {
@@ -16,8 +16,10 @@ fn main() -> anyhow::Result<()> {
         println!("ID: {}, Label: {}, Props: {}", id, label, props);
     }
 
-    println!("
---- EDGES ---");
+    println!(
+        "
+--- EDGES ---"
+    );
     let mut stmt = conn.prepare("SELECT * FROM __graph_edges")?;
     let rows = stmt.query_map([], |row| {
         let src: i64 = row.get(0)?;
@@ -28,7 +30,10 @@ fn main() -> anyhow::Result<()> {
     })?;
     for row in rows {
         let (src, dst, edge_type, weight) = row?;
-        println!("Src: {}, Dst: {}, Type: {}, Weight: {}", src, dst, edge_type, weight);
+        println!(
+            "Src: {}, Dst: {}, Type: {}, Weight: {}",
+            src, dst, edge_type, weight
+        );
     }
 
     Ok(())

@@ -156,7 +156,12 @@ impl PiiDetectorNode {
         matches.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
         let mut seen = HashSet::new();
         matches.retain(|item| {
-            seen.insert((item.pii_type.clone(), item.start, item.end, item.value.clone()))
+            seen.insert((
+                item.pii_type.clone(),
+                item.start,
+                item.end,
+                item.value.clone(),
+            ))
         });
 
         Ok(PiiDetectionResult {
@@ -260,10 +265,7 @@ pub struct PiiMaskerNode;
 
 impl PiiMaskerNode {
     fn token_prefix(config: &JsonValue) -> String {
-        config["token_prefix"]
-            .as_str()
-            .unwrap_or("PII")
-            .to_string()
+        config["token_prefix"].as_str().unwrap_or("PII").to_string()
     }
 
     pub fn mask_pii(&self, text: &str, config: &JsonValue) -> Result<PiiMaskResult> {
@@ -283,7 +285,7 @@ impl PiiMaskerNode {
         let mut replacements = Vec::with_capacity(detection.matches.len());
 
         for (index, pii_match) in detection.matches.iter().enumerate() {
-            let token = format!("<{}_{}>", prefix, format!("{:03}", index + 1));
+            let token = format!("<{}_{:03}>", prefix, index + 1);
             replacements.push(PiiMaskReplacement {
                 token,
                 original: pii_match.value.clone(),

@@ -19,7 +19,14 @@ fn test_vector_writer_outputs_index_metadata_contract() {
 fn test_vector_retriever_outputs_ranked_context_contract() {
     let node = VectorRetrieverNode;
     let row = node
-        .build_contract_row("idx-a", "source-2", "chunk-8", "retrieved text", 384, Some(0.87))
+        .build_contract_row(
+            "idx-a",
+            "source-2",
+            "chunk-8",
+            "retrieved text",
+            384,
+            Some(0.87),
+        )
         .expect("retriever contract should build");
 
     assert_eq!(row.index_id, "idx-a");

@@ -1,7 +1,7 @@
+use crate::nodes::NodeBehavior;
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use anyhow::{Result, anyhow};
-use crate::nodes::NodeBehavior;
 
 /// A thread-safe registry for node implementations.
 /// Node types are indexed by their unique type_id.
@@ -37,32 +37,42 @@ impl NodeRegistry {
     }
 
     /// Register all fundamental SwanFlow nodes.
-    /// 
+    ///
     /// Note: AI nodes (ConfigWizard, McpNode) are not registered here as they
     /// require runtime configuration (API keys, tool names) and are used as
     /// helpers rather than direct workflow nodes.
     pub fn register_core_nodes(&mut self) {
-        use crate::nodes::sql::SqlNode;
-        use crate::nodes::io::{CsvReadNode, ParquetReadNode, UniversalReadNode, DbConnectorNode, ExcelReadNode, ExcelWriteNode, ExcelTemplateNode, ExcelReportNode, ExcelSheetNamesNode, DuckDBReadNode, DuckDBWriteNode, HttpFetchNode, GraphIndexWriterNode};
-        use crate::nodes::boundary::{InputNode, OutputNode, DuckDBExtensionNode};
-        use crate::nodes::transform::{FilterNode, ProjectNode, AggregateNode, WindowNode, ConditionNode, ForEachNode, ProfilerNode, VariableCreatorNode, TableToVariableNode, GraphMergerNode, TableSchemaValidatorNode, SemanticCleanerNode, AiRouterNode};
-        use crate::nodes::script::python::{PythonNode, PythonUdfNode};
-        use crate::nodes::script::boxed_python::BoxedPythonNode;
-        use crate::nodes::ai::mcp::McpInvokeNode;
         use crate::nodes::ai::contracts::{CitationTrackerNode, StructuredIoContractNode};
-        use crate::nodes::ai::graph::{GraphRetrieverNode, ContextFuserNode, EntityExtractorNode, ResearchLoopMetaNode};
+        use crate::nodes::ai::graph::{
+            ContextFuserNode, EntityExtractorNode, GraphRetrieverNode, ResearchLoopMetaNode,
+        };
+        use crate::nodes::ai::mcp::McpInvokeNode;
+        use crate::nodes::ai::privacy::{PiiDetectorNode, PiiMaskerNode, PolicyPrivacyGateNode};
+        use crate::nodes::ai::providers::{LlmConfig, OpenAiProvider, ProviderKind};
         use crate::nodes::ai::retrieval::{
-            EmbeddingGeneratorNode, HybridRetrieverNode, QueryPlanningNode, RerankerNode, SemanticChunkerNode,
-            VectorIndexWriterNode, VectorRetrieverNode,
+            EmbeddingGeneratorNode, HybridRetrieverNode, QueryPlanningNode, RerankerNode,
+            SemanticChunkerNode, VectorIndexWriterNode, VectorRetrieverNode,
+        };
+        use crate::nodes::ai::runtime::{
+            AgentLoopOrchestratorNode, CheckpointResumeControllerNode,
+            ObservabilityAuditLedgerNode, RetryBackoffGuardNode, RunStateStoreNode,
         };
         use crate::nodes::ai::tool_executor::ToolExecutorNode;
-        use crate::nodes::ai::privacy::{PiiDetectorNode, PiiMaskerNode, PolicyPrivacyGateNode};
-        use crate::nodes::ai::runtime::{
-            AgentLoopOrchestratorNode, CheckpointResumeControllerNode, ObservabilityAuditLedgerNode,
-            RetryBackoffGuardNode, RunStateStoreNode,
-        };
         use crate::nodes::ai::verification::FactClaimVerifierNode;
-        use crate::nodes::ai::providers::{OpenAiProvider, LlmConfig, ProviderKind};
+        use crate::nodes::boundary::{DuckDBExtensionNode, InputNode, OutputNode};
+        use crate::nodes::io::{
+            CsvReadNode, DbConnectorNode, DuckDBReadNode, DuckDBWriteNode, ExcelReadNode,
+            ExcelReportNode, ExcelSheetNamesNode, ExcelTemplateNode, ExcelWriteNode,
+            GraphIndexWriterNode, HttpFetchNode, ParquetReadNode, UniversalReadNode,
+        };
+        use crate::nodes::script::boxed_python::BoxedPythonNode;
+        use crate::nodes::script::python::{PythonNode, PythonUdfNode};
+        use crate::nodes::sql::SqlNode;
+        use crate::nodes::transform::{
+            AggregateNode, AiRouterNode, ConditionNode, FilterNode, ForEachNode, GraphMergerNode,
+            ProfilerNode, ProjectNode, SemanticCleanerNode, TableSchemaValidatorNode,
+            TableToVariableNode, VariableCreatorNode, WindowNode,
+        };
 
         self.register_node(Arc::new(SqlNode));
         self.register_node(Arc::new(CsvReadNode));
@@ -129,7 +139,7 @@ impl NodeRegistry {
         if let Some(parquet) = self.nodes.get("core.io.parquet_read").cloned() {
             self.nodes.insert("core.io.parquet".to_string(), parquet);
         }
-        
+
         // Register EntityExtractor if environment variables are set
         if let Ok(model) = std::env::var("LLM_MODEL") {
             println!("[DEBUG] Found LLM_MODEL: {}", model);
@@ -142,18 +152,22 @@ impl NodeRegistry {
             match OpenAiProvider::new(config) {
                 Ok(provider) => {
                     println!("[DEBUG] Registering EntityExtractorNode");
-                    self.register_node(Arc::new(EntityExtractorNode { provider: Arc::new(provider) }));
+                    self.register_node(Arc::new(EntityExtractorNode {
+                        provider: Arc::new(provider),
+                    }));
                 }
                 Err(e) => println!("[DEBUG] Failed to create OpenAiProvider: {}", e),
             }
         } else if let Ok(provider) = OpenAiProvider::new(LlmConfig {
             provider: ProviderKind::OpenAI,
-            api_key: std::env::var("OPENAI_API_KEY").ok(), 
+            api_key: std::env::var("OPENAI_API_KEY").ok(),
             model: "gpt-4o".to_string(),
             endpoint: None,
         }) {
-             println!("[DEBUG] Registering EntityExtractorNode (Fallback)");
-             self.register_node(Arc::new(EntityExtractorNode { provider: Arc::new(provider) }));
+            println!("[DEBUG] Registering EntityExtractorNode (Fallback)");
+            self.register_node(Arc::new(EntityExtractorNode {
+                provider: Arc::new(provider),
+            }));
         } else {
             println!("[DEBUG] No LLM_MODEL or OPENAI_API_KEY found, EntityExtractor skip");
         }

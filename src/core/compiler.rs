@@ -1,22 +1,22 @@
+use datafusion::error::Result;
+use datafusion::execution::session_state::SessionStateBuilder;
+use datafusion::logical_expr::{Extension, LogicalPlan};
+use datafusion::prelude::*;
+use petgraph::algo::toposort;
+use petgraph::visit::EdgeRef;
+use serde_json::json;
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use datafusion::prelude::*;
-use datafusion::logical_expr::{LogicalPlan, Extension};
-use datafusion::error::Result;
-use datafusion::execution::session_state::SessionStateBuilder;
 use uuid::Uuid;
-use serde_json::Value as JsonValue;
-use serde_json::json;
-use petgraph::visit::EdgeRef;
-use petgraph::algo::toposort;
 
 use crate::core::graph::Workflow;
+use crate::core::observer::{MaterializerLogical, StateProbeLogical};
 use crate::core::templating::TemplateEngine;
-use crate::nodes::registry::NodeRegistry;
 use crate::nodes::missing::MissingNode;
+use crate::nodes::registry::NodeRegistry;
 use crate::nodes::{NodeDiagnostic, NodeErrorClass, NodeEvent};
-use crate::core::observer::{StateProbeLogical, MaterializerLogical};
 
 #[derive(Debug, Clone)]
 pub struct CompiledStagePlan {
@@ -71,11 +71,12 @@ impl WorkflowCompiler {
         ctx_override: Option<Arc<SessionContext>>,
     ) -> Result<Vec<Vec<CompiledStagePlan>>> {
         let _ctx = ctx_override.unwrap_or_else(|| self.ctx.clone());
-        
+
         // 1. Topological Sort
-        let sorted_indices = toposort(&workflow.graph, None)
-            .map_err(|_| datafusion::error::DataFusionError::Plan("Cycle detected in workflow".to_string()))?;
-        
+        let sorted_indices = toposort(&workflow.graph, None).map_err(|_| {
+            datafusion::error::DataFusionError::Plan("Cycle detected in workflow".to_string())
+        })?;
+
         // We will group nodes into levels for staged execution
         let mut node_levels: HashMap<Uuid, usize> = HashMap::new();
         let mut stages: Vec<Vec<CompiledStagePlan>> = Vec::new();
@@ -84,10 +85,13 @@ impl WorkflowCompiler {
         for node_idx in sorted_indices {
             let node = workflow.graph.node_weight(node_idx).unwrap();
             let mut is_placeholder = false;
-            
+
             // Calculate level
             let mut level = 0;
-            for edge in workflow.graph.edges_directed(node_idx, petgraph::Direction::Incoming) {
+            for edge in workflow
+                .graph
+                .edges_directed(node_idx, petgraph::Direction::Incoming)
+            {
                 let source_node = workflow.graph.node_weight(edge.source()).unwrap();
                 if let Some(&src_level) = node_levels.get(&source_node.id) {
                     level = level.max(src_level + 1);
@@ -102,7 +106,8 @@ impl WorkflowCompiler {
 
             // Collect inputs for this node
             let mut input_plans = Vec::new();
-            let mut incoming_edges: Vec<_> = workflow.graph
+            let mut incoming_edges: Vec<_> = workflow
+                .graph
                 .edges_directed(node_idx, petgraph::Direction::Incoming)
                 .collect();
             incoming_edges.sort_by_key(|e| e.weight().target_port);
@@ -121,19 +126,22 @@ impl WorkflowCompiler {
                 Ok(spec) => spec,
                 Err(_) => {
                     is_placeholder = true;
-                    self.diagnostics
-                        .entry(node.id)
-                        .or_default()
-                        .push(format!(
-                            "Loaded as placeholder: original type '{}' is not available",
-                            node.type_id
-                        ));
+                    self.diagnostics.entry(node.id).or_default().push(format!(
+                        "Loaded as placeholder: original type '{}' is not available",
+                        node.type_id
+                    ));
                     Arc::new(MissingNode::new(node.id, node.type_id.clone()))
                 }
             };
 
             let preflight_config = self
-                .run_preflight(workflow, node.id, &node.type_id, spec.as_ref(), &node.config)
+                .run_preflight(
+                    workflow,
+                    node.id,
+                    &node.type_id,
+                    spec.as_ref(),
+                    &node.config,
+                )
                 .map_err(|diagnostic| {
                     self.diagnostics
                         .entry(node.id)
@@ -166,9 +174,10 @@ impl WorkflowCompiler {
                 node.id,
                 compiled_vec.iter().map(|p| p.schema().clone()).collect(),
             );
-            
-            let mut compiled_node_outputs: HashMap<usize, LogicalPlan> = compiled_vec.into_iter().enumerate().collect();
-            
+
+            let mut compiled_node_outputs: HashMap<usize, LogicalPlan> =
+                compiled_vec.into_iter().enumerate().collect();
+
             // Apply probes and materializers
             if self.inject_probes && node.type_id != "core.output" && !is_placeholder {
                 for (port, plan) in compiled_node_outputs.iter_mut() {
@@ -196,8 +205,9 @@ impl WorkflowCompiler {
                 }
             }
 
-            self.compiled_outputs.insert(node.id, compiled_node_outputs.clone());
-            
+            self.compiled_outputs
+                .insert(node.id, compiled_node_outputs.clone());
+
             // Add to its corresponding stage
             for (port, plan) in compiled_node_outputs {
                 stages[level].push(CompiledStagePlan {
@@ -212,7 +222,10 @@ impl WorkflowCompiler {
         Ok(stages)
     }
 
-    pub async fn execute_plan(&self, plan: &LogicalPlan) -> Result<Vec<datafusion::arrow::record_batch::RecordBatch>> {
+    pub async fn execute_plan(
+        &self,
+        plan: &LogicalPlan,
+    ) -> Result<Vec<datafusion::arrow::record_batch::RecordBatch>> {
         let ctx = Arc::new(SessionContext::new());
         let (tx, _rx) = mpsc::unbounded_channel();
         let planner = crate::core::engine::SwanFlowPlanner {
@@ -220,12 +233,18 @@ impl WorkflowCompiler {
             ctx: ctx.clone(),
             cache_dir: self.cache_dir.clone(),
         };
-        let physical_planner = Arc::new(datafusion::physical_planner::DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(planner)]));
-        
+        let physical_planner = Arc::new(
+            datafusion::physical_planner::DefaultPhysicalPlanner::with_extension_planners(vec![
+                Arc::new(planner),
+            ]),
+        );
+
         let state = SessionStateBuilder::new_from_existing(ctx.state())
-            .with_query_planner(Arc::new(crate::core::engine::SwanFlowQueryPlanner { physical_planner }))
+            .with_query_planner(Arc::new(crate::core::engine::SwanFlowQueryPlanner {
+                physical_planner,
+            }))
             .build();
-            
+
         let physical_plan = state.create_physical_plan(plan).await?;
         datafusion::physical_plan::collect(physical_plan, state.task_ctx()).await
     }
@@ -239,6 +258,7 @@ impl WorkflowCompiler {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn parse_version(
         &self,
         node_id: Uuid,
@@ -264,6 +284,7 @@ impl WorkflowCompiler {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn run_preflight(
         &mut self,
         workflow: &Workflow,
@@ -292,33 +313,29 @@ impl WorkflowCompiler {
         let target_config_version = behavior.config_version();
 
         if source_impl_version > target_impl_version {
-            return Err(
-                NodeDiagnostic::new(
-                    node_id,
-                    node_type.to_string(),
-                    NodeErrorClass::Migration,
-                    format!(
-                        "config impl_version={} is newer than runtime impl_version={}",
-                        source_impl_version, target_impl_version
-                    ),
-                )
-                .with_versions(source_impl_version, target_impl_version),
-            );
+            return Err(NodeDiagnostic::new(
+                node_id,
+                node_type.to_string(),
+                NodeErrorClass::Migration,
+                format!(
+                    "config impl_version={} is newer than runtime impl_version={}",
+                    source_impl_version, target_impl_version
+                ),
+            )
+            .with_versions(source_impl_version, target_impl_version));
         }
 
         if source_config_version > target_config_version {
-            return Err(
-                NodeDiagnostic::new(
-                    node_id,
-                    node_type.to_string(),
-                    NodeErrorClass::Migration,
-                    format!(
-                        "config_version={} is newer than supported target={}",
-                        source_config_version, target_config_version
-                    ),
-                )
-                .with_versions(source_config_version, target_config_version),
-            );
+            return Err(NodeDiagnostic::new(
+                node_id,
+                node_type.to_string(),
+                NodeErrorClass::Migration,
+                format!(
+                    "config_version={} is newer than supported target={}",
+                    source_config_version, target_config_version
+                ),
+            )
+            .with_versions(source_config_version, target_config_version));
         }
 
         let mut migrated = rendered_config.clone();

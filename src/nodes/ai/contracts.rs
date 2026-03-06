@@ -95,9 +95,7 @@ impl NodeBehavior for StructuredIoContractNode {
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
-            return Err(anyhow!(
-                "Structured IO Contract requires one input plan"
-            ));
+            return Err(anyhow!("Structured IO Contract requires one input plan"));
         }
         Ok(vec![inputs[0].clone()])
     }

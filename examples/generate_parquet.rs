@@ -1,7 +1,6 @@
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use datafusion::prelude::*;
 use parquet::arrow::ArrowWriter;
 use std::fs::File;
 use std::sync::Arc;

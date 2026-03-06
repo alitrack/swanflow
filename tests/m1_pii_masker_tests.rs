@@ -9,7 +9,10 @@ fn test_pii_masker_masks_and_restores_text() {
     let input = "Reach me at alice@example.com or 415-555-1212";
 
     let masked = node
-        .mask_pii(input, &json!({ "token_prefix": "MASK", "min_confidence": 0.0 }))
+        .mask_pii(
+            input,
+            &json!({ "token_prefix": "MASK", "min_confidence": 0.0 }),
+        )
         .expect("masking should succeed");
 
     assert_ne!(masked.masked_text, input);

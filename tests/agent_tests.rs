@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use rustflow::agent::{AgentResponse, AnalystAgent};
+use rustflow::agent::AnalystAgent;
 use rustflow::core::engine::SwanFlowEngine;
 use rustflow::nodes::ai::providers::LlmProvider;
 use rustflow::nodes::registry::NodeRegistry;

@@ -1,30 +1,35 @@
 use anyhow::{anyhow, Result};
-use datafusion::arrow::array::{ArrayRef, StringBuilder, Int64Array, StringArray, Float64Array};
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use datafusion::arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use calamine::{open_workbook, Data, Reader, Xlsx};
+use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, StringBuilder};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::logical_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl, ListingTableConfigExt};
 use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::prelude::*;
-use datafusion::physical_plan::{ExecutionPlan, PlanProperties, DisplayAs, DisplayFormatType, RecordBatchStream, SendableRecordBatchStream};
-use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::execution::context::TaskContext;
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableConfigExt, ListingTableUrl,
+};
 use datafusion::error::DataFusionError;
+use datafusion::execution::context::TaskContext;
+use datafusion::logical_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream,
+};
+use datafusion::prelude::*;
 use duckdb::Connection;
-use serde_json::Value as JsonValue;
-use serde_json::json;
-use sqlx::{Column, Row};
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::fmt;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use futures::future::BoxFuture;
 use futures::Stream;
 use futures::StreamExt;
-use futures::future::BoxFuture;
+use serde_json::json;
+use serde_json::Value as JsonValue;
+use sqlx::{Column, Row};
+use std::fmt;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
 use crate::nodes::config as cfg;
@@ -38,7 +43,7 @@ impl ExcelReadNode {
     #[allow(dead_code)]
     fn promote_type(current: &DataType, data: &Data) -> DataType {
         use calamine::Data::*;
-        
+
         match data {
             // Empty cells don't change the type
             Empty => current.clone(),
@@ -48,7 +53,7 @@ impl ExcelReadNode {
             Float(_) => DataType::Float64,
             // Integer type - promote to Int64
             Int(_) => DataType::Int64,
-            // Boolean type  
+            // Boolean type
             Bool(_) => DataType::Boolean,
             // DateTime - store as string for now (could be improved with proper datetime type)
             DateTime(_) | DateTimeIso(_) | DurationIso(_) => DataType::Utf8,
@@ -106,7 +111,9 @@ impl NodeBehavior for ExcelReadNode {
         let path = cfg::required_string(config, "path")?;
         let sheet_name = cfg::optional_string(config, "sheet");
         let has_header = cfg::optional_bool(config, "has_header").unwrap_or(true);
-        let sample_limit = cfg::optional_number(config, "sample_rows").unwrap_or(100.0).max(0.0) as usize;
+        let sample_limit = cfg::optional_number(config, "sample_rows")
+            .unwrap_or(100.0)
+            .max(0.0) as usize;
 
         let mut workbook: Xlsx<_> = open_workbook(&path)?;
         let sheet = if let Some(name) = sheet_name.as_deref() {
@@ -312,7 +319,7 @@ impl NodeBehavior for ExcelTemplateNode {
         let output_path = PathBuf::from(cfg::required_string(config, "output_path")?);
         let sheet = cfg::optional_string(config, "sheet").unwrap_or_else(|| "Sheet1".to_string());
         let table_start = cfg::optional_string(config, "table_start");
-        
+
         let mut markers = std::collections::HashMap::new();
         if let Some(obj) = config["markers"].as_object() {
             for (k, v) in obj {
@@ -347,7 +354,11 @@ impl NodeBehavior for ExcelSheetNamesNode {
             display_name: "Excel Sheet Names".to_string(),
             description: "List all worksheet names in an Excel file.".to_string(),
             input_ports: vec![],
-            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Sheet Names".into() }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Sheet Names".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -368,7 +379,11 @@ impl NodeBehavior for ExcelSheetNamesNode {
         _input_schemas: Vec<DFSchemaRef>,
         _config: &JsonValue,
     ) -> Result<InferredMetadata> {
-        let schema = Arc::new(Schema::new(vec![Field::new("sheet_name", DataType::Utf8, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "sheet_name",
+            DataType::Utf8,
+            false,
+        )]));
         Ok(InferredMetadata {
             schemas: vec![Arc::new(DFSchema::try_from(schema)?)],
             sample_data: None,
@@ -383,20 +398,29 @@ impl NodeBehavior for ExcelSheetNamesNode {
         let path = cfg::required_string(config, "path")?;
         let workbook: Xlsx<_> = open_workbook(&path)?;
         let names = workbook.sheet_names();
-        
-        let schema = Arc::new(Schema::new(vec![Field::new("sheet_name", DataType::Utf8, false)]));
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "sheet_name",
+            DataType::Utf8,
+            false,
+        )]));
         let mut values = Vec::new();
-        
+
         for name in names {
-            values.push(vec![datafusion::logical_expr::Expr::Literal(datafusion::scalar::ScalarValue::Utf8(Some(name)), None)]);
+            values.push(vec![datafusion::logical_expr::Expr::Literal(
+                datafusion::scalar::ScalarValue::Utf8(Some(name)),
+                None,
+            )]);
         }
-        
+
         let df_schema = Arc::new(datafusion::common::DFSchema::try_from(schema.clone())?);
-        
-        Ok(vec![LogicalPlan::Values(datafusion::logical_expr::Values {
-            schema: df_schema,
-            values,
-        })])
+
+        Ok(vec![LogicalPlan::Values(
+            datafusion::logical_expr::Values {
+                schema: df_schema,
+                values,
+            },
+        )])
     }
 }
 
@@ -409,9 +433,11 @@ impl NodeBehavior for ExcelReportNode {
             type_id: "core.io.excel_report".to_string(),
             display_name: "Excel Report Builder".to_string(),
             description: "Build a multi-sheet Excel report with automated charts.".to_string(),
-            input_ports: vec![
-                PortSpec { id: 0, name: "data".into(), description: "Data for the report".into() },
-            ],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "data".into(),
+                description: "Data for the report".into(),
+            }],
             output_ports: vec![],
             config_schema: serde_json::json!({
                 "type": "object",
@@ -457,7 +483,7 @@ impl NodeBehavior for ExcelReportNode {
     ) -> Result<Vec<LogicalPlan>> {
         let path = PathBuf::from(cfg::required_string(config, "path")?);
         let charts = config["charts"].clone();
-        
+
         let sink_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(crate::core::datasource::ExcelReportSinkLogical {
                 path,
@@ -493,10 +519,14 @@ impl DuckDBHelper {
         attach_sql: &Option<String>,
     ) -> Result<Vec<RecordBatch>> {
         let conn = Self::open_connection(path)?;
-        Self::prepare_connection(&conn, &extensions.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
-        
+        Self::prepare_connection(
+            &conn,
+            &extensions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        )?;
+
         if let Some(sql) = attach_sql {
-            conn.execute_batch(sql).map_err(|e| anyhow!("Attach SQL failed: {}", e))?;
+            conn.execute_batch(sql)
+                .map_err(|e| anyhow!("Attach SQL failed: {}", e))?;
         }
 
         // Use a temporary parquet file to bridge DuckDB and DataFusion
@@ -505,16 +535,20 @@ impl DuckDBHelper {
         let tmp_path = tmp_file.to_str().unwrap();
 
         let copy_sql = format!("COPY ({}) TO '{}' (FORMAT PARQUET)", query, tmp_path);
-        conn.execute(&copy_sql, []).map_err(|e| anyhow!("DuckDB COPY failed: {}", e))?;
-        
+        conn.execute(&copy_sql, [])
+            .map_err(|e| anyhow!("DuckDB COPY failed: {}", e))?;
+
         let ctx = SessionContext::new();
         let batches = {
-            let df = ctx.read_parquet(tmp_path, ParquetReadOptions::default()).await?;
+            let df = ctx
+                .read_parquet(tmp_path, ParquetReadOptions::default())
+                .await?;
             df.collect().await
-        }.map_err(|e| anyhow!("DataFusion read back failed: {}", e))?;
-        
+        }
+        .map_err(|e| anyhow!("DataFusion read back failed: {}", e))?;
+
         std::fs::remove_file(tmp_path).ok();
-        
+
         Ok(batches)
     }
 }
@@ -557,13 +591,13 @@ impl NodeBehavior for DuckDBReadNode {
     ) -> Result<Vec<LogicalPlan>> {
         let path = cfg::optional_string(config, "path").unwrap_or_else(|| ":memory:".to_string());
         let query = cfg::required_string(config, "query")?;
-        
+
         // Use query_arrow to get the schema reliably without holding Connection across await
-        let batches = DuckDBHelper::query_arrow(&path, &query, &vec![], &None).await?;
+        let batches = DuckDBHelper::query_arrow(&path, &query, &[], &None).await?;
         if batches.is_empty() {
             return Err(anyhow!("Query returned no data for schema inference"));
         }
-        
+
         let schema = batches[0].schema();
         let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
 
@@ -769,7 +803,8 @@ impl UniversalReadNode {
 
     pub fn resolve_route_metadata(config: &JsonValue) -> Result<JsonValue> {
         let source = Self::resolve_source(config)?;
-        let source_type = cfg::optional_string(config, "source_type").unwrap_or_else(|| "auto".to_string());
+        let source_type =
+            cfg::optional_string(config, "source_type").unwrap_or_else(|| "auto".to_string());
         let lowered = source.to_lowercase();
 
         let resolved_source_type = match source_type.as_str() {
@@ -794,7 +829,8 @@ impl UniversalReadNode {
             }
         };
 
-        let normalized_source = if resolved_source_type == "table" && lowered.starts_with("table:") {
+        let normalized_source = if resolved_source_type == "table" && lowered.starts_with("table:")
+        {
             source[6..].trim().to_string()
         } else {
             source
@@ -921,10 +957,12 @@ impl NodeBehavior for UniversalReadNode {
         }
 
         let path = source;
-        let format_str = cfg::optional_string(config, "format").unwrap_or_else(|| "auto".to_string());
-        
+        let format_str =
+            cfg::optional_string(config, "format").unwrap_or_else(|| "auto".to_string());
+
         let format = if format_str == "auto" {
-            Self::detect_format(&path).ok_or_else(|| anyhow!("Could not detect format for {}", path))?
+            Self::detect_format(&path)
+                .ok_or_else(|| anyhow!("Could not detect format for {}", path))?
         } else {
             match format_str.as_str() {
                 "parquet" => FileFormat::Parquet,
@@ -945,7 +983,8 @@ impl NodeBehavior for UniversalReadNode {
                     let abs_path = std::fs::canonicalize(&path)?;
                     let partitions = Self::discover_partitions(abs_path.to_str().unwrap());
                     if !partitions.is_empty() {
-                        opts.table_partition_cols = partitions.into_iter()
+                        opts.table_partition_cols = partitions
+                            .into_iter()
                             .map(|p| (p, DataType::Utf8))
                             .collect();
                     }
@@ -959,7 +998,9 @@ impl NodeBehavior for UniversalReadNode {
             FileFormat::Csv => {
                 let has_header = cfg::optional_bool(config, "has_header").unwrap_or(true);
                 let delimiter = Self::delimiter_byte(config);
-                let opts = CsvReadOptions::new().has_header(has_header).delimiter(delimiter);
+                let opts = CsvReadOptions::new()
+                    .has_header(has_header)
+                    .delimiter(delimiter);
                 let df = ctx.read_csv(&path, opts).await?;
                 Ok(InferredMetadata {
                     schemas: vec![Arc::new(df.schema().clone())],
@@ -968,11 +1009,16 @@ impl NodeBehavior for UniversalReadNode {
             }
             FileFormat::Json => {
                 let abs_path = std::fs::canonicalize(&path)?;
-                let query = format!("SELECT * FROM read_json_auto('{}')", abs_path.to_str().unwrap());
-                
-                let batches = DuckDBHelper::query_arrow(":memory:", &query, &vec![], &None).await?;
-                if batches.is_empty() { return Err(anyhow!("JSON file is empty or invalid: {}", path)); }
-                
+                let query = format!(
+                    "SELECT * FROM read_json_auto('{}')",
+                    abs_path.to_str().unwrap()
+                );
+
+                let batches = DuckDBHelper::query_arrow(":memory:", &query, &[], &None).await?;
+                if batches.is_empty() {
+                    return Err(anyhow!("JSON file is empty or invalid: {}", path));
+                }
+
                 let schema = batches[0].schema();
                 let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
 
@@ -1012,11 +1058,13 @@ impl NodeBehavior for UniversalReadNode {
         }
 
         let path = source;
-        let format_str = cfg::optional_string(config, "format").unwrap_or_else(|| "auto".to_string());
+        let format_str =
+            cfg::optional_string(config, "format").unwrap_or_else(|| "auto".to_string());
         let recursive = cfg::optional_bool(config, "recursive").unwrap_or(false);
-        
+
         let format = if format_str == "auto" {
-            Self::detect_format(&path).ok_or_else(|| anyhow!("Could not detect format for {}", path))?
+            Self::detect_format(&path)
+                .ok_or_else(|| anyhow!("Could not detect format for {}", path))?
         } else {
             match format_str.as_str() {
                 "parquet" => FileFormat::Parquet,
@@ -1031,93 +1079,117 @@ impl NodeBehavior for UniversalReadNode {
 
         // Handle directory vs file
         let is_dir = std::path::Path::new(&path).is_dir();
-        
+
         if is_dir {
             match format {
                 FileFormat::Parquet => {
                     let abs_path = std::fs::canonicalize(&path)?;
                     let table_url = ListingTableUrl::parse(abs_path.to_str().unwrap())?;
-                    
+
                     let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
                         .with_collect_stat(true)
                         .with_file_extension(".parquet")
                         .with_target_partitions(1);
-                    
-                    let config = ListingTableConfig::new(table_url)
-                        .with_listing_options(listing_options);
-                    
+
+                    let config =
+                        ListingTableConfig::new(table_url).with_listing_options(listing_options);
+
                     let config = config.infer(&ctx.state()).await?;
                     let table = Arc::new(ListingTable::try_new(config)?);
-                    
+
                     let df = ctx.read_table(table)?;
-                    let df = df.repartition(datafusion::logical_expr::Partitioning::RoundRobinBatch(1))?;
+                    let df =
+                        df.repartition(datafusion::logical_expr::Partitioning::RoundRobinBatch(1))?;
                     Ok(vec![df.into_optimized_plan()?])
                 }
                 FileFormat::Csv => {
                     let has_header = cfg::optional_bool(config, "has_header").unwrap_or(true);
                     let delimiter = Self::delimiter_byte(config);
-                    let opts = CsvReadOptions::new().has_header(has_header).delimiter(delimiter);
+                    let opts = CsvReadOptions::new()
+                        .has_header(has_header)
+                        .delimiter(delimiter);
                     let df = ctx.read_csv(&path, opts).await?;
                     Ok(vec![df.into_optimized_plan()?])
                 }
                 FileFormat::Json => {
                     let abs_path = std::fs::canonicalize(&path)?;
                     let query = if recursive {
-                        format!("SELECT * FROM read_json_auto('{}/**/*.json')", abs_path.to_str().unwrap())
+                        format!(
+                            "SELECT * FROM read_json_auto('{}/**/*.json')",
+                            abs_path.to_str().unwrap()
+                        )
                     } else {
-                        format!("SELECT * FROM read_json_auto('{}/*.json')", abs_path.to_str().unwrap())
+                        format!(
+                            "SELECT * FROM read_json_auto('{}/*.json')",
+                            abs_path.to_str().unwrap()
+                        )
                     };
-                    
-                    let batches = DuckDBHelper::query_arrow(":memory:", &query, &vec![], &None).await?;
-                    if batches.is_empty() { return Err(anyhow!("No JSON data found in {}", path)); }
-                    
+
+                    let batches = DuckDBHelper::query_arrow(":memory:", &query, &[], &None).await?;
+                    if batches.is_empty() {
+                        return Err(anyhow!("No JSON data found in {}", path));
+                    }
+
                     let schema = batches[0].schema();
                     let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
 
-                    Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
-                        node: Arc::new(crate::core::datasource::DuckDBScanLogical {
-                            connection_path: ":memory:".to_string(),
-                            extensions: vec![],
-                            attach_sql: None,
-                            query,
-                            schema: Arc::new(df_schema),
-                        }),
-                    })])
+                    Ok(vec![LogicalPlan::Extension(
+                        datafusion::logical_expr::Extension {
+                            node: Arc::new(crate::core::datasource::DuckDBScanLogical {
+                                connection_path: ":memory:".to_string(),
+                                extensions: vec![],
+                                attach_sql: None,
+                                query,
+                                schema: Arc::new(df_schema),
+                            }),
+                        },
+                    )])
                 }
             }
         } else {
             // Single file path
             match format {
                 FileFormat::Parquet => {
-                    let df = ctx.read_parquet(&path, ParquetReadOptions::default()).await?;
+                    let df = ctx
+                        .read_parquet(&path, ParquetReadOptions::default())
+                        .await?;
                     Ok(vec![df.into_optimized_plan()?])
                 }
                 FileFormat::Csv => {
                     let has_header = cfg::optional_bool(config, "has_header").unwrap_or(true);
                     let delimiter = Self::delimiter_byte(config);
-                    let opts = CsvReadOptions::new().has_header(has_header).delimiter(delimiter);
+                    let opts = CsvReadOptions::new()
+                        .has_header(has_header)
+                        .delimiter(delimiter);
                     let df = ctx.read_csv(&path, opts).await?;
                     Ok(vec![df.into_optimized_plan()?])
                 }
                 FileFormat::Json => {
                     let abs_path = std::fs::canonicalize(&path)?;
-                    let query = format!("SELECT * FROM read_json_auto('{}')", abs_path.to_str().unwrap());
-                    
-                    let batches = DuckDBHelper::query_arrow(":memory:", &query, &vec![], &None).await?;
-                    if batches.is_empty() { return Err(anyhow!("JSON file is empty or invalid: {}", path)); }
-                    
+                    let query = format!(
+                        "SELECT * FROM read_json_auto('{}')",
+                        abs_path.to_str().unwrap()
+                    );
+
+                    let batches = DuckDBHelper::query_arrow(":memory:", &query, &[], &None).await?;
+                    if batches.is_empty() {
+                        return Err(anyhow!("JSON file is empty or invalid: {}", path));
+                    }
+
                     let schema = batches[0].schema();
                     let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
 
-                    Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
-                        node: Arc::new(crate::core::datasource::DuckDBScanLogical {
-                            connection_path: ":memory:".to_string(),
-                            extensions: vec![],
-                            attach_sql: None,
-                            query,
-                            schema: Arc::new(df_schema),
-                        }),
-                    })])
+                    Ok(vec![LogicalPlan::Extension(
+                        datafusion::logical_expr::Extension {
+                            node: Arc::new(crate::core::datasource::DuckDBScanLogical {
+                                connection_path: ":memory:".to_string(),
+                                extensions: vec![],
+                                attach_sql: None,
+                                query,
+                                schema: Arc::new(df_schema),
+                            }),
+                        },
+                    )])
                 }
             }
         }
@@ -1182,7 +1254,7 @@ impl NodeBehavior for DbConnectorNode {
     ) -> Result<Vec<LogicalPlan>> {
         let url = cfg::required_string(config, "url")?;
         let query = cfg::required_string(config, "query")?;
-        
+
         // ENV expansion for security
         let expanded_url = if url.contains("${") {
             let mut result = url.clone();
@@ -1199,35 +1271,52 @@ impl NodeBehavior for DbConnectorNode {
         };
 
         let driver = Self::select_driver(&expanded_url);
-        
+
         match driver {
             DbDriver::DuckDBPostgres | DbDriver::DuckDBSqlite => {
-                let ext = if driver == DbDriver::DuckDBPostgres { "postgres" } else { "sqlite" };
-                
+                let ext = if driver == DbDriver::DuckDBPostgres {
+                    "postgres"
+                } else {
+                    "sqlite"
+                };
+
                 let (path, attach_sql) = if driver == DbDriver::DuckDBPostgres {
-                    (":memory:", Some(format!("ATTACH '{}' AS ext_db (TYPE postgres);", expanded_url)))
+                    (
+                        ":memory:",
+                        Some(format!(
+                            "ATTACH '{}' AS ext_db (TYPE postgres);",
+                            expanded_url
+                        )),
+                    )
                 } else {
                     let db_path = expanded_url.trim_start_matches("sqlite://");
-                    (":memory:", Some(format!("ATTACH '{}' AS ext_db (TYPE sqlite);", db_path)))
+                    (
+                        ":memory:",
+                        Some(format!("ATTACH '{}' AS ext_db (TYPE sqlite);", db_path)),
+                    )
                 };
-                
+
                 // Use query_arrow to get the schema reliably without holding Connection
-                let batches = DuckDBHelper::query_arrow(path, &query, &vec![ext.to_string()], &attach_sql).await?;
+                let batches =
+                    DuckDBHelper::query_arrow(path, &query, &[ext.to_string()], &attach_sql)
+                        .await?;
                 if batches.is_empty() {
                     return Err(anyhow!("Query returned no data for schema inference"));
                 }
                 let schema = batches[0].schema();
                 let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
-                
-                Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
-                    node: Arc::new(crate::core::datasource::DuckDBScanLogical {
-                        connection_path: path.to_string(),
-                        extensions: vec![ext.to_string()],
-                        attach_sql,
-                        query: query.clone(),
-                        schema: Arc::new(df_schema),
-                    }),
-                })])
+
+                Ok(vec![LogicalPlan::Extension(
+                    datafusion::logical_expr::Extension {
+                        node: Arc::new(crate::core::datasource::DuckDBScanLogical {
+                            connection_path: path.to_string(),
+                            extensions: vec![ext.to_string()],
+                            attach_sql,
+                            query: query.clone(),
+                            schema: Arc::new(df_schema),
+                        }),
+                    },
+                )])
             }
             DbDriver::SqlxAny => {
                 // SQLx path: dynamic schema discovery
@@ -1237,30 +1326,35 @@ impl NodeBehavior for DbConnectorNode {
                 } else {
                     expanded_url.to_string()
                 };
-                let pool = sqlx::AnyPool::connect(&normalized_url).await
+                let pool = sqlx::AnyPool::connect(&normalized_url)
+                    .await
                     .map_err(|e| anyhow!("SQLx connection failed: {}", e))?;
-                
+
                 let query_obj = sqlx::query(&query);
-                let first_row = query_obj.fetch_one(&pool).await
+                let first_row = query_obj
+                    .fetch_one(&pool)
+                    .await
                     .map_err(|e| anyhow!("SQLx query failed for schema inference: {}", e))?;
-                
+
                 let mut fields = Vec::new();
                 for col in first_row.columns() {
                     let arrow_type = crate::core::datasource::sqlx_type_to_arrow(col.type_info());
                     fields.push(Field::new(col.name().to_string(), arrow_type, true));
                 }
-                
+
                 let schema = Arc::new(Schema::new(fields));
                 let df_schema = datafusion::common::DFSchema::try_from(schema)?;
 
-                Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
-                    node: Arc::new(crate::core::datasource::SqlxScanLogical {
-                        url: normalized_url,
-                        query: query.clone(),
-                        schema: Arc::new(df_schema),
-                        params: vec![], // TODO: Support parameters in DbConnectorNode if needed
-                    }),
-                })])
+                Ok(vec![LogicalPlan::Extension(
+                    datafusion::logical_expr::Extension {
+                        node: Arc::new(crate::core::datasource::SqlxScanLogical {
+                            url: normalized_url,
+                            query: query.clone(),
+                            schema: Arc::new(df_schema),
+                            params: vec![], // TODO: Support parameters in DbConnectorNode if needed
+                        }),
+                    },
+                )])
             }
         }
     }
@@ -1276,8 +1370,16 @@ impl NodeBehavior for GraphIndexWriterNode {
             display_name: "Graph Index Writer".to_string(),
             description: "Persist nodes and edges to DuckDB graph index".to_string(),
             input_ports: vec![
-                PortSpec { id: 0, name: "nodes".into(), description: "Entities table".into() },
-                PortSpec { id: 1, name: "edges".into(), description: "Relationships table".into() },
+                PortSpec {
+                    id: 0,
+                    name: "nodes".into(),
+                    description: "Entities table".into(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "edges".into(),
+                    description: "Relationships table".into(),
+                },
             ],
             output_ports: vec![],
             config_schema: serde_json::json!({
@@ -1299,7 +1401,7 @@ impl NodeBehavior for GraphIndexWriterNode {
         if inputs.len() < 2 {
             return Err(anyhow!("GraphIndexWriter requires Nodes and Edges inputs"));
         }
-        
+
         let node = Arc::new(GraphIndexWriterLogical {
             nodes_input: inputs[0].clone(),
             edges_input: inputs[1].clone(),
@@ -1316,18 +1418,33 @@ pub struct GraphIndexWriterLogical {
 }
 
 impl UserDefinedLogicalNodeCore for GraphIndexWriterLogical {
-    fn name(&self) -> &str { "GraphIndexWriter" }
-    fn inputs(&self) -> Vec<&LogicalPlan> { vec![&self.nodes_input, &self.edges_input] }
+    fn name(&self) -> &str {
+        "GraphIndexWriter"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.nodes_input, &self.edges_input]
+    }
     fn schema(&self) -> &DFSchemaRef {
         lazy_static::lazy_static! {
             static ref EMPTY_SCHEMA: DFSchemaRef = Arc::new(DFSchema::empty());
         }
         &EMPTY_SCHEMA
     }
-    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> { vec![] }
-    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "GraphIndexWriter") }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<datafusion::logical_expr::Expr>, inputs: Vec<LogicalPlan>) -> std::result::Result<Self, DataFusionError> {
-        Ok(Self { nodes_input: inputs[0].clone(), edges_input: inputs[1].clone() })
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "GraphIndexWriter")
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> std::result::Result<Self, DataFusionError> {
+        Ok(Self {
+            nodes_input: inputs[0].clone(),
+            edges_input: inputs[1].clone(),
+        })
     }
 }
 
@@ -1345,7 +1462,11 @@ impl fmt::Debug for GraphIndexWriterExec {
 }
 
 impl GraphIndexWriterExec {
-    pub fn new(nodes_input: Arc<dyn ExecutionPlan>, edges_input: Arc<dyn ExecutionPlan>, cache_dir: String) -> Self {
+    pub fn new(
+        nodes_input: Arc<dyn ExecutionPlan>,
+        edges_input: Arc<dyn ExecutionPlan>,
+        cache_dir: String,
+    ) -> Self {
         let schema = Arc::new(Schema::empty());
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema),
@@ -1353,7 +1474,12 @@ impl GraphIndexWriterExec {
             datafusion::physical_plan::execution_plan::EmissionType::Incremental,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
         );
-        Self { nodes_input, edges_input, cache_dir, cache }
+        Self {
+            nodes_input,
+            edges_input,
+            cache_dir,
+            cache,
+        }
     }
 }
 
@@ -1364,13 +1490,30 @@ impl DisplayAs for GraphIndexWriterExec {
 }
 
 impl ExecutionPlan for GraphIndexWriterExec {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn schema(&self) -> SchemaRef { Arc::new(Schema::empty()) }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.nodes_input, &self.edges_input] }
-    fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        Ok(Arc::new(Self::new(children[0].clone(), children[1].clone(), self.cache_dir.clone())))
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
-    fn execute(&self, partition: usize, context: Arc<TaskContext>) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
+    fn schema(&self) -> SchemaRef {
+        Arc::new(Schema::empty())
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.nodes_input, &self.edges_input]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(Arc::new(Self::new(
+            children[0].clone(),
+            children[1].clone(),
+            self.cache_dir.clone(),
+        )))
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
         let nodes_stream = self.nodes_input.execute(partition, context.clone())?;
         let edges_stream = self.edges_input.execute(partition, context)?;
         Ok(Box::pin(GraphIndexingStream {
@@ -1380,8 +1523,12 @@ impl ExecutionPlan for GraphIndexWriterExec {
             state: IndexerState::Polling,
         }))
     }
-    fn properties(&self) -> &PlanProperties { &self.cache }
-    fn name(&self) -> &str { "GraphIndexWriterExec" }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn name(&self) -> &str {
+        "GraphIndexWriterExec"
+    }
 }
 
 enum IndexerState {
@@ -1403,13 +1550,27 @@ impl Stream for GraphIndexingStream {
         loop {
             match &mut self.state {
                 IndexerState::Polling => {
-                    let mut nodes_input = std::mem::replace(&mut self.nodes_stream, Box::pin(datafusion::physical_plan::stream::EmptyRecordBatchStream::new(Arc::new(Schema::empty()))));
-                    let mut edges_input = std::mem::replace(&mut self.edges_stream, Box::pin(datafusion::physical_plan::stream::EmptyRecordBatchStream::new(Arc::new(Schema::empty()))));
+                    let mut nodes_input = std::mem::replace(
+                        &mut self.nodes_stream,
+                        Box::pin(
+                            datafusion::physical_plan::stream::EmptyRecordBatchStream::new(
+                                Arc::new(Schema::empty()),
+                            ),
+                        ),
+                    );
+                    let mut edges_input = std::mem::replace(
+                        &mut self.edges_stream,
+                        Box::pin(
+                            datafusion::physical_plan::stream::EmptyRecordBatchStream::new(
+                                Arc::new(Schema::empty()),
+                            ),
+                        ),
+                    );
                     let cache_dir = self.cache_dir.clone();
 
                     let fut = async move {
                         let metadata_path = format!("{}/metadata.duckdb", cache_dir);
-                        
+
                         let mut nodes_batches = Vec::new();
                         while let Some(Ok(batch)) = nodes_input.next().await {
                             nodes_batches.push(batch);
@@ -1451,19 +1612,17 @@ impl Stream for GraphIndexingStream {
                     };
                     self.state = IndexerState::Writing(Box::pin(fut));
                 }
-                IndexerState::Writing(fut) => {
-                    match fut.as_mut().poll(cx) {
-                        Poll::Ready(Ok(_)) => {
-                            self.state = IndexerState::Done;
-                            return Poll::Ready(None);
-                        }
-                        Poll::Ready(Err(e)) => {
-                            self.state = IndexerState::Done;
-                            return Poll::Ready(Some(Err(e)));
-                        }
-                        Poll::Pending => return Poll::Pending,
+                IndexerState::Writing(fut) => match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(_)) => {
+                        self.state = IndexerState::Done;
+                        return Poll::Ready(None);
                     }
-                }
+                    Poll::Ready(Err(e)) => {
+                        self.state = IndexerState::Done;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
                 IndexerState::Done => return Poll::Ready(None),
             }
         }
@@ -1471,5 +1630,7 @@ impl Stream for GraphIndexingStream {
 }
 
 impl RecordBatchStream for GraphIndexingStream {
-    fn schema(&self) -> SchemaRef { Arc::new(Schema::empty()) }
+    fn schema(&self) -> SchemaRef {
+        Arc::new(Schema::empty())
+    }
 }

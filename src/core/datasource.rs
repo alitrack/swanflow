@@ -7,39 +7,47 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use aws_sdk_s3::presigning::PresigningConfig;
-use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::Client as S3Client;
 
-use datafusion::arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray, StringBuilder, Int64Builder, Float64Builder, BooleanBuilder, TimestampNanosecondBuilder};
+use calamine::{open_workbook, Data, Reader, Xlsx};
+use datafusion::arrow::array::{
+    Array, ArrayRef, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder,
+    StringArray, StringBuilder, TimestampNanosecondBuilder,
+};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use calamine::{open_workbook, Data, Reader, Xlsx};
-use serde_json::Value as JsonValue;
 use datafusion::common::{DFSchemaRef, ScalarValue};
 use datafusion::error::Result;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
 use futures::Stream;
 use futures::StreamExt;
-use rust_xlsxwriter::{Chart, ChartType, Workbook, Format, Color};
-use std::collections::HashMap;
+use rust_xlsxwriter::{Chart, ChartType, Color, Format, Workbook};
+use serde_json::Value as JsonValue;
 use sqlx::any::AnyTypeInfo;
-use datafusion::physical_plan::stream::RecordBatchReceiverStream;
+use std::collections::HashMap;
 
 pub fn sqlx_type_to_arrow(ti: &AnyTypeInfo) -> DataType {
     use sqlx::TypeInfo;
     let name = ti.name().to_uppercase();
     match name.as_str() {
         "BOOLEAN" | "BOOL" | "TINYINT(1)" => DataType::Boolean,
-        "SMALLINT" | "INT2" | "INT" | "INTEGER" | "INT4" | "BIGINT" | "INT8" | "INT64" => DataType::Int64,
-        "FLOAT" | "REAL" | "FLOAT4" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT8" | "NUMERIC" | "DECIMAL" => DataType::Float64,
-        "TIMESTAMP" | "TIMESTAMPTZ" | "DATETIME" => DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Nanosecond, None),
+        "SMALLINT" | "INT2" | "INT" | "INTEGER" | "INT4" | "BIGINT" | "INT8" | "INT64" => {
+            DataType::Int64
+        }
+        "FLOAT" | "REAL" | "FLOAT4" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT8" | "NUMERIC"
+        | "DECIMAL" => DataType::Float64,
+        "TIMESTAMP" | "TIMESTAMPTZ" | "DATETIME" => {
+            DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Nanosecond, None)
+        }
         "DATE" => DataType::Date32,
         _ => DataType::Utf8,
     }
@@ -163,7 +171,12 @@ pub struct SqlxScanExec {
 }
 
 impl SqlxScanExec {
-    pub fn new(url: String, query: String, project_schema: SchemaRef, params: Vec<ScalarValue>) -> Self {
+    pub fn new(
+        url: String,
+        query: String,
+        project_schema: SchemaRef,
+        params: Vec<ScalarValue>,
+    ) -> Self {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(project_schema.clone()),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
@@ -230,8 +243,10 @@ impl ExecutionPlan for SqlxScanExec {
 
         builder.spawn(async move {
             sqlx::any::install_default_drivers();
-            let pool = sqlx::AnyPool::connect(&url).await.map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-            
+            let pool = sqlx::AnyPool::connect(&url)
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+
             let mut query_obj = sqlx::query(&query);
             for param in &params {
                 match param {
@@ -247,23 +262,29 @@ impl ExecutionPlan for SqlxScanExec {
             }
             let mut rows = query_obj.fetch(&pool);
 
-            let mut builders: Vec<DynamicArrayBuilder> = schema.fields().iter()
+            let mut builders: Vec<DynamicArrayBuilder> = schema
+                .fields()
+                .iter()
                 .map(|f| DynamicArrayBuilder::new(f.data_type(), 1000))
                 .collect();
 
             let mut count = 0;
             while let Some(row_res) = rows.next().await {
-                let row = row_res.map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-                for i in 0..schema.fields().len() {
-                    builders[i].append_from_row(&row, i);
+                let row = row_res
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                for (i, builder) in builders.iter_mut().enumerate() {
+                    builder.append_from_row(&row, i);
                 }
                 count += 1;
                 if count >= 1000 {
                     let columns: Vec<ArrayRef> = builders.iter_mut().map(|b| b.finish()).collect();
-                    let batch = RecordBatch::try_new(schema.clone(), columns)
-                        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+                    let batch = RecordBatch::try_new(schema.clone(), columns).map_err(|e| {
+                        datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                    })?;
                     let _ = tx.send(Ok(batch)).await;
-                    builders = schema.fields().iter()
+                    builders = schema
+                        .fields()
+                        .iter()
                         .map(|f| DynamicArrayBuilder::new(f.data_type(), 1000))
                         .collect();
                     count = 0;
@@ -272,8 +293,9 @@ impl ExecutionPlan for SqlxScanExec {
 
             if count > 0 {
                 let columns: Vec<ArrayRef> = builders.into_iter().map(|mut b| b.finish()).collect();
-                let batch = RecordBatch::try_new(schema.clone(), columns)
-                    .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+                let batch = RecordBatch::try_new(schema.clone(), columns).map_err(|e| {
+                    datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                })?;
                 let _ = tx.send(Ok(batch)).await;
             }
             Ok(())
@@ -397,7 +419,7 @@ impl ExecutionPlan for DuckDBScanExec {
     ) -> Result<SendableRecordBatchStream> {
         let conn = duckdb::Connection::open(&self.connection_path)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-        
+
         for ext in &self.extensions {
             conn.execute(&format!("INSTALL {};", ext), []).ok();
             conn.execute(&format!("LOAD {};", ext), [])
@@ -417,23 +439,27 @@ impl ExecutionPlan for DuckDBScanExec {
         let copy_sql = format!("COPY ({}) TO '{}' (FORMAT PARQUET)", self.query, tmp_path);
         conn.execute(&copy_sql, [])
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-        
+
         // Read back with DataFusion
         let ctx = SessionContext::new();
-        let df = futures::executor::block_on(ctx.read_parquet(tmp_path, datafusion::prelude::ParquetReadOptions::default()))
-            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-        
+        let df = futures::executor::block_on(
+            ctx.read_parquet(tmp_path, datafusion::prelude::ParquetReadOptions::default()),
+        )
+        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+
         let batches = futures::executor::block_on(df.collect())
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-        
+
         // Clean up
         std::fs::remove_file(tmp_file).ok();
-        
-        Ok(Box::pin(datafusion::physical_plan::memory::MemoryStream::try_new(
-            batches,
-            self.project_schema.clone(),
-            None,
-        )?))
+
+        Ok(Box::pin(
+            datafusion::physical_plan::memory::MemoryStream::try_new(
+                batches,
+                self.project_schema.clone(),
+                None,
+            )?,
+        ))
     }
 }
 
@@ -460,7 +486,7 @@ impl std::hash::Hash for ExcelTemplateSinkLogical {
             v.hash(state);
         }
         self.table_start.hash(state);
-        // LogicalPlans are generally not hashed directly, 
+        // LogicalPlans are generally not hashed directly,
         // they are usually hashed by their IDs or structure in DataFusion
         // but for UserDefinedLogicalNode we often skip them or use a placeholder
     }
@@ -486,7 +512,11 @@ impl UserDefinedLogicalNodeCore for ExcelTemplateSinkLogical {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ExcelTemplateSink(template={:?}, output={:?})", self.template_path, self.output_path)
+        write!(
+            f,
+            "ExcelTemplateSink(template={:?}, output={:?})",
+            self.template_path, self.output_path
+        )
     }
     fn with_exprs_and_inputs(
         &self,
@@ -795,7 +825,11 @@ impl UserDefinedLogicalNodeCore for ExcelSinkLogical {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ExcelSink(path={:?}, sheets={:?})", self.path, self.sheets)
+        write!(
+            f,
+            "ExcelSink(path={:?}, sheets={:?})",
+            self.path, self.sheets
+        )
     }
     fn with_exprs_and_inputs(
         &self,
@@ -898,7 +932,7 @@ impl ExecutionPlan for ExcelSinkExec {
         for input in &self.inputs {
             streams.push(input.execute(partition, context.clone())?);
         }
-        
+
         let input_count = streams.len();
         Ok(Box::pin(ExcelWritingStream {
             inputs: streams,
@@ -909,7 +943,6 @@ impl ExecutionPlan for ExcelSinkExec {
             all_batches: vec![Vec::new(); input_count],
             finished_mask: vec![false; input_count],
         }))
-
     }
 }
 
@@ -1011,7 +1044,7 @@ impl ExcelWritingStream {
         }
 
         let mut workbook = Workbook::new();
-        
+
         // Define some professional styles
         let header_format = Format::new()
             .set_bold()
@@ -1034,9 +1067,12 @@ impl ExcelWritingStream {
                 continue;
             }
 
-            let sheet_name = self.sheets.get(i).cloned()
+            let sheet_name = self
+                .sheets
+                .get(i)
+                .cloned()
                 .unwrap_or_else(|| format!("Sheet{}", i + 1));
-            
+
             let worksheet = workbook.add_worksheet();
             if let Err(e) = worksheet.set_name(&sheet_name) {
                 tracing::warn!("Failed to set sheet name: {}", e);
@@ -1044,7 +1080,7 @@ impl ExcelWritingStream {
 
             let mut row_offset = 0;
             let schema = sheet_batches[0].schema();
-            
+
             // Map column indices to formats
             let mut col_formats = Vec::new();
             for field in schema.fields() {
@@ -1052,7 +1088,9 @@ impl ExcelWritingStream {
             }
 
             for (col_idx, field) in schema.fields().iter().enumerate() {
-                if let Err(e) = worksheet.write_with_format(0, col_idx as u16, field.name(), &header_format) {
+                if let Err(e) =
+                    worksheet.write_with_format(0, col_idx as u16, field.name(), &header_format)
+                {
                     tracing::warn!("Failed to write header cell: {}", e);
                 }
             }
@@ -1060,10 +1098,12 @@ impl ExcelWritingStream {
 
             for batch in sheet_batches {
                 for row_idx in 0..batch.num_rows() {
-                    for col_idx in 0..batch.num_columns() {
+                    for (col_idx, col_format) in
+                        col_formats.iter().enumerate().take(batch.num_columns())
+                    {
                         let array = batch.column(col_idx);
-                        let cell_format = col_formats[col_idx].as_ref();
-                        
+                        let cell_format = col_format.as_ref();
+
                         let write_res = match array.data_type() {
                             DataType::Int64 => {
                                 let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
@@ -1072,9 +1112,18 @@ impl ExcelWritingStream {
                                 } else {
                                     let val = a.value(row_idx);
                                     if let Some(fmt) = cell_format {
-                                        worksheet.write_with_format(row_offset as u32, col_idx as u16, val as f64, fmt).map(|_| ())
+                                        worksheet
+                                            .write_with_format(
+                                                row_offset as u32,
+                                                col_idx as u16,
+                                                val as f64,
+                                                fmt,
+                                            )
+                                            .map(|_| ())
                                     } else {
-                                        worksheet.write(row_offset as u32, col_idx as u16, val as f64).map(|_| ())
+                                        worksheet
+                                            .write(row_offset as u32, col_idx as u16, val as f64)
+                                            .map(|_| ())
                                     }
                                 }
                             }
@@ -1085,20 +1134,40 @@ impl ExcelWritingStream {
                                 } else {
                                     let val = a.value(row_idx);
                                     if let Some(fmt) = cell_format {
-                                        worksheet.write_with_format(row_offset as u32, col_idx as u16, val, fmt).map(|_| ())
+                                        worksheet
+                                            .write_with_format(
+                                                row_offset as u32,
+                                                col_idx as u16,
+                                                val,
+                                                fmt,
+                                            )
+                                            .map(|_| ())
                                     } else {
-                                        worksheet.write(row_offset as u32, col_idx as u16, val).map(|_| ())
+                                        worksheet
+                                            .write(row_offset as u32, col_idx as u16, val)
+                                            .map(|_| ())
                                     }
                                 }
                             }
                             _ => {
-                                let val = array.as_any().downcast_ref::<StringArray>()
+                                let val = array
+                                    .as_any()
+                                    .downcast_ref::<StringArray>()
                                     .map(|a| a.value(row_idx).to_string())
                                     .unwrap_or_else(|| "".to_string());
                                 if let Some(fmt) = cell_format {
-                                    worksheet.write_with_format(row_offset as u32, col_idx as u16, val, fmt).map(|_| ())
+                                    worksheet
+                                        .write_with_format(
+                                            row_offset as u32,
+                                            col_idx as u16,
+                                            val,
+                                            fmt,
+                                        )
+                                        .map(|_| ())
                                 } else {
-                                    worksheet.write(row_offset as u32, col_idx as u16, val).map(|_| ())
+                                    worksheet
+                                        .write(row_offset as u32, col_idx as u16, val)
+                                        .map(|_| ())
                                 }
                             }
                         };
@@ -1113,7 +1182,13 @@ impl ExcelWritingStream {
             // Task 2.3: Implement Excel Table (ListObject) support
             if self.convert_to_table && row_offset > 1 {
                 let table = rust_xlsxwriter::Table::new();
-                if let Err(e) = worksheet.add_table(0, 0, (row_offset - 1) as u32, (schema.fields().len() - 1) as u16, &table) {
+                if let Err(e) = worksheet.add_table(
+                    0,
+                    0,
+                    (row_offset - 1) as u32,
+                    (schema.fields().len() - 1) as u16,
+                    &table,
+                ) {
                     tracing::warn!("Failed to add Excel table: {}", e);
                 }
             }
@@ -1123,20 +1198,25 @@ impl ExcelWritingStream {
                 let mut chart = Chart::new(ChartType::Column);
                 let sheet_name_str = sheet_name.as_str();
                 let row_end = (row_offset - 1) as u32;
-                chart.add_series()
+                chart
+                    .add_series()
                     .set_categories((sheet_name_str, 1, 0, row_end, 0))
                     .set_values((sheet_name_str, 1, 1, row_end, 1));
-                
+
                 let title = format!("{} Analysis", sheet_name_str);
                 chart.title().set_name(&title);
                 // Chart creation is non-critical, log at debug level
-                if let Err(e) = worksheet.insert_chart(1, (schema.fields().len() + 1) as u16, &chart) {
+                if let Err(e) =
+                    worksheet.insert_chart(1, (schema.fields().len() + 1) as u16, &chart)
+                {
                     tracing::debug!("Failed to insert chart (non-critical): {}", e);
                 }
             }
         }
 
-        workbook.save(&self.path).map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        workbook
+            .save(&self.path)
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
         Ok(())
     }
 }
@@ -1224,7 +1304,7 @@ impl ExecutionPlan for ExcelTemplateExec {
         for input in &self.inputs {
             streams.push(input.execute(partition, context.clone())?);
         }
-        
+
         Ok(Box::pin(ExcelTemplateWritingStream {
             inputs: streams,
             template_path: self.template_path.clone(),
@@ -1306,8 +1386,9 @@ impl ExcelTemplateWritingStream {
         // 1. Read template using calamine to find markers and current values
         let mut workbook_reader: Xlsx<_> = open_workbook(&self.template_path)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-        
-        let range = workbook_reader.worksheet_range(&self.sheet)
+
+        let range = workbook_reader
+            .worksheet_range(&self.sheet)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
         // Map markers found in template to their (row, col) coordinates
@@ -1333,10 +1414,18 @@ impl ExcelTemplateWritingStream {
         for (r, row) in range.rows().enumerate() {
             for (c, cell) in row.iter().enumerate() {
                 match cell {
-                    Data::String(s) => { worksheet.write(r as u32, c as u16, s).ok(); }
-                    Data::Float(f) => { worksheet.write(r as u32, c as u16, *f).ok(); }
-                    Data::Int(i) => { worksheet.write(r as u32, c as u16, *i as f64).ok(); }
-                    Data::Bool(b) => { worksheet.write(r as u32, c as u16, *b).ok(); }
+                    Data::String(s) => {
+                        worksheet.write(r as u32, c as u16, s).ok();
+                    }
+                    Data::Float(f) => {
+                        worksheet.write(r as u32, c as u16, *f).ok();
+                    }
+                    Data::Int(i) => {
+                        worksheet.write(r as u32, c as u16, *i as f64).ok();
+                    }
+                    Data::Bool(b) => {
+                        worksheet.write(r as u32, c as u16, *b).ok();
+                    }
                     _ => {}
                 }
             }
@@ -1346,7 +1435,7 @@ impl ExcelTemplateWritingStream {
         if let Some(first_batch) = self.all_batches[0].first() {
             if first_batch.num_rows() > 0 {
                 for (field, (r, c)) in &marker_coords {
-                    if let Some(col_idx) = first_batch.schema().index_of(field).ok() {
+                    if let Ok(col_idx) = first_batch.schema().index_of(field) {
                         let array = first_batch.column(col_idx);
                         // Simplified: convert type to string for cell injection
                         let val = if array.is_null(0) {
@@ -1376,10 +1465,20 @@ impl ExcelTemplateWritingStream {
 
         // 4. Inject table data
         if let Some(table_start) = &self.table_start {
-            let row_start = table_start.chars().filter(|c| c.is_digit(10)).collect::<String>()
-                .parse::<u32>().unwrap_or(1) - 1;
-            let col_start = (table_start.chars().filter(|c| c.is_alphabetic()).collect::<String>()
-                .to_uppercase().as_bytes()[0] as u16) - (b'A' as u16);
+            let row_start = table_start
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u32>()
+                .unwrap_or(1)
+                - 1;
+            let col_start = (table_start
+                .chars()
+                .filter(|c| c.is_alphabetic())
+                .collect::<String>()
+                .to_uppercase()
+                .as_bytes()[0] as u16)
+                - (b'A' as u16);
 
             let mut current_row = row_start;
             for batch in &self.all_batches[0] {
@@ -1390,15 +1489,21 @@ impl ExcelTemplateWritingStream {
                             match array.data_type() {
                                 DataType::Int64 => {
                                     let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
-                                    worksheet.write(current_row, col_start + c as u16, a.value(r) as f64).ok();
+                                    worksheet
+                                        .write(current_row, col_start + c as u16, a.value(r) as f64)
+                                        .ok();
                                 }
                                 DataType::Float64 => {
                                     let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
-                                    worksheet.write(current_row, col_start + c as u16, a.value(r)).ok();
+                                    worksheet
+                                        .write(current_row, col_start + c as u16, a.value(r))
+                                        .ok();
                                 }
                                 _ => {
                                     let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                                    worksheet.write(current_row, col_start + c as u16, a.value(r)).ok();
+                                    worksheet
+                                        .write(current_row, col_start + c as u16, a.value(r))
+                                        .ok();
                                 }
                             }
                         }
@@ -1408,9 +1513,10 @@ impl ExcelTemplateWritingStream {
             }
         }
 
-        workbook_writer.save(&self.output_path)
+        workbook_writer
+            .save(&self.output_path)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-        
+
         Ok(())
     }
 }
@@ -1482,7 +1588,7 @@ impl ExecutionPlan for ExcelReportExec {
         for input in &self.inputs {
             streams.push(input.execute(partition, context.clone())?);
         }
-        
+
         Ok(Box::pin(ExcelReportWritingStream {
             inputs: streams,
             path: self.path.clone(),
@@ -1574,15 +1680,25 @@ impl ExcelReportWritingStream {
                         match array.data_type() {
                             DataType::Int64 => {
                                 let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
-                                worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64).ok();
+                                worksheet
+                                    .write(
+                                        row_offset as u32,
+                                        col_idx as u16,
+                                        a.value(row_idx) as f64,
+                                    )
+                                    .ok();
                             }
                             DataType::Float64 => {
                                 let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
-                                worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx)).ok();
+                                worksheet
+                                    .write(row_offset as u32, col_idx as u16, a.value(row_idx))
+                                    .ok();
                             }
                             _ => {
                                 let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                                worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx)).ok();
+                                worksheet
+                                    .write(row_offset as u32, col_idx as u16, a.value(row_idx))
+                                    .ok();
                             }
                         }
                     }
@@ -1600,7 +1716,7 @@ impl ExcelReportWritingStream {
                     _ => ChartType::Column,
                 };
                 let mut chart = Chart::new(chart_type);
-                
+
                 if let Some(title) = chart_json["title"].as_str() {
                     chart.title().set_name(title);
                 }
@@ -1609,23 +1725,27 @@ impl ExcelReportWritingStream {
                 // For test, we assume user provides correct ranges like "Data!$B$2:$B$11"
                 let data_range = chart_json["data_range"].as_str().unwrap_or("");
                 let label_range = chart_json["label_range"].as_str().unwrap_or("");
-                
+
                 // Helper to parse "Data!$B$2:$B$11" into (sheet, row_start, col_start, row_end, col_end)
                 // rust_xlsxwriter needs tuples or strings. Let's use strings for simplicity.
-                chart.add_series()
+                chart
+                    .add_series()
                     .set_values(data_range)
                     .set_categories(label_range);
 
                 let row_pos = chart_json["offset"]["row"].as_u64().unwrap_or(1) as u32;
                 let col_pos = chart_json["offset"]["col"].as_u64().unwrap_or(5) as u16;
-                
-                worksheet.insert_chart(row_pos, col_pos + (i as u16 * 8), &chart).ok();
+
+                worksheet
+                    .insert_chart(row_pos, col_pos + (i as u16 * 8), &chart)
+                    .ok();
             }
         }
 
-        workbook.save(&self.path)
+        workbook
+            .save(&self.path)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-        
+
         Ok(())
     }
 }
@@ -1637,7 +1757,7 @@ pub struct S3Manager {
 
 impl S3Manager {
     pub async fn new(bucket: String) -> anyhow::Result<Self> {
-        let config = aws_config::load_from_env().await;
+        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = S3Client::new(&config);
         Ok(Self { client, bucket })
     }
@@ -1654,8 +1774,13 @@ impl S3Manager {
         Ok(())
     }
 
-    pub async fn get_presigned_url(&self, key: &str, expires_in: Duration) -> anyhow::Result<String> {
-        let presigned = self.client
+    pub async fn get_presigned_url(
+        &self,
+        key: &str,
+        expires_in: Duration,
+    ) -> anyhow::Result<String> {
+        let presigned = self
+            .client
             .get_object()
             .bucket(&self.bucket)
             .key(key)
@@ -1664,8 +1789,13 @@ impl S3Manager {
         Ok(presigned.uri().to_string())
     }
 
-    pub async fn put_presigned_url(&self, key: &str, expires_in: Duration) -> anyhow::Result<String> {
-        let presigned = self.client
+    pub async fn put_presigned_url(
+        &self,
+        key: &str,
+        expires_in: Duration,
+    ) -> anyhow::Result<String> {
+        let presigned = self
+            .client
             .put_object()
             .bucket(&self.bucket)
             .key(key)

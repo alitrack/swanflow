@@ -10,6 +10,13 @@ use std::sync::Arc;
 async fn test_agent_with_variables() {
     dotenv().ok();
 
+    if std::env::var("RUSTFLOW_RUN_LIVE_LLM_TESTS").ok().as_deref() != Some("1") {
+        println!(
+            "Skipping live LLM integration test. Set RUSTFLOW_RUN_LIVE_LLM_TESTS=1 to enable."
+        );
+        return;
+    }
+
     let api_key = std::env::var("LLM_API_KEY").expect("LLM_API_KEY not set");
     let api_base = std::env::var("LLM_API_BASE").expect("LLM_API_BASE not set");
     let model = std::env::var("LLM_MODEL").expect("LLM_MODEL not set");
@@ -21,7 +28,8 @@ async fn test_agent_with_variables() {
         endpoint: Some(api_base),
     };
 
-    let provider: Arc<dyn rustflow::nodes::ai::providers::LlmProvider> = Arc::new(OpenAiProvider::new(config).unwrap());
+    let provider: Arc<dyn rustflow::nodes::ai::providers::LlmProvider> =
+        Arc::new(OpenAiProvider::new(config).unwrap());
     let registry = Arc::new(NodeRegistry::default());
     let engine = Arc::new(SwanFlowEngine::new(registry.clone()));
 

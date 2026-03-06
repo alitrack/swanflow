@@ -1,20 +1,20 @@
-use std::any::Any;
-use std::fmt;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{DFSchemaRef, Result};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use datafusion::physical_expr::EquivalenceProperties;
 use futures::Stream;
 use futures::StreamExt;
+use std::any::Any;
+use std::fmt;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -27,13 +27,30 @@ pub struct StateProbeLogical {
 }
 
 impl UserDefinedLogicalNodeCore for StateProbeLogical {
-    fn name(&self) -> &str { "StateProbe" }
-    fn inputs(&self) -> Vec<&LogicalPlan> { vec![&self.input] }
-    fn schema(&self) -> &DFSchemaRef { self.input.schema() }
-    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> { vec![] }
-    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "StateProbe(id={})", self.node_id) }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<datafusion::logical_expr::Expr>, inputs: Vec<LogicalPlan>) -> Result<Self> {
-        Ok(Self { node_id: self.node_id, input: inputs[0].clone() })
+    fn name(&self) -> &str {
+        "StateProbe"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        self.input.schema()
+    }
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "StateProbe(id={})", self.node_id)
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        Ok(Self {
+            node_id: self.node_id,
+            input: inputs[0].clone(),
+        })
     }
 }
 
@@ -46,7 +63,11 @@ pub struct StateProbeExec {
 }
 
 impl StateProbeExec {
-    pub fn new(node_id: Uuid, input: Arc<dyn ExecutionPlan>, event_tx: mpsc::UnboundedSender<NodeEvent>) -> Self {
+    pub fn new(
+        node_id: Uuid,
+        input: Arc<dyn ExecutionPlan>,
+        event_tx: mpsc::UnboundedSender<NodeEvent>,
+    ) -> Self {
         let input_props = input.properties();
         let cache = PlanProperties::new(
             EquivalenceProperties::new(input.schema()),
@@ -54,7 +75,12 @@ impl StateProbeExec {
             input_props.emission_type,
             input_props.boundedness,
         );
-        Self { node_id, input, event_tx, cache }
+        Self {
+            node_id,
+            input,
+            event_tx,
+            cache,
+        }
     }
 }
 
@@ -65,24 +91,45 @@ impl DisplayAs for StateProbeExec {
 }
 
 impl ExecutionPlan for StateProbeExec {
-    fn as_any(&self) -> &dyn Any { self }
-    fn schema(&self) -> SchemaRef { self.input.schema() }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.input] }
-    fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(Self::new(self.node_id, children[0].clone(), self.event_tx.clone())))
+    fn as_any(&self) -> &dyn Any {
+        self
     }
-    fn execute(&self, partition: usize, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
+    fn schema(&self) -> SchemaRef {
+        self.input.schema()
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(Self::new(
+            self.node_id,
+            children[0].clone(),
+            self.event_tx.clone(),
+        )))
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
         let input = self.input.execute(partition, context)?;
-        Ok(Box::pin(StateProbeStream { 
-            node_id: self.node_id, 
-            input, 
+        Ok(Box::pin(StateProbeStream {
+            node_id: self.node_id,
+            input,
             event_tx: self.event_tx.clone(),
             // Set to 500ms ago so first event is sent immediately
-            last_event: std::time::Instant::now() - std::time::Duration::from_millis(500)
+            last_event: std::time::Instant::now() - std::time::Duration::from_millis(500),
         }))
     }
-    fn properties(&self) -> &PlanProperties { &self.cache }
-    fn name(&self) -> &str { "StateProbeExec" }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn name(&self) -> &str {
+        "StateProbeExec"
+    }
 }
 
 struct StateProbeStream {
@@ -99,9 +146,9 @@ impl Stream for StateProbeStream {
             Poll::Ready(Some(Ok(batch))) => {
                 // Throttle StateChanged events to 500ms
                 if self.last_event.elapsed() >= std::time::Duration::from_millis(500) {
-                    let _ = self.event_tx.send(NodeEvent::StateChanged { 
-                        node_id: self.node_id, 
-                        state: crate::nodes::NodeState::Running
+                    let _ = self.event_tx.send(NodeEvent::StateChanged {
+                        node_id: self.node_id,
+                        state: crate::nodes::NodeState::Running,
                     });
                     self.last_event = std::time::Instant::now();
                 }
@@ -113,7 +160,9 @@ impl Stream for StateProbeStream {
 }
 
 impl RecordBatchStream for StateProbeStream {
-    fn schema(&self) -> SchemaRef { self.input.schema() }
+    fn schema(&self) -> SchemaRef {
+        self.input.schema()
+    }
 }
 
 #[derive(Clone)]
@@ -136,7 +185,9 @@ impl std::fmt::Debug for MaterializerLogical {
 
 impl std::cmp::PartialEq for MaterializerLogical {
     fn eq(&self, other: &Self) -> bool {
-        self.node_id == other.node_id && self.table_name == other.table_name && self.cache_key == other.cache_key
+        self.node_id == other.node_id
+            && self.table_name == other.table_name
+            && self.cache_key == other.cache_key
     }
 }
 
@@ -157,16 +208,34 @@ impl PartialOrd for MaterializerLogical {
 }
 
 impl UserDefinedLogicalNodeCore for MaterializerLogical {
-    fn name(&self) -> &str { "Materializer" }
-    fn inputs(&self) -> Vec<&LogicalPlan> { vec![&self.input] }
-    fn schema(&self) -> &DFSchemaRef { self.input.schema() }
-    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> { vec![] }
-    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "Materializer(table={}, cache_dir={})", self.table_name, self.cache_dir) }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<datafusion::logical_expr::Expr>, inputs: Vec<LogicalPlan>) -> Result<Self> {
-        Ok(Self { 
-            node_id: self.node_id, 
-            table_name: self.table_name.clone(), 
-            cache_key: self.cache_key.clone(), 
+    fn name(&self) -> &str {
+        "Materializer"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        self.input.schema()
+    }
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "Materializer(table={}, cache_dir={})",
+            self.table_name, self.cache_dir
+        )
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        Ok(Self {
+            node_id: self.node_id,
+            table_name: self.table_name.clone(),
+            cache_key: self.cache_key.clone(),
             cache_dir: self.cache_dir.clone(),
             input: inputs[0].clone(),
         })
@@ -206,21 +275,41 @@ impl MaterializerExec {
             input_props.emission_type,
             input_props.boundedness,
         );
-        Self { node_id, table_name, cache_key, cache_dir, input, cache }
+        Self {
+            node_id,
+            table_name,
+            cache_key,
+            cache_dir,
+            input,
+            cache,
+        }
     }
 }
 
 impl DisplayAs for MaterializerExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "MaterializerExec(table={}, cache_dir={})", self.table_name, self.cache_dir)
+        write!(
+            f,
+            "MaterializerExec(table={}, cache_dir={})",
+            self.table_name, self.cache_dir
+        )
     }
 }
 
 impl ExecutionPlan for MaterializerExec {
-    fn as_any(&self) -> &dyn Any { self }
-    fn schema(&self) -> SchemaRef { self.input.schema() }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.input] }
-    fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> Result<Arc<dyn ExecutionPlan>> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn schema(&self) -> SchemaRef {
+        self.input.schema()
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(Self::new(
             self.node_id,
             self.table_name.clone(),
@@ -229,19 +318,27 @@ impl ExecutionPlan for MaterializerExec {
             children[0].clone(),
         )))
     }
-    fn execute(&self, partition: usize, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
         let input = self.input.execute(partition, context)?;
-        Ok(Box::pin(MaterializingStream { 
-            node_id: self.node_id, 
-            table_name: self.table_name.clone(), 
-            cache_key: self.cache_key.clone(), 
-            cache_dir: self.cache_dir.clone(), 
-            input, 
+        Ok(Box::pin(MaterializingStream {
+            node_id: self.node_id,
+            table_name: self.table_name.clone(),
+            cache_key: self.cache_key.clone(),
+            cache_dir: self.cache_dir.clone(),
+            input,
             batches: Vec::new(),
         }))
     }
-    fn properties(&self) -> &PlanProperties { &self.cache }
-    fn name(&self) -> &str { "MaterializerExec" }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn name(&self) -> &str {
+        "MaterializerExec"
+    }
 }
 
 struct MaterializingStream {
@@ -299,5 +396,7 @@ impl Stream for MaterializingStream {
 }
 
 impl RecordBatchStream for MaterializingStream {
-    fn schema(&self) -> SchemaRef { self.input.schema() }
+    fn schema(&self) -> SchemaRef {
+        self.input.schema()
+    }
 }

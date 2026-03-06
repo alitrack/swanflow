@@ -6,7 +6,9 @@ use serde_json::json;
 #[test]
 fn test_structured_io_contract_rejects_missing_required_fields() {
     let node = StructuredIoContractNode;
-    let err = node.validate(&json!({})).expect_err("should fail without required_fields");
+    let err = node
+        .validate(&json!({}))
+        .expect_err("should fail without required_fields");
     assert!(err.to_string().contains("required_fields"));
 }
 

@@ -1,0 +1,415 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.42s
+     Running unittests src/lib.rs (target/debug/deps/rustflow-846d527b4be0dfbe)
+
+running 14 tests
+test core::graph::tests::test_workflow_new ... ok
+test core::graph::tests::test_remove_node ... ok
+test core::graph::tests::test_update_config ... ok
+test core::templating::tests::test_render_json_preserves_non_string ... ok
+test core::graph::tests::test_add_node ... ok
+test core::templating::tests::test_render_json_array ... ok
+test core::templating::tests::test_render_string ... ok
+test core::templating::tests::test_render_json_object ... ok
+test core::templating::tests::test_render_string_missing_key ... ok
+test core::templating::tests::test_render_string_multiple_occurrences ... ok
+test nodes::ai::tests::test_extract_json_from_response_invalid_json ... ok
+test nodes::ai::tests::test_extract_json_from_response_no_block ... ok
+test nodes::ai::tests::test_extract_json_from_response_with_generic_block ... ok
+test nodes::ai::tests::test_extract_json_from_response_with_json_block ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/main.rs (target/debug/deps/rustflow-3f20cfaf14d173af)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/agent_tests.rs (target/debug/deps/agent_tests-f36cccd8167d79d9)
+
+running 1 test
+test test_agent_reasoning_loop_foundation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/agent_variable_tests.rs (target/debug/deps/agent_variable_tests-89dfc5c678cb69d1)
+
+running 1 test
+test test_agent_with_variables ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ai_integration_tests.rs (target/debug/deps/ai_integration_tests-decba9de577e0229)
+
+running 1 test
+test test_real_ai_workflow_generation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/ai_tests.rs (target/debug/deps/ai_tests-8b4c7624c7a1879b)
+
+running 1 test
+test test_config_wizard_filter_suggestion ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/boxed_python_tests.rs (target/debug/deps/boxed_python_tests-df567e18fe750ef5)
+
+running 1 test
+test test_s3_manager_presigned_logic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/compiler_tests.rs (target/debug/deps/compiler_tests-8154ac8747406671)
+
+running 2 tests
+test test_metanode_expansion ... ok
+test test_topological_sort ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/complex_workflow_tests.rs (target/debug/deps/complex_workflow_tests-9b71c9ea39f1cf50)
+
+running 1 test
+test test_complex_metanode_optimization ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/connector_tests.rs (target/debug/deps/connector_tests-b23977900c38882a)
+
+running 4 tests
+test test_db_connector_sqlx_timestamps ... ok
+test test_db_connector_sqlx_sqlite_basic ... ok
+test test_sql_node_parameterization ... ok
+test test_db_connector_sqlx_numeric_aggregation ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
+
+     Running tests/core_tests.rs (target/debug/deps/core_tests-2e35a6e043fe94db)
+
+running 4 tests
+test test_cycle_detection ... ok
+test test_metanode_structure ... ok
+test test_workflow_graph_construction ... ok
+test test_node_registry ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/demo_workflows.rs (target/debug/deps/demo_workflows-f3be94df41f27041)
+
+running 2 tests
+test demo_standard_etl_pipeline ... ok
+test demo_reusable_metanode ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/duckdb_tests.rs (target/debug/deps/duckdb_tests-af17448d57190203)
+
+running 2 tests
+test test_duckdb_write_node_validation ... ok
+test test_duckdb_read_node_validation ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/engine_tests.rs (target/debug/deps/engine_tests-a9525d21406d02a9)
+
+running 3 tests
+test test_materialization_and_cache ... ok
+test test_engine_execution_with_events ... ok
+test test_schema_inference ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/excel_tests.rs (target/debug/deps/excel_tests-db21b04f5fef73ad)
+
+running 4 tests
+test test_excel_read_preview ... ok
+test test_excel_template_filling ... ok
+test test_excel_report_and_metadata ... ok
+test test_excel_styling_and_table ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/intelligence_integration.rs (target/debug/deps/intelligence_integration-59f9f8241ace2424)
+
+running 6 tests
+test test_research_state_depth_limit ... ok
+test test_research_state_deduplication ... ok
+test test_self_healing_error_capture ... ok
+test test_mcp_node_integration ... ok
+test test_validator_explicit_mapping ... ok
+test test_semantic_cleaner_apply_rules ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/lakehouse_tests.rs (target/debug/deps/lakehouse_tests-674cb8f8e49a667a)
+
+running 2 tests
+test test_decoupled_sql_querying ... ok
+test test_chained_decoupled_sql ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.49s
+
+     Running tests/m0_citation_tracker_tests.rs (target/debug/deps/m0_citation_tracker_tests-396f4a4528ba6f97)
+
+running 2 tests
+test test_citation_tracker_emits_source_mapping ... ok
+test test_citation_tracker_is_registered ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m0_contract_validation_tests.rs (target/debug/deps/m0_contract_validation_tests-e2f949885bdaba38)
+
+running 7 tests
+test test_semantic_chunker_rejects_overlap_not_less_than_chunk_size ... ok
+test test_vector_nodes_reject_zero_embedding_dim ... ok
+test test_structured_io_contract_rejects_empty_required_fields ... ok
+test test_tool_executor_rejects_empty_tool_name ... ok
+test test_citation_tracker_rejects_zero_max_citations ... ok
+test test_universal_resolver_rejects_invalid_source_type ... ok
+test test_query_planning_rejects_zero_max_subqueries ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/m0_contracts_tests.rs (target/debug/deps/m0_contracts_tests-cf5e4a701b8eeb58)
+
+running 1 test
+test test_contract_types_are_serializable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/m0_embedding_generator_tests.rs (target/debug/deps/m0_embedding_generator_tests-ca53425d25414e36)
+
+running 3 tests
+test test_embedding_generator_rejects_zero_dimension ... ok
+test test_embedding_generator_is_registered ... ok
+test test_embedding_generator_outputs_expected_shape_and_determinism ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m0_rag_basic_integration.rs (target/debug/deps/m0_rag_basic_integration-2eeb06b714791221)
+
+running 1 test
+test test_m0_rag_basic_pipeline_compiles ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/m0_rag_tool_integration.rs (target/debug/deps/m0_rag_tool_integration-40557e1d285675e6)
+
+running 1 test
+test test_m0_rag_with_tool_executor_pipeline_compiles ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/m0_retrieval_nodes_tests.rs (target/debug/deps/m0_retrieval_nodes_tests-932e213a33b8b830)
+
+running 3 tests
+test test_semantic_chunker_respects_chunk_and_overlap_limits ... ok
+test test_retrieval_nodes_are_registered ... ok
+test test_query_planning_splits_goal_into_ranked_subqueries ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m0_structured_io_tests.rs (target/debug/deps/m0_structured_io_tests-263bdf31420ea7ab)
+
+running 2 tests
+test test_structured_io_contract_rejects_missing_required_fields ... ok
+test test_structured_io_contract_is_registered ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m0_tool_executor_tests.rs (target/debug/deps/m0_tool_executor_tests-346d463fc47f786f)
+
+running 3 tests
+test test_tool_executor_normalizes_error_payload ... ok
+test test_tool_executor_normalizes_success_payload ... ok
+test test_tool_executor_is_registered ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m0_universal_resolver_tests.rs (target/debug/deps/m0_universal_resolver_tests-c6f6a54fa8e64df9)
+
+running 1 test
+test test_universal_resolver_routes_url_file_table_sources ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/m0_vector_contract_tests.rs (target/debug/deps/m0_vector_contract_tests-d3c0a5f3acb80007)
+
+running 3 tests
+test test_vector_writer_outputs_index_metadata_contract ... ok
+test test_vector_retriever_outputs_ranked_context_contract ... ok
+test test_vector_nodes_are_registered ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m1_fact_claim_verifier_tests.rs (target/debug/deps/m1_fact_claim_verifier_tests-e66878e4a91970f5)
+
+running 4 tests
+test test_fact_claim_verifier_handles_missing_evidence ... ok
+test test_fact_claim_verifier_rejects_invalid_threshold ... ok
+test test_fact_claim_verifier_is_registered ... ok
+test test_fact_claim_verifier_scores_and_verdicts ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m1_hybrid_rerank_tests.rs (target/debug/deps/m1_hybrid_rerank_tests-19c676fd27e339ee)
+
+running 11 tests
+test test_reranker_model_backend_retries_after_failure ... ok
+test test_reranker_llm_backend_retries_after_failure ... ok
+test test_reranker_llm_backend_calls_http_endpoint ... ok
+test test_reranker_model_backend_calls_http_endpoint ... ok
+test test_reranker_resolves_backend_variants ... ok
+test test_reranker_rejects_invalid_backend ... ok
+test test_hybrid_rejects_invalid_alpha ... ok
+test test_hybrid_retriever_fuses_sparse_and_semantic_scores ... ok
+test test_reranker_reorders_candidates_with_query_overlap ... ok
+test test_reranker_supports_model_and_llm_backends ... ok
+test test_hybrid_and_reranker_nodes_are_registered ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m1_pii_detector_tests.rs (target/debug/deps/m1_pii_detector_tests-4312a29dc7c1ca25)
+
+running 4 tests
+test test_pii_detector_rejects_invalid_config ... ok
+test test_pii_detector_is_registered ... ok
+test test_pii_detector_filters_by_category ... ok
+test test_pii_detector_detects_common_sensitive_patterns ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/m1_pii_masker_tests.rs (target/debug/deps/m1_pii_masker_tests-61aa99d87efbe854)
+
+running 4 tests
+test test_pii_masker_rejects_invalid_config ... ok
+test test_pii_masker_is_registered ... ok
+test test_pii_masker_respects_category_filter ... ok
+test test_pii_masker_masks_and_restores_text ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/m1_policy_privacy_gate_tests.rs (target/debug/deps/m1_policy_privacy_gate_tests-146f9eed4680b64f)
+
+running 4 tests
+test test_policy_gate_denies_when_pii_present ... ok
+test test_policy_gate_rejects_invalid_config ... ok
+test test_policy_gate_marks_approval_actions ... ok
+test test_policy_gate_is_registered ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/m2_runtime_reliability_tests.rs (target/debug/deps/m2_runtime_reliability_tests-0dacc6ec2e9cdadb)
+
+running 7 tests
+test test_audit_ledger_records_and_filters_events ... ok
+test test_run_state_store_put_get_delete ... ok
+test test_checkpoint_resume_controller_roundtrip ... ok
+test test_agent_loop_orchestrator_stops_at_max_iterations ... ok
+test test_m2_runtime_nodes_reject_invalid_config ... ok
+test test_m2_runtime_nodes_are_registered ... ok
+test test_retry_backoff_guard_deduplicates_idempotency_key_and_delays ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/multi_terminal_tests.rs (target/debug/deps/multi_terminal_tests-b668bb4eb36d4018)
+
+running 2 tests
+test test_variable_dependency_ordering ... ok
+test test_multi_terminal_execution ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/python_performance_tests.rs (target/debug/deps/python_performance_tests-3d28733b928bff5f)
+
+running 1 test
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'pyarrow'
+test test_python_zero_copy_execution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/python_security_tests.rs (target/debug/deps/python_security_tests-8be2c043c2cc6b77)
+
+running 2 tests
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'pyarrow'
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'pyarrow'
+test test_python_restricted_import ... ok
+test test_python_valid_transform ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/rag_build_test.rs (target/debug/deps/rag_build_test-1f081b37f4da34f7)
+
+running 1 test
+test test_rag_build_workflow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/rag_query_test.rs (target/debug/deps/rag_query_test-83607ca3cf7f5640)
+
+running 2 tests
+test test_research_loop_workflow ... ok
+test test_rag_query_workflow ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests/stability_hardening_tests.rs (target/debug/deps/stability_hardening_tests-15cc5668ad9632d9)
+
+running 6 tests
+test test_error_class_recoverability_contract ... ok
+test test_self_healing_runs_for_recoverable_planning_or_execution_errors ... ok
+test test_self_healing_is_skipped_for_validation_or_migration_failures ... ok
+test test_unknown_node_degraded_loading_and_execution_failure ... ok
+test test_preflight_validation_error_is_classified ... ok
+test test_preflight_runs_multi_step_migration_with_defaults ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/tutorial_17_18_tests.rs (target/debug/deps/tutorial_17_18_tests-43a8a9b25765d4e9)
+
+running 2 tests
+test test_tutorial_17_db_connector ... ok
+test test_tutorial_18_json_glob ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+     Running tests/universal_read_tests.rs (target/debug/deps/universal_read_tests-4760b4037cb7745b)
+
+running 2 tests
+test test_universal_read_csv ... ok
+test test_universal_read_parquet ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/yaml_workflow_tests.rs (target/debug/deps/yaml_workflow_tests-b5cab8d37ae4daf8)
+
+running 1 test
+test test_all_tutorial_workflows ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests examples/generate_data_xlsx.rs (target/debug/examples/generate_data_xlsx-065b50ded185300e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/generate_parquet.rs (target/debug/examples/generate_parquet-d396c0272c839066)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/verify_db.rs (target/debug/examples/verify_db-4ec802d97d51f5d2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

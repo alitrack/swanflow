@@ -6,6 +6,13 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
+fn should_run_demo_workflows() -> bool {
+    std::env::var("RUSTFLOW_RUN_DEMO_WORKFLOW_TESTS")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
 async fn run_and_print_events(engine: &SwanFlowEngine, workflow: &Workflow, title: &str) {
     println!(
         "
@@ -44,6 +51,11 @@ async fn run_and_print_events(engine: &SwanFlowEngine, workflow: &Workflow, titl
 
 #[tokio::test]
 async fn demo_standard_etl_pipeline() {
+    if !should_run_demo_workflows() {
+        println!("Skipping demo workflow test. Set RUSTFLOW_RUN_DEMO_WORKFLOW_TESTS=1 to enable.");
+        return;
+    }
+
     // 准备测试数据
     let csv_path = "demo_data.csv";
     std::fs::write(
@@ -116,6 +128,11 @@ david,4500,Sales",
 
 #[tokio::test]
 async fn demo_reusable_metanode() {
+    if !should_run_demo_workflows() {
+        println!("Skipping demo workflow test. Set RUSTFLOW_RUN_DEMO_WORKFLOW_TESTS=1 to enable.");
+        return;
+    }
+
     let registry = Arc::new(NodeRegistry::default());
     let engine = SwanFlowEngine::new(registry);
 

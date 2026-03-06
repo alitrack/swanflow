@@ -1,29 +1,29 @@
 use std::any::Any;
+use std::ffi::CString;
 use std::fmt;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::ffi::CString;
 
 use anyhow::{anyhow, Result};
-use datafusion::arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
 use datafusion::error::Result as DFResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use datafusion::physical_plan::execution_plan::{EmissionType, Boundedness};
 use futures::Stream;
 use futures::StreamExt;
-use serde_json::Value as JsonValue;
+use pyo3::ffi::c_str;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
-use pyo3::ffi::c_str;
 use pyo3_arrow::PyRecordBatch;
+use serde_json::Value as JsonValue;
 
 use crate::nodes::config as cfg;
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
@@ -129,7 +129,10 @@ impl ExecutionPlan for PythonExec {
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(Self::new(self.script.clone(), children[0].clone())))
+        Ok(Arc::new(Self::new(
+            self.script.clone(),
+            children[0].clone(),
+        )))
     }
 
     fn execute(
@@ -138,13 +141,16 @@ impl ExecutionPlan for PythonExec {
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         let input_stream = self.input.execute(partition, context)?;
-        
+
         // Compile the script with security restrictions
-        let compiled_fn = Python::with_gil(|py| -> Result<Py<PyAny>> {
+        let compiled_fn = Python::attach(|py| -> Result<Py<PyAny>> {
             let script = &self.script;
-            
+
             // Define restricted import function
-            let restricted_mod = PyModule::from_code(py, c_str!(r#"
+            let restricted_mod = PyModule::from_code(
+                py,
+                c_str!(
+                    r#"
 import sys
 
 def make_restricted_import(original_import):
@@ -157,43 +163,66 @@ def make_restricted_import(original_import):
         for d in dangerous:
             if name == d or name.startswith(d + "."):
                 raise ImportError(f"Access to module '{name}' is restricted for security reasons")
-        
+
         return original_import(name, globals, locals, fromlist, level)
     return restricted_import
-"#), c_str!("restricted_import.py"), c_str!("restricted_import"))?;
+"#
+                ),
+                c_str!("restricted_import.py"),
+                c_str!("restricted_import"),
+            )?;
             let make_restricted_import_fn = restricted_mod.getattr("make_restricted_import")?;
-            
+
             // Set up the globals with our restricted __import__
             let builtins = PyModule::import(py, "builtins")?;
             let original_import = builtins.getattr("__import__")?;
-            
-            let restricted_import_fn = make_restricted_import_fn.call1((original_import.clone(),))?;
-            
+
+            let restricted_import_fn =
+                make_restricted_import_fn.call1((original_import.clone(),))?;
+
             let locals = PyDict::new(py);
             locals.set_item("__import__", restricted_import_fn)?;
-            
+
             let full_script = format!(
                 "import pyarrow as pa\n\
                  def transform(batch):\n\
                  {}\n\
                  ",
-                script.lines().map(|l| format!("    {}", l)).collect::<Vec<_>>().join("\n")
+                script
+                    .lines()
+                    .map(|l| format!("    {}", l))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
-            
-            let module = PyModule::from_code(py, &CString::new(full_script)?, c_str!("swanflow_transform.py"), c_str!("swanflow_transform"))?;
-            
+
+            let module = PyModule::from_code(
+                py,
+                &CString::new(full_script)?,
+                c_str!("swanflow_transform.py"),
+                c_str!("swanflow_transform"),
+            )?;
+
             // Update module's __builtins__ to use our restricted import
             let mod_dict = module.dict();
             mod_dict.set_item("__builtins__", locals)?;
-            
-            let fun = module.getattr("transform")
-                .map_err(|_| anyhow!("Python script must define 'transform(batch)' function"))?.into();
-            
-            tracing::debug!("Python script compiled successfully ({} bytes)", script.len());
+
+            let fun = module
+                .getattr("transform")
+                .map_err(|_| anyhow!("Python script must define 'transform(batch)' function"))?
+                .into();
+
+            tracing::debug!(
+                "Python script compiled successfully ({} bytes)",
+                script.len()
+            );
             Ok(fun)
-        }).map_err(|e| datafusion::error::DataFusionError::Execution(format!(
-            "Python script security/compilation error: {}", e
-        )))?;
+        })
+        .map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Python script security/compilation error: {}",
+                e
+            ))
+        })?;
 
         Ok(Box::pin(PythonStream {
             input: input_stream,
@@ -216,18 +245,21 @@ impl RecordBatchStream for PythonStream {
 impl Stream for PythonStream {
     type Item = DFResult<RecordBatch>;
 
-    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
         match self.input.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(batch))) => {
                 let compiled_fn = &self.compiled_fn;
-                let result = Python::with_gil(|py| -> Result<RecordBatch> {
+                let result = Python::attach(|py| -> Result<RecordBatch> {
                     let py_batch = PyRecordBatch::from(batch);
                     let result_py_obj = compiled_fn.call1(py, (py_batch,))?;
-                    
+
                     if result_py_obj.is_none(py) {
                         anyhow::bail!("Python transform function must return a PyRecordBatch, but returned None");
                     }
-                    
+
                     let result_py_batch: PyRecordBatch = result_py_obj.extract(py)
                         .map_err(|e| anyhow!("Failed to extract PyRecordBatch from Python return value: {}. Ensure your script returns the result (e.g., 'return batch').", e))?;
                     Ok(result_py_batch.into())
@@ -235,7 +267,9 @@ impl Stream for PythonStream {
 
                 match result {
                     Ok(out_batch) => Poll::Ready(Some(Ok(out_batch))),
-                    Err(e) => Poll::Ready(Some(Err(datafusion::error::DataFusionError::Execution(e.to_string())))),
+                    Err(e) => Poll::Ready(Some(Err(
+                        datafusion::error::DataFusionError::Execution(e.to_string()),
+                    ))),
                 }
             }
             other => other,
@@ -284,12 +318,14 @@ impl NodeBehavior for PythonNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let script = cfg::required_string(config, "script")?;
-        Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
-            node: Arc::new(PythonLogical {
-                script,
-                input: inputs[0].clone(),
-            }),
-        })])
+        Ok(vec![LogicalPlan::Extension(
+            datafusion::logical_expr::Extension {
+                node: Arc::new(PythonLogical {
+                    script,
+                    input: inputs[0].clone(),
+                }),
+            },
+        )])
     }
 }
 

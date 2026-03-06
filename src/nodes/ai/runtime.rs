@@ -181,7 +181,9 @@ impl NodeBehavior for CheckpointResumeControllerNode {
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
-            return Err(anyhow!("Checkpoint/Resume Controller requires one input plan"));
+            return Err(anyhow!(
+                "Checkpoint/Resume Controller requires one input plan"
+            ));
         }
         Ok(vec![inputs[0].clone()])
     }
@@ -367,7 +369,12 @@ pub struct LoopReport {
 pub struct AgentLoopOrchestratorNode;
 
 impl AgentLoopOrchestratorNode {
-    pub fn orchestrate<F>(&self, goal: &str, config: &JsonValue, mut step_fn: F) -> Result<LoopReport>
+    pub fn orchestrate<F>(
+        &self,
+        goal: &str,
+        config: &JsonValue,
+        mut step_fn: F,
+    ) -> Result<LoopReport>
     where
         F: FnMut(usize) -> String,
     {

@@ -136,7 +136,7 @@ fn test_metanode_structure() {
     let mut main_workflow = Workflow::new("Main");
     let mut sub_workflow = Workflow::new("Sub");
 
-    let sub_node_idx = sub_workflow.add_node(NodeInstance {
+    let _sub_node_idx = sub_workflow.add_node(NodeInstance {
         id: Uuid::new_v4(),
         type_id: "test.dummy".into(),
         config: json!({}),

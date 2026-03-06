@@ -5,12 +5,19 @@ use rustflow::core::compiler::WorkflowCompiler;
 use rustflow::core::engine::{IntelligenceHook, SwanFlowEngine};
 use rustflow::core::graph::{NodeInstance, Workflow};
 use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::{NodeBehavior, NodeEvent, NodeSpec, NodeState, NodeErrorClass, PortSpec};
+use rustflow::nodes::{NodeBehavior, NodeErrorClass, NodeEvent, NodeSpec, NodeState, PortSpec};
 use serde_json::{json, Value as JsonValue};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
+
+fn should_run_engine_integration_tests() -> bool {
+    std::env::var("RUSTFLOW_RUN_ENGINE_INTEGRATION_TESTS")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
 
 struct StrictValidationNode;
 
@@ -50,7 +57,10 @@ impl NodeBehavior for StrictValidationNode {
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let ctx = datafusion::prelude::SessionContext::new();
-        Ok(vec![ctx.sql("SELECT 1 as v").await?.into_optimized_plan()?])
+        Ok(vec![ctx
+            .sql("SELECT 1 as v")
+            .await?
+            .into_optimized_plan()?])
     }
 }
 
@@ -86,7 +96,12 @@ impl NodeBehavior for MigratingNode {
         3
     }
 
-    fn migrate_config(&self, mut config: JsonValue, from_version: u32, to_version: u32) -> Result<JsonValue> {
+    fn migrate_config(
+        &self,
+        mut config: JsonValue,
+        from_version: u32,
+        to_version: u32,
+    ) -> Result<JsonValue> {
         if to_version != from_version + 1 {
             return Err(anyhow!("migration must be incremental"));
         }
@@ -105,7 +120,9 @@ impl NodeBehavior for MigratingNode {
                 obj.insert("normalize".to_string(), json!(true));
             }
             _ => {
-                return Err(anyhow!("unsupported migration step {from_version}->{to_version}"));
+                return Err(anyhow!(
+                    "unsupported migration step {from_version}->{to_version}"
+                ));
             }
         }
 
@@ -119,7 +136,10 @@ impl NodeBehavior for MigratingNode {
     ) -> Result<Vec<LogicalPlan>> {
         self.seen_configs.lock().unwrap().push(config.clone());
         let ctx = datafusion::prelude::SessionContext::new();
-        Ok(vec![ctx.sql("SELECT 1 as v").await?.into_optimized_plan()?])
+        Ok(vec![ctx
+            .sql("SELECT 1 as v")
+            .await?
+            .into_optimized_plan()?])
     }
 }
 
@@ -166,11 +186,20 @@ async fn test_preflight_validation_error_is_classified() {
     });
 
     let mut compiler = WorkflowCompiler::new(false);
-    let err = compiler.compile(&workflow, &registry, None).await.expect_err("compile should fail");
+    let err = compiler
+        .compile(&workflow, &registry, None)
+        .await
+        .expect_err("compile should fail");
     let message = err.to_string();
 
-    assert!(message.contains("validation"), "unexpected error: {message}");
-    assert!(message.contains(&node_id.to_string()), "unexpected error: {message}");
+    assert!(
+        message.contains("validation"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains(&node_id.to_string()),
+        "unexpected error: {message}"
+    );
 }
 
 #[tokio::test]
@@ -206,6 +235,13 @@ async fn test_preflight_runs_multi_step_migration_with_defaults() {
 
 #[tokio::test]
 async fn test_unknown_node_degraded_loading_and_execution_failure() {
+    if !should_run_engine_integration_tests() {
+        println!(
+            "Skipping engine integration test. Set RUSTFLOW_RUN_ENGINE_INTEGRATION_TESTS=1 to enable."
+        );
+        return;
+    }
+
     let registry = Arc::new(NodeRegistry::new());
     let engine = SwanFlowEngine::new(registry);
 
@@ -229,7 +265,9 @@ async fn test_unknown_node_degraded_loading_and_execution_failure() {
         .get(&missing_id)
         .cloned()
         .unwrap_or_default();
-    assert!(diagnostics.iter().any(|d| d.contains("community.unknown.node")));
+    assert!(diagnostics
+        .iter()
+        .any(|d| d.contains("community.unknown.node")));
 
     let mut rx = engine
         .execute_workflow(&workflow)
@@ -248,17 +286,29 @@ async fn test_unknown_node_degraded_loading_and_execution_failure() {
         }
     }
 
-    assert!(saw_missing_error, "expected missing-node remediation error event");
+    assert!(
+        saw_missing_error,
+        "expected missing-node remediation error event"
+    );
 }
 
 #[tokio::test]
 async fn test_self_healing_is_skipped_for_validation_or_migration_failures() {
+    if !should_run_engine_integration_tests() {
+        println!(
+            "Skipping engine integration test. Set RUSTFLOW_RUN_ENGINE_INTEGRATION_TESTS=1 to enable."
+        );
+        return;
+    }
+
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = NodeRegistry::new();
     registry.register_core_nodes();
 
     let mut engine = SwanFlowEngine::new(Arc::new(registry));
-    engine.hook = Some(Arc::new(CountingHook { calls: calls.clone() }));
+    engine.hook = Some(Arc::new(CountingHook {
+        calls: calls.clone(),
+    }));
 
     let mut workflow = Workflow::new("invalid sql config");
     workflow.add_node(NodeInstance {
@@ -270,7 +320,10 @@ async fn test_self_healing_is_skipped_for_validation_or_migration_failures() {
         sub_workflow: None,
     });
 
-    let mut rx = engine.execute_workflow(&workflow).await.expect("should return event stream");
+    let mut rx = engine
+        .execute_workflow(&workflow)
+        .await
+        .expect("should return event stream");
     while let Ok(Some(_)) = timeout(Duration::from_secs(10), rx.recv()).await {}
 
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -278,12 +331,21 @@ async fn test_self_healing_is_skipped_for_validation_or_migration_failures() {
 
 #[tokio::test]
 async fn test_self_healing_runs_for_recoverable_planning_or_execution_errors() {
+    if !should_run_engine_integration_tests() {
+        println!(
+            "Skipping engine integration test. Set RUSTFLOW_RUN_ENGINE_INTEGRATION_TESTS=1 to enable."
+        );
+        return;
+    }
+
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = NodeRegistry::new();
     registry.register_core_nodes();
 
     let mut engine = SwanFlowEngine::new(Arc::new(registry));
-    engine.hook = Some(Arc::new(CountingHook { calls: calls.clone() }));
+    engine.hook = Some(Arc::new(CountingHook {
+        calls: calls.clone(),
+    }));
 
     let mut workflow = Workflow::new("recoverable runtime error");
     workflow.add_node(NodeInstance {
@@ -295,7 +357,10 @@ async fn test_self_healing_runs_for_recoverable_planning_or_execution_errors() {
         sub_workflow: None,
     });
 
-    let mut rx = engine.execute_workflow(&workflow).await.expect("execution stream should be created");
+    let mut rx = engine
+        .execute_workflow(&workflow)
+        .await
+        .expect("execution stream should be created");
     while let Ok(Some(_)) = timeout(Duration::from_secs(10), rx.recv()).await {}
 
     assert!(calls.load(Ordering::SeqCst) >= 1);

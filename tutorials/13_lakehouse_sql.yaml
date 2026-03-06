@@ -1,5 +1,5 @@
 name: "Tutorial 13: Lakehouse SQL Interop"
-description: "Demonstrates how nodes can reference each other via SQL tables without direct edges."
+description: "Demonstrates SQL table handoff across nodes with explicit execution ordering."
 id: "00000000-0000-0000-0013-000000000001"
 graph:
   nodes:
@@ -11,7 +11,7 @@ graph:
       state: "Configured"
       materialize: true # This creates 'node_a1a1a1a1'
 
-    # Consumer Path (Disconnected)
+    # Consumer Path
     - id: "b2b2b2b2-0000-0000-0013-000000000003"
       type_id: "core.sql"
       config:
@@ -27,6 +27,7 @@ graph:
       state: "Configured"
 
   edges:
-    - [1, 2, { source_port: 0, target_port: 0 }] # Node 3 -> Node 4
+    - [0, 1, { source_port: 0, target_port: 0 }] # Node 1 -> Node 2
+    - [1, 2, { source_port: 0, target_port: 0 }] # Node 2 -> Node 3
   node_holes: []
   edge_property: "directed"

@@ -4,6 +4,19 @@ use std::collections::HashMap;
 pub struct TemplateEngine;
 
 impl TemplateEngine {
+    fn resolve_exact_context_placeholder(
+        input: &str,
+        context: &HashMap<String, JsonValue>,
+    ) -> Option<JsonValue> {
+        const PREFIX: &str = "${context.";
+        if !(input.starts_with(PREFIX) && input.ends_with('}')) {
+            return None;
+        }
+
+        let key = &input[PREFIX.len()..input.len() - 1];
+        context.get(key).cloned()
+    }
+
     /// Replaces placeholders like ${context.key} in a string with values from the context.
     pub fn render_string(input: &str, context: &HashMap<String, JsonValue>) -> String {
         let mut output = input.to_string();
@@ -25,7 +38,15 @@ impl TemplateEngine {
     /// Recursively renders a JSON value (e.g., node configuration).
     pub fn render_json(input: &JsonValue, context: &HashMap<String, JsonValue>) -> JsonValue {
         match input {
-            JsonValue::String(s) => JsonValue::String(Self::render_string(s, context)),
+            JsonValue::String(s) => {
+                // Keep exact placeholder replacements typed (number/bool/object), while
+                // mixed strings still render as text.
+                if let Some(value) = Self::resolve_exact_context_placeholder(s, context) {
+                    value
+                } else {
+                    JsonValue::String(Self::render_string(s, context))
+                }
+            }
             JsonValue::Array(arr) => {
                 JsonValue::Array(arr.iter().map(|v| Self::render_json(v, context)).collect())
             }
@@ -57,17 +78,17 @@ mod tests {
         let output = TemplateEngine::render_string(input, &ctx);
         assert_eq!(output, "SELECT * FROM data WHERE dept = 'IT' AND val > 100");
     }
-    
+
     #[test]
     fn test_render_string_multiple_occurrences() {
         let mut ctx = HashMap::new();
         ctx.insert("table".to_string(), json!("users"));
-        
+
         let input = "SELECT * FROM ${context.table} JOIN ${context.table}_roles ON ...";
         let output = TemplateEngine::render_string(input, &ctx);
         assert_eq!(output, "SELECT * FROM users JOIN users_roles ON ...");
     }
-    
+
     #[test]
     fn test_render_string_missing_key() {
         let ctx = HashMap::new();
@@ -76,44 +97,44 @@ mod tests {
         // Missing keys should not be replaced
         assert_eq!(output, "SELECT * FROM ${context.missing}");
     }
-    
+
     #[test]
     fn test_render_json_object() {
         let mut ctx = HashMap::new();
         ctx.insert("table".to_string(), json!("sales"));
         ctx.insert("limit".to_string(), json!(1000));
-        
+
         let input = json!({
             "table": "${context.table}",
             "limit": "${context.limit}"
         });
-        
+
         let output = TemplateEngine::render_json(&input, &ctx);
         assert_eq!(output["table"], "sales");
         assert_eq!(output["limit"], 1000);
     }
-    
+
     #[test]
     fn test_render_json_array() {
         let mut ctx = HashMap::new();
         ctx.insert("col".to_string(), json!("price"));
-        
+
         let input = json!(["${context.col}", "quantity", "total"]);
         let output = TemplateEngine::render_json(&input, &ctx);
         assert_eq!(output[0], "price");
         assert_eq!(output[1], "quantity");
     }
-    
+
     #[test]
     fn test_render_json_preserves_non_string() {
         let ctx = HashMap::new();
-        
+
         let input = json!({
             "count": 42,
             "active": true,
-            "ratio": 3.14
+            "ratio": std::f64::consts::PI
         });
-        
+
         let output = TemplateEngine::render_json(&input, &ctx);
         assert_eq!(output["count"], 42);
         assert_eq!(output["active"], true);

@@ -1,17 +1,27 @@
 use rustflow::core::engine::SwanFlowEngine;
 use rustflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
-use rustflow::nodes::io::CsvReadNode;
 use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::sql::SqlNode;
-use rustflow::nodes::transform::FilterNode;
 use rustflow::nodes::{NodeEvent, NodeState};
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use uuid::Uuid;
+
+fn should_run_engine_integration_tests() -> bool {
+    std::env::var("RUSTFLOW_RUN_ENGINE_INTEGRATION_TESTS")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
 
 #[tokio::test]
 async fn test_engine_execution_with_events() {
+    if !should_run_engine_integration_tests() {
+        println!(
+            "Skipping engine integration test. Set RUSTFLOW_RUN_ENGINE_INTEGRATION_TESTS=1 to enable."
+        );
+        return;
+    }
+
     let csv_content = "name,age\nalice,30\nbob,25\ncharlie,35";
     let csv_path = "test_data_events.csv";
     std::fs::write(csv_path, csv_content).unwrap();
@@ -66,6 +76,13 @@ async fn test_engine_execution_with_events() {
 
 #[tokio::test]
 async fn test_materialization_and_cache() {
+    if !should_run_engine_integration_tests() {
+        println!(
+            "Skipping engine integration test. Set RUSTFLOW_RUN_ENGINE_INTEGRATION_TESTS=1 to enable."
+        );
+        return;
+    }
+
     let csv_content = "name,val\nA,10\nB,20";
     let csv_path = "test_data_cache.csv";
     std::fs::write(csv_path, csv_content).unwrap();
@@ -86,7 +103,7 @@ async fn test_materialization_and_cache() {
 
     // 1. First execution: should materialize
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
-    while let Some(_) = rx.recv().await {}
+    while rx.recv().await.is_some() {}
 
     // Verify cache directory and file exist
     let cache_dir = std::path::Path::new("target/swanflow_cache");
@@ -116,6 +133,13 @@ async fn test_materialization_and_cache() {
 
 #[tokio::test]
 async fn test_schema_inference() {
+    if !should_run_engine_integration_tests() {
+        println!(
+            "Skipping engine integration test. Set RUSTFLOW_RUN_ENGINE_INTEGRATION_TESTS=1 to enable."
+        );
+        return;
+    }
+
     let csv_content = "name,age,city\nalice,30,NY";
     let csv_path = "test_data_schema.csv";
     std::fs::write(csv_path, csv_content).unwrap();

@@ -1,3 +1,3 @@
+pub mod agent;
 pub mod core;
 pub mod nodes;
-pub mod agent;

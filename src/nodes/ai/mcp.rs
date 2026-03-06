@@ -1,28 +1,31 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore, Extension};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
+use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
+use futures::{Future, SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::sync::Arc;
 use std::any::Any;
 use std::fmt;
-use tokio::sync::Mutex;
-use tokio::process::{Command, Child};
-use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
-use futures::{SinkExt, StreamExt, Stream, Future};
 use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::process::{Child, Command};
+use tokio::sync::Mutex;
+use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
-use datafusion::physical_plan::{ExecutionPlan, DisplayAs, DisplayFormatType, Partitioning, PlanProperties, SendableRecordBatchStream, RecordBatchStream};
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::execution::TaskContext;
+use datafusion::arrow::array::{BooleanBuilder, StringBuilder};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::arrow::array::{StringBuilder, BooleanBuilder};
+use datafusion::execution::TaskContext;
+use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream,
+};
 
 // --- MCP Client Logic ---
 
@@ -70,8 +73,14 @@ impl StdioTransport {
             .stderr(Stdio::inherit())
             .spawn()?;
 
-        let stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to open stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to open stdout"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open stdout"))?;
 
         let writer = FramedWrite::new(stdin, LinesCodec::new());
         let reader = FramedRead::new(stdout, LinesCodec::new());
@@ -111,7 +120,10 @@ pub struct McpClient {
 
 impl McpClient {
     pub fn new(transport: Box<dyn McpTransport>) -> Self {
-        Self { transport, next_id: 1 }
+        Self {
+            transport,
+            next_id: 1,
+        }
     }
 
     pub async fn call(&mut self, method: &str, params: JsonValue) -> Result<JsonValue> {
@@ -123,11 +135,13 @@ impl McpClient {
             params,
             id: JsonValue::from(id),
         };
-        self.transport.send_message(serde_json::to_value(request)?).await?;
+        self.transport
+            .send_message(serde_json::to_value(request)?)
+            .await?;
         loop {
             let message = self.transport.receive_message().await?;
             if let Ok(response) = serde_json::from_value::<JsonRpcResponse>(message.clone()) {
-                if response.id == JsonValue::from(id) {
+                if response.id.as_i64() == Some(id) {
                     if let Some(error) = response.error {
                         return Err(anyhow!("MCP Error: {:?}", error));
                     }
@@ -149,7 +163,9 @@ impl McpClient {
             method: "notifications/initialized".to_string(),
             params: None,
         };
-        self.transport.send_message(serde_json::to_value(notification)?).await?;
+        self.transport
+            .send_message(serde_json::to_value(notification)?)
+            .await?;
         Ok(())
     }
 
@@ -164,7 +180,7 @@ impl McpClient {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct McpInvokeLogical {
     pub tool_name: String,
-    pub arguments: String, 
+    pub arguments: String,
     pub server_command: String,
     pub server_args: Vec<String>,
     pub schema: Arc<DFSchema>,
@@ -177,14 +193,30 @@ impl PartialOrd for McpInvokeLogical {
 }
 
 impl UserDefinedLogicalNodeCore for McpInvokeLogical {
-    fn name(&self) -> &str { "McpInvoke" }
-    fn inputs(&self) -> Vec<&LogicalPlan> { vec![] }
-    fn schema(&self) -> &DFSchemaRef { &self.schema }
-    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> { vec![] }
-    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "McpInvoke: tool={}, cmd={}", self.tool_name, self.server_command)
+    fn name(&self) -> &str {
+        "McpInvoke"
     }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<datafusion::logical_expr::Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self, DataFusionError> {
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        &self.schema
+    }
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "McpInvoke: tool={}, cmd={}",
+            self.tool_name, self.server_command
+        )
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        _inputs: Vec<LogicalPlan>,
+    ) -> Result<Self, DataFusionError> {
         Ok(self.clone())
     }
 }
@@ -213,7 +245,14 @@ impl McpInvokeExec {
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
-        Self { tool_name, arguments, server_command, server_args, schema, cache }
+        Self {
+            tool_name,
+            arguments,
+            server_command,
+            server_args,
+            schema,
+            cache,
+        }
     }
 }
 
@@ -224,14 +263,33 @@ impl DisplayAs for McpInvokeExec {
 }
 
 impl ExecutionPlan for McpInvokeExec {
-    fn name(&self) -> &str { "McpInvokeExec" }
-    fn as_any(&self) -> &dyn Any { self }
-    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef { self.schema.clone() }
-    fn properties(&self) -> &PlanProperties { &self.cache }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![] }
-    fn with_new_children(self: Arc<Self>, _children: Vec<Arc<dyn ExecutionPlan>>) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> { Ok(self) }
+    fn name(&self) -> &str {
+        "McpInvokeExec"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef {
+        self.schema.clone()
+    }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(self)
+    }
 
-    fn execute(&self, _partition: usize, _context: Arc<TaskContext>) -> Result<SendableRecordBatchStream, DataFusionError> {
+    fn execute(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream, DataFusionError> {
         Ok(Box::pin(McpInvokeStream {
             tool_name: self.tool_name.clone(),
             arguments: self.arguments.clone(),
@@ -244,13 +302,15 @@ impl ExecutionPlan for McpInvokeExec {
     }
 }
 
+type McpInvokeFuture = Pin<Box<dyn Future<Output = Result<JsonValue, anyhow::Error>> + Send>>;
+
 pub struct McpInvokeStream {
     tool_name: String,
     arguments: JsonValue,
     server_command: String,
     server_args: Vec<String>,
     schema: datafusion::arrow::datatypes::SchemaRef,
-    fut: Option<Pin<Box<dyn Future<Output = Result<JsonValue, anyhow::Error>> + Send>>>,
+    fut: Option<McpInvokeFuture>,
     done: bool,
 }
 
@@ -258,7 +318,9 @@ impl Stream for McpInvokeStream {
     type Item = Result<RecordBatch, DataFusionError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.done { return Poll::Ready(None); }
+        if self.done {
+            return Poll::Ready(None);
+        }
 
         if self.fut.is_none() {
             let tool_name = self.tool_name.clone();
@@ -279,7 +341,7 @@ impl Stream for McpInvokeStream {
             Poll::Pending => return Poll::Pending,
         };
 
-        self.fut = None; 
+        self.fut = None;
         self.done = true;
 
         match res {
@@ -292,7 +354,8 @@ impl Stream for McpInvokeStream {
                             content_builder.append_value(text);
                             error_builder.append_value(false);
                         } else {
-                            content_builder.append_value(serde_json::to_string(block).unwrap_or_default());
+                            content_builder
+                                .append_value(serde_json::to_string(block).unwrap_or_default());
                             error_builder.append_value(false);
                         }
                     }
@@ -302,17 +365,26 @@ impl Stream for McpInvokeStream {
                 }
                 let batch = RecordBatch::try_new(
                     self.schema.clone(),
-                    vec![Arc::new(content_builder.finish()), Arc::new(error_builder.finish())]
-                ).map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                    vec![
+                        Arc::new(content_builder.finish()),
+                        Arc::new(error_builder.finish()),
+                    ],
+                )
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                 Poll::Ready(Some(Ok(batch)))
             }
-            Err(e) => Poll::Ready(Some(Err(DataFusionError::Execution(format!("MCP Invocation Failed: {}", e))))),
+            Err(e) => Poll::Ready(Some(Err(DataFusionError::Execution(format!(
+                "MCP Invocation Failed: {}",
+                e
+            ))))),
         }
     }
 }
 
 impl RecordBatchStream for McpInvokeStream {
-    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef { self.schema.clone() }
+    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef {
+        self.schema.clone()
+    }
 }
 
 pub struct McpInvokeNode;
@@ -344,7 +416,9 @@ impl NodeBehavior for McpInvokeNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        config["tool_name"].as_str().ok_or_else(|| anyhow!("tool_name is required"))?;
+        config["tool_name"]
+            .as_str()
+            .ok_or_else(|| anyhow!("tool_name is required"))?;
         Ok(())
     }
 
@@ -355,15 +429,30 @@ impl NodeBehavior for McpInvokeNode {
     ) -> Result<Vec<LogicalPlan>> {
         let tool_name = config["tool_name"].as_str().unwrap().to_string();
         let arguments = config["arguments"].clone();
-        let server_command = config["server_command"].as_str().unwrap_or("node").to_string();
+        let server_command = config["server_command"]
+            .as_str()
+            .unwrap_or("node")
+            .to_string();
         let server_args = config["server_args"]
             .as_array()
-            .map(|a| a.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect())
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let schema = datafusion::arrow::datatypes::Schema::new(vec![
-            datafusion::arrow::datatypes::Field::new("content", datafusion::arrow::datatypes::DataType::Utf8, true),
-            datafusion::arrow::datatypes::Field::new("is_error", datafusion::arrow::datatypes::DataType::Boolean, true),
+            datafusion::arrow::datatypes::Field::new(
+                "content",
+                datafusion::arrow::datatypes::DataType::Utf8,
+                true,
+            ),
+            datafusion::arrow::datatypes::Field::new(
+                "is_error",
+                datafusion::arrow::datatypes::DataType::Boolean,
+                true,
+            ),
         ]);
         let df_schema = Arc::new(DFSchema::try_from(schema)?);
         let logical_node = McpInvokeLogical {
@@ -373,6 +462,10 @@ impl NodeBehavior for McpInvokeNode {
             server_args,
             schema: df_schema,
         };
-        Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension { node: Arc::new(logical_node) })])
+        Ok(vec![LogicalPlan::Extension(
+            datafusion::logical_expr::Extension {
+                node: Arc::new(logical_node),
+            },
+        )])
     }
 }

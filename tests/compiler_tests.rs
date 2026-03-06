@@ -1,12 +1,11 @@
+use async_trait::async_trait;
 use rustflow::core::compiler::WorkflowCompiler;
 use rustflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::sql::SqlNode;
-use rustflow::nodes::{NodeState, NodeBehavior};
+use rustflow::nodes::{NodeBehavior, NodeState};
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
-use async_trait::async_trait;
 
 struct TestNode;
 #[async_trait]
@@ -17,12 +16,22 @@ impl NodeBehavior for TestNode {
             display_name: "Test".into(),
             description: "Test".into(),
             input_ports: vec![],
-            output_ports: vec![rustflow::nodes::PortSpec { id: 0, name: "out".into(), description: "out".into() }],
+            output_ports: vec![rustflow::nodes::PortSpec {
+                id: 0,
+                name: "out".into(),
+                description: "out".into(),
+            }],
             config_schema: json!({}),
         }
     }
-    fn validate(&self, _config: &serde_json::Value) -> anyhow::Result<()> { Ok(()) }
-    async fn propose_plan(&self, _inputs: Vec<datafusion::logical_expr::LogicalPlan>, _config: &serde_json::Value) -> anyhow::Result<Vec<datafusion::logical_expr::LogicalPlan>> {
+    fn validate(&self, _config: &serde_json::Value) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn propose_plan(
+        &self,
+        _inputs: Vec<datafusion::logical_expr::LogicalPlan>,
+        _config: &serde_json::Value,
+    ) -> anyhow::Result<Vec<datafusion::logical_expr::LogicalPlan>> {
         let ctx = datafusion::prelude::SessionContext::new();
         Ok(vec![ctx.sql("SELECT 1").await?.into_optimized_plan()?])
     }
@@ -50,7 +59,7 @@ async fn test_topological_sort() {
         materialize: true,
         sub_workflow: None,
     });
-    
+
     workflow
         .add_edge(
             n1,
@@ -94,7 +103,14 @@ async fn test_metanode_expansion() {
         sub_workflow: None,
     });
     sub_workflow
-        .add_edge(si, ss, EdgeInstance { source_port: 0, target_port: 0 })
+        .add_edge(
+            si,
+            ss,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
         .unwrap();
 
     // 2. Create Main Workflow
@@ -116,7 +132,14 @@ async fn test_metanode_expansion() {
         sub_workflow: Some(Box::new(sub_workflow)),
     });
     main_workflow
-        .add_edge(source_idx, meta_idx, EdgeInstance { source_port: 0, target_port: 0 })
+        .add_edge(
+            source_idx,
+            meta_idx,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
         .unwrap();
 
     // 3. Compile

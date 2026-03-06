@@ -21,7 +21,11 @@ impl FactClaimVerifierNode {
     fn tokenize(text: &str) -> HashSet<String> {
         text.to_lowercase()
             .split_whitespace()
-            .map(|token| token.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+            .map(|token| {
+                token
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_string()
+            })
             .filter(|token| !token.is_empty())
             .collect()
     }
@@ -139,7 +143,9 @@ impl NodeBehavior for FactClaimVerifierNode {
             return Err(anyhow!("support_threshold must be a number"));
         }
 
-        if config.get("require_evidence").is_some() && config["require_evidence"].as_bool().is_none() {
+        if config.get("require_evidence").is_some()
+            && config["require_evidence"].as_bool().is_none()
+        {
             return Err(anyhow!("require_evidence must be a boolean"));
         }
 

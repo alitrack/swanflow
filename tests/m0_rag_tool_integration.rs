@@ -45,9 +45,36 @@ async fn test_m0_rag_with_tool_executor_pipeline_compiles() {
         sub_workflow: None,
     });
 
-    workflow.add_edge(source, tool_executor, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    workflow.add_edge(tool_executor, structured, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    workflow.add_edge(structured, citation, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    workflow
+        .add_edge(
+            source,
+            tool_executor,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    workflow
+        .add_edge(
+            tool_executor,
+            structured,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    workflow
+        .add_edge(
+            structured,
+            citation,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     let mut compiler = WorkflowCompiler::new(false);
     let registry = NodeRegistry::default();

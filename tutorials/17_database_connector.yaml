@@ -1,13 +1,13 @@
-name: "Tutorial 17: Database Connector (Performance Path)"
-description: "Connects to an external SQLite database using high-performance DuckDB scanners."
+name: "Tutorial 17: Database Connector (Offline-Safe Path)"
+description: "Connects to an external SQLite database using SQLx-compatible scanning without DuckDB extension downloads."
 id: "00000000-0000-0000-0017-000000000001"
 graph:
   nodes:
     - id: "da1a0000-0000-0000-0017-000000000002"
       type_id: "core.io.db_connector"
       config:
-        # Use sqlite:// for vectorized performance
-        url: "sqlite://users.db" 
+        # Use sqlite3:// to route through SQLx and avoid DuckDB extension downloads.
+        url: "sqlite3://users.db"
         query: "SELECT id, name FROM users WHERE id > 0"
       state: "Configured"
 

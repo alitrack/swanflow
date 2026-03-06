@@ -63,8 +63,8 @@ impl AnalystAgent {
     }
 
     fn parse_response(&self, completion: &str) -> Result<AgentResponse> {
-        let json_block =
-            crate::nodes::ai::ConfigWizard::extract_json_from_response(completion).unwrap_or(completion);
+        let json_block = crate::nodes::ai::ConfigWizard::extract_json_from_response(completion)
+            .unwrap_or(completion);
         serde_json::from_str::<AgentResponse>(json_block.trim())
             .with_context(|| format!("failed to parse agent response JSON: {}", completion))
     }
@@ -73,24 +73,21 @@ impl AnalystAgent {
         let mut workflow = Workflow::new("agent-analysis");
 
         for call in response.tool_calls {
-            match call.name.as_str() {
-                "add_node" => {
-                    let args: AddNodeArguments = serde_json::from_value(call.arguments)
-                        .context("invalid add_node arguments")?;
-                    self.registry
-                        .get_node(&args.type_id)
-                        .with_context(|| format!("unknown node type requested by agent: {}", args.type_id))?;
+            if call.name.as_str() == "add_node" {
+                let args: AddNodeArguments =
+                    serde_json::from_value(call.arguments).context("invalid add_node arguments")?;
+                self.registry.get_node(&args.type_id).with_context(|| {
+                    format!("unknown node type requested by agent: {}", args.type_id)
+                })?;
 
-                    workflow.add_node(NodeInstance {
-                        id: Uuid::new_v4(),
-                        type_id: args.type_id,
-                        config: args.config,
-                        state: NodeState::Configured,
-                        materialize: false,
-                        sub_workflow: None,
-                    });
-                }
-                _ => {}
+                workflow.add_node(NodeInstance {
+                    id: Uuid::new_v4(),
+                    type_id: args.type_id,
+                    config: args.config,
+                    state: NodeState::Configured,
+                    materialize: false,
+                    sub_workflow: None,
+                });
             }
         }
 

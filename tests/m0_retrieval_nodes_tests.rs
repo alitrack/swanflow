@@ -14,8 +14,12 @@ fn test_query_planning_splits_goal_into_ranked_subqueries() {
 
     assert_eq!(planned.len(), 3);
     assert!(planned[0].rank < planned[1].rank);
-    assert!(planned.iter().any(|item| item.query.to_lowercase().contains("gdp")));
-    assert!(planned.iter().any(|item| item.query.to_lowercase().contains("inflation")));
+    assert!(planned
+        .iter()
+        .any(|item| item.query.to_lowercase().contains("gdp")));
+    assert!(planned
+        .iter()
+        .any(|item| item.query.to_lowercase().contains("inflation")));
 }
 
 #[test]
@@ -28,11 +32,14 @@ fn test_semantic_chunker_respects_chunk_and_overlap_limits() {
         )
         .expect("chunking should succeed");
 
-    assert_eq!(chunks, vec![
-        "one two three".to_string(),
-        "three four five".to_string(),
-        "five six seven".to_string(),
-    ]);
+    assert_eq!(
+        chunks,
+        vec![
+            "one two three".to_string(),
+            "three four five".to_string(),
+            "five six seven".to_string(),
+        ]
+    );
 }
 
 #[test]

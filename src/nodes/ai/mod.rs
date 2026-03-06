@@ -1,10 +1,10 @@
 pub mod contracts;
-pub mod mcp;
-pub mod providers;
 pub mod graph;
+pub mod mcp;
 pub mod privacy;
-pub mod runtime;
+pub mod providers;
 pub mod retrieval;
+pub mod runtime;
 pub mod tool_executor;
 pub mod verification;
 
@@ -51,11 +51,16 @@ User Request: {}",
         // Safe extraction of JSON from response - handles markdown code blocks
         let json_str = Self::extract_json_from_response(&result)?;
 
-        let config: serde_json::Value = serde_json::from_str(json_str.trim())
-            .map_err(|e| anyhow::anyhow!("Failed to parse LLM config response: {}. Response: {}", e, json_str))?;
+        let config: serde_json::Value = serde_json::from_str(json_str.trim()).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse LLM config response: {}. Response: {}",
+                e,
+                json_str
+            )
+        })?;
         Ok(config)
     }
-    
+
     /// Safely extracts JSON from LLM response, handling various markdown formats.
     /// Made pub for testing.
     pub fn extract_json_from_response(response: &str) -> Result<&str> {
@@ -72,7 +77,7 @@ User Request: {}",
             // No closing marker - try anyway with rest of string
             return Ok(after_json_start.trim());
         }
-        
+
         // Try generic ``` ... ``` format
         if let Some(start) = response.find("```") {
             let after_first_tick = &response[start + 3..];
@@ -82,7 +87,7 @@ User Request: {}",
             // No closing - try anyway
             return Ok(after_first_tick.trim());
         }
-        
+
         // No code blocks - try to find JSON object directly
         // Look for { ... }
         if let Some(start) = response.find('{') {
@@ -100,7 +105,7 @@ User Request: {}",
                 }
             }
         }
-        
+
         // Fallback: return as-is
         Ok(response.trim())
     }
@@ -109,7 +114,7 @@ User Request: {}",
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_extract_json_from_response_with_json_block() {
         let response = r#"```json
@@ -118,7 +123,7 @@ mod tests {
         let result = ConfigWizard::extract_json_from_response(response).unwrap();
         assert!(result.contains("key"));
     }
-    
+
     #[test]
     fn test_extract_json_from_response_with_generic_block() {
         let response = r#"```
@@ -127,14 +132,14 @@ mod tests {
         let result = ConfigWizard::extract_json_from_response(response).unwrap();
         assert!(result.contains("key"));
     }
-    
+
     #[test]
     fn test_extract_json_from_response_no_block() {
         let response = r#"{"key": "value"}"#;
         let result = ConfigWizard::extract_json_from_response(response).unwrap();
         assert!(result.contains("key"));
     }
-    
+
     #[test]
     fn test_extract_json_from_response_invalid_json() {
         let response = "not json at all";

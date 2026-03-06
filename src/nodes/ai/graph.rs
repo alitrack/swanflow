@@ -1,27 +1,32 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use datafusion::arrow::array::{Int64Builder, StringBuilder, Float64Builder, Int64Array, StringArray};
+use datafusion::arrow::array::{
+    Float64Builder, Int64Array, Int64Builder, StringArray, StringBuilder,
+};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
-use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore, Extension};
-use serde_json::Value as JsonValue;
-use std::sync::Arc;
-use std::fmt;
-use datafusion::arrow::datatypes::{SchemaRef, Schema, Field, DataType};
-use datafusion::physical_plan::{ExecutionPlan, PlanProperties, DisplayAs, DisplayFormatType, RecordBatchStream, SendableRecordBatchStream};
-use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::execution::context::TaskContext;
 use datafusion::error::DataFusionError;
-use datafusion::prelude::{SessionContext, DataFrame};
+use datafusion::execution::context::TaskContext;
+use datafusion::logical_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream,
+};
+use datafusion::prelude::{DataFrame, SessionContext};
+use futures::future::BoxFuture;
 use futures::Stream;
 use futures::StreamExt;
+use serde_json::Value as JsonValue;
+use std::fmt;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
-use futures::future::BoxFuture;
 
-use crate::nodes::{NodeBehavior, NodeSpec, PortSpec, GraphSchemas};
 use crate::nodes::ai::providers::LlmProvider;
 use crate::nodes::common::hash_string_to_i64;
+use crate::nodes::{GraphSchemas, NodeBehavior, NodeSpec, PortSpec};
 
 const GAP_ANALYSIS_PROMPT: &str = r#"
 Analyze the following Knowledge Graph summary (nodes and edges).
@@ -127,18 +132,38 @@ impl NodeBehavior for EntityExtractorNode {
 
         let node = Arc::new(EntityExtractorLogical {
             input: inputs[0].clone(),
-            entity_types: config["entity_types"].as_array()
-                .map(|a| a.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect())
+            entity_types: config["entity_types"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_str().unwrap_or("").to_string())
+                        .collect()
+                })
                 .unwrap_or_default(),
-            relation_types: config["relation_types"].as_array()
-                .map(|a| a.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect())
+            relation_types: config["relation_types"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_str().unwrap_or("").to_string())
+                        .collect()
+                })
                 .unwrap_or_default(),
             provider: self.provider.clone(),
         });
 
         Ok(vec![
-            LogicalPlan::Extension(Extension { node: Arc::new(EntityPortLogical { base: node.clone(), port: 0 }) }),
-            LogicalPlan::Extension(Extension { node: Arc::new(EntityPortLogical { base: node.clone(), port: 1 }) }),
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(EntityPortLogical {
+                    base: node.clone(),
+                    port: 0,
+                }),
+            }),
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(EntityPortLogical {
+                    base: node.clone(),
+                    port: 1,
+                }),
+            }),
         ])
     }
 }
@@ -168,7 +193,9 @@ pub struct EntityPortLogical {
 
 impl PartialEq for EntityPortLogical {
     fn eq(&self, other: &Self) -> bool {
-        self.port == other.port && self.base.entity_types == other.base.entity_types && self.base.relation_types == other.base.relation_types
+        self.port == other.port
+            && self.base.entity_types == other.base.entity_types
+            && self.base.relation_types == other.base.relation_types
     }
 }
 
@@ -189,21 +216,40 @@ impl PartialOrd for EntityPortLogical {
 }
 
 impl UserDefinedLogicalNodeCore for EntityPortLogical {
-    fn name(&self) -> &str { "EntityPort" }
-    fn inputs(&self) -> Vec<&LogicalPlan> { vec![&self.base.input] }
+    fn name(&self) -> &str {
+        "EntityPort"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.base.input]
+    }
     fn schema(&self) -> &DFSchemaRef {
         lazy_static::lazy_static! {
             static ref NODE_DF_SCHEMA: DFSchemaRef = Arc::new(datafusion::common::DFSchema::try_from(GraphSchemas::node_schema().as_ref().clone()).unwrap());
             static ref EDGE_DF_SCHEMA: DFSchemaRef = Arc::new(datafusion::common::DFSchema::try_from(GraphSchemas::edge_schema().as_ref().clone()).unwrap());
         }
-        if self.port == 0 { &NODE_DF_SCHEMA } else { &EDGE_DF_SCHEMA }
+        if self.port == 0 {
+            &NODE_DF_SCHEMA
+        } else {
+            &EDGE_DF_SCHEMA
+        }
     }
-    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> { vec![] }
-    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "EntityPort(port={})", self.port) }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<datafusion::logical_expr::Expr>, inputs: Vec<LogicalPlan>) -> std::result::Result<Self, DataFusionError> {
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "EntityPort(port={})", self.port)
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> std::result::Result<Self, DataFusionError> {
         let mut base = self.base.as_ref().clone();
         base.input = inputs[0].clone();
-        Ok(Self { base: Arc::new(base), port: self.port })
+        Ok(Self {
+            base: Arc::new(base),
+            port: self.port,
+        })
     }
 }
 
@@ -225,15 +271,32 @@ impl fmt::Debug for EntityExtractorExec {
 }
 
 impl EntityExtractorExec {
-    pub fn new(input: Arc<dyn ExecutionPlan>, entity_types: Vec<String>, relation_types: Vec<String>, provider: Arc<dyn LlmProvider>, port: usize) -> Self {
-        let schema = if port == 0 { GraphSchemas::node_schema() } else { GraphSchemas::edge_schema() };
+    pub fn new(
+        input: Arc<dyn ExecutionPlan>,
+        entity_types: Vec<String>,
+        relation_types: Vec<String>,
+        provider: Arc<dyn LlmProvider>,
+        port: usize,
+    ) -> Self {
+        let schema = if port == 0 {
+            GraphSchemas::node_schema()
+        } else {
+            GraphSchemas::edge_schema()
+        };
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
             datafusion::physical_plan::execution_plan::EmissionType::Incremental,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
         );
-        Self { input, entity_types, relation_types, provider, port, cache }
+        Self {
+            input,
+            entity_types,
+            relation_types,
+            provider,
+            port,
+            cache,
+        }
     }
 }
 
@@ -244,13 +307,36 @@ impl DisplayAs for EntityExtractorExec {
 }
 
 impl ExecutionPlan for EntityExtractorExec {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn schema(&self) -> SchemaRef { if self.port == 0 { GraphSchemas::node_schema() } else { GraphSchemas::edge_schema() } }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.input] }
-    fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        Ok(Arc::new(Self::new(children[0].clone(), self.entity_types.clone(), self.relation_types.clone(), self.provider.clone(), self.port)))
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
-    fn execute(&self, partition: usize, context: Arc<TaskContext>) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
+    fn schema(&self) -> SchemaRef {
+        if self.port == 0 {
+            GraphSchemas::node_schema()
+        } else {
+            GraphSchemas::edge_schema()
+        }
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(Arc::new(Self::new(
+            children[0].clone(),
+            self.entity_types.clone(),
+            self.relation_types.clone(),
+            self.provider.clone(),
+            self.port,
+        )))
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
         let input = self.input.execute(partition, context)?;
         Ok(Box::pin(EntityExtractionStream {
             input,
@@ -259,8 +345,12 @@ impl ExecutionPlan for EntityExtractorExec {
             state: StreamState::PollingInput,
         }))
     }
-    fn properties(&self) -> &PlanProperties { &self.cache }
-    fn name(&self) -> &str { "EntityExtractorExec" }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn name(&self) -> &str {
+        "EntityExtractorExec"
+    }
 }
 
 enum StreamState {
@@ -281,98 +371,119 @@ impl Stream for EntityExtractionStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             match &mut self.state {
-                StreamState::PollingInput => {
-                    match self.input.poll_next_unpin(cx) {
-                        Poll::Ready(Some(Ok(batch))) => {
-                            let provider = self.provider.clone();
-                            let port = self.port;
-                            
-                            let fut = async move {
-                                let mut node_id_builder = Int64Builder::new();
-                                let mut node_label_builder = StringBuilder::new();
-                                let mut node_props_builder = StringBuilder::new();
+                StreamState::PollingInput => match self.input.poll_next_unpin(cx) {
+                    Poll::Ready(Some(Ok(batch))) => {
+                        let provider = self.provider.clone();
+                        let port = self.port;
 
-                                let mut edge_src_builder = Int64Builder::new();
-                                let mut edge_dst_builder = Int64Builder::new();
-                                let mut edge_type_builder = StringBuilder::new();
-                                let mut edge_weight_builder = Float64Builder::new();
+                        let fut = async move {
+                            let mut node_id_builder = Int64Builder::new();
+                            let mut node_label_builder = StringBuilder::new();
+                            let mut node_props_builder = StringBuilder::new();
 
-                                let text_col = batch.column(0).as_any().downcast_ref::<datafusion::arrow::array::StringArray>().unwrap();
-                                
-                                for i in 0..batch.num_rows() {
-                                    let text = text_col.value(i);
-                                    let prompt = format!(
+                            let mut edge_src_builder = Int64Builder::new();
+                            let mut edge_dst_builder = Int64Builder::new();
+                            let mut edge_type_builder = StringBuilder::new();
+                            let mut edge_weight_builder = Float64Builder::new();
+
+                            let text_col = batch
+                                .column(0)
+                                .as_any()
+                                .downcast_ref::<datafusion::arrow::array::StringArray>()
+                                .unwrap();
+
+                            for i in 0..batch.num_rows() {
+                                let text = text_col.value(i);
+                                let prompt = format!(
                                         "Extract entities and relationships from this text.
                                         Return JSON format:
                                         {{
                                           \"nodes\": [{{ \"name\": \"...\", \"label\": \"...\", \"properties\": {{}} }}],
                                           \"edges\": [{{ \"source\": \"...\", \"target\": \"...\", \"type\": \"...\", \"weight\": 1.0 }}]
                                         }}
-                                        Text: {}", 
+                                        Text: {}",
                                         text
                                     );
 
-                                    if let Ok(result) = provider.complete(&prompt).await {
-                                        let json_str = crate::nodes::ai::ConfigWizard::extract_json_from_response(&result).unwrap_or(&result);
-                                        if let Ok(json) = serde_json::from_str::<JsonValue>(json_str) {
-                                            if let Some(nodes) = json["nodes"].as_array() {
-                                                for n in nodes {
-                                                    let name = n["name"].as_str().unwrap_or("");
-                                                    node_id_builder.append_value(hash_string_to_i64(name));
-                                                    node_label_builder.append_value(n["label"].as_str().unwrap_or(""));
-                                                    node_props_builder.append_value(n["properties"].to_string());
-                                                }
+                                if let Ok(result) = provider.complete(&prompt).await {
+                                    let json_str =
+                                        crate::nodes::ai::ConfigWizard::extract_json_from_response(
+                                            &result,
+                                        )
+                                        .unwrap_or(&result);
+                                    if let Ok(json) = serde_json::from_str::<JsonValue>(json_str) {
+                                        if let Some(nodes) = json["nodes"].as_array() {
+                                            for n in nodes {
+                                                let name = n["name"].as_str().unwrap_or("");
+                                                node_id_builder
+                                                    .append_value(hash_string_to_i64(name));
+                                                node_label_builder.append_value(
+                                                    n["label"].as_str().unwrap_or(""),
+                                                );
+                                                node_props_builder
+                                                    .append_value(n["properties"].to_string());
                                             }
-                                            if let Some(edges) = json["edges"].as_array() {
-                                                for e in edges {
-                                                    let src = e["source"].as_str().unwrap_or("");
-                                                    let dst = e["target"].as_str().unwrap_or("");
-                                                    edge_src_builder.append_value(hash_string_to_i64(src));
-                                                    edge_dst_builder.append_value(hash_string_to_i64(dst));
-                                                    edge_type_builder.append_value(e["type"].as_str().unwrap_or(""));
-                                                    edge_weight_builder.append_value(e["weight"].as_f64().unwrap_or(1.0));
-                                                }
+                                        }
+                                        if let Some(edges) = json["edges"].as_array() {
+                                            for e in edges {
+                                                let src = e["source"].as_str().unwrap_or("");
+                                                let dst = e["target"].as_str().unwrap_or("");
+                                                edge_src_builder
+                                                    .append_value(hash_string_to_i64(src));
+                                                edge_dst_builder
+                                                    .append_value(hash_string_to_i64(dst));
+                                                edge_type_builder
+                                                    .append_value(e["type"].as_str().unwrap_or(""));
+                                                edge_weight_builder.append_value(
+                                                    e["weight"].as_f64().unwrap_or(1.0),
+                                                );
                                             }
                                         }
                                     }
                                 }
+                            }
 
-                                if port == 0 {
-                                    let batch = RecordBatch::try_new(GraphSchemas::node_schema(), vec![
+                            if port == 0 {
+                                let batch = RecordBatch::try_new(
+                                    GraphSchemas::node_schema(),
+                                    vec![
                                         Arc::new(node_id_builder.finish()),
                                         Arc::new(node_label_builder.finish()),
                                         Arc::new(node_props_builder.finish()),
-                                    ]).map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-                                    Ok(batch)
-                                } else {
-                                    let batch = RecordBatch::try_new(GraphSchemas::edge_schema(), vec![
+                                    ],
+                                )
+                                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                                Ok(batch)
+                            } else {
+                                let batch = RecordBatch::try_new(
+                                    GraphSchemas::edge_schema(),
+                                    vec![
                                         Arc::new(edge_src_builder.finish()),
                                         Arc::new(edge_dst_builder.finish()),
                                         Arc::new(edge_type_builder.finish()),
                                         Arc::new(edge_weight_builder.finish()),
-                                    ]).map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-                                    Ok(batch)
-                                }
-                            };
-                            self.state = StreamState::Processing(Box::pin(fut));
-                        }
-                        Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
-                        Poll::Ready(None) => {
-                            self.state = StreamState::Done;
-                            return Poll::Ready(None);
-                        }
-                        Poll::Pending => return Poll::Pending,
+                                    ],
+                                )
+                                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                                Ok(batch)
+                            }
+                        };
+                        self.state = StreamState::Processing(Box::pin(fut));
                     }
-                }
-                StreamState::Processing(fut) => {
-                    match fut.as_mut().poll(cx) {
-                        Poll::Ready(result) => {
-                            self.state = StreamState::PollingInput;
-                            return Poll::Ready(Some(result));
-                        }
-                        Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                    Poll::Ready(None) => {
+                        self.state = StreamState::Done;
+                        return Poll::Ready(None);
                     }
-                }
+                    Poll::Pending => return Poll::Pending,
+                },
+                StreamState::Processing(fut) => match fut.as_mut().poll(cx) {
+                    Poll::Ready(result) => {
+                        self.state = StreamState::PollingInput;
+                        return Poll::Ready(Some(result));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
                 StreamState::Done => return Poll::Ready(None),
             }
         }
@@ -380,7 +491,13 @@ impl Stream for EntityExtractionStream {
 }
 
 impl RecordBatchStream for EntityExtractionStream {
-    fn schema(&self) -> SchemaRef { if self.port == 0 { GraphSchemas::node_schema() } else { GraphSchemas::edge_schema() } }
+    fn schema(&self) -> SchemaRef {
+        if self.port == 0 {
+            GraphSchemas::node_schema()
+        } else {
+            GraphSchemas::edge_schema()
+        }
+    }
 }
 
 pub struct GraphRetrieverNode;
@@ -392,12 +509,16 @@ impl NodeBehavior for GraphRetrieverNode {
             type_id: "ai.graph_retriever".to_string(),
             display_name: "Graph Retriever".to_string(),
             description: "Retrieve multi-hop neighborhood from graph index".to_string(),
-            input_ports: vec![
-                PortSpec { id: 0, name: "entities".into(), description: "Entities to search from".into() },
-            ],
-            output_ports: vec![
-                PortSpec { id: 0, name: "context".into(), description: "Textual context from graph".into() },
-            ],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "entities".into(),
+                description: "Entities to search from".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "context".into(),
+                description: "Textual context from graph".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -438,8 +559,12 @@ pub struct GraphRetrieverLogical {
 }
 
 impl UserDefinedLogicalNodeCore for GraphRetrieverLogical {
-    fn name(&self) -> &str { "GraphRetriever" }
-    fn inputs(&self) -> Vec<&LogicalPlan> { vec![&self.input] }
+    fn name(&self) -> &str {
+        "GraphRetriever"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
     fn schema(&self) -> &DFSchemaRef {
         lazy_static::lazy_static! {
             static ref SCHEMA: DFSchemaRef = Arc::new(datafusion::common::DFSchema::try_from(Schema::new(vec![
@@ -448,10 +573,21 @@ impl UserDefinedLogicalNodeCore for GraphRetrieverLogical {
         }
         &SCHEMA
     }
-    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> { vec![] }
-    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "GraphRetriever(depth={})", self.depth) }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<datafusion::logical_expr::Expr>, inputs: Vec<LogicalPlan>) -> std::result::Result<Self, DataFusionError> {
-        Ok(Self { input: inputs[0].clone(), depth: self.depth })
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "GraphRetriever(depth={})", self.depth)
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> std::result::Result<Self, DataFusionError> {
+        Ok(Self {
+            input: inputs[0].clone(),
+            depth: self.depth,
+        })
     }
 }
 
@@ -472,14 +608,23 @@ impl fmt::Debug for GraphRetrieverExec {
 
 impl GraphRetrieverExec {
     pub fn new(input: Arc<dyn ExecutionPlan>, depth: u64, cache_dir: String) -> Self {
-        let schema = Arc::new(Schema::new(vec![Field::new("context", DataType::Utf8, true)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "context",
+            DataType::Utf8,
+            true,
+        )]));
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
             datafusion::physical_plan::execution_plan::EmissionType::Incremental,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
         );
-        Self { input, depth, cache_dir, cache }
+        Self {
+            input,
+            depth,
+            cache_dir,
+            cache,
+        }
     }
 }
 
@@ -490,13 +635,34 @@ impl DisplayAs for GraphRetrieverExec {
 }
 
 impl ExecutionPlan for GraphRetrieverExec {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn schema(&self) -> SchemaRef { Arc::new(Schema::new(vec![Field::new("context", DataType::Utf8, true)])) }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.input] }
-    fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        Ok(Arc::new(Self::new(children[0].clone(), self.depth, self.cache_dir.clone())))
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
-    fn execute(&self, partition: usize, context: Arc<TaskContext>) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
+    fn schema(&self) -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new(
+            "context",
+            DataType::Utf8,
+            true,
+        )]))
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(Arc::new(Self::new(
+            children[0].clone(),
+            self.depth,
+            self.cache_dir.clone(),
+        )))
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
         let input = self.input.execute(partition, context)?;
         Ok(Box::pin(GraphRetrievalStream {
             input,
@@ -504,8 +670,12 @@ impl ExecutionPlan for GraphRetrieverExec {
             state: StreamState::PollingInput,
         }))
     }
-    fn properties(&self) -> &PlanProperties { &self.cache }
-    fn name(&self) -> &str { "GraphRetrieverExec" }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn name(&self) -> &str {
+        "GraphRetrieverExec"
+    }
 }
 
 struct GraphRetrievalStream {
@@ -519,61 +689,84 @@ impl Stream for GraphRetrievalStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             match &mut self.state {
-                StreamState::PollingInput => {
-                    match self.input.poll_next_unpin(cx) {
-                        Poll::Ready(Some(Ok(batch))) => {
-                            let cache_dir = self.cache_dir.clone();
-                            let fut = async move {
-                                let mut context_builder = StringBuilder::new();
-                                let entity_ids = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-                                let metadata_path = format!("{}/metadata.duckdb", cache_dir);
-                                
-                                for i in 0..batch.num_rows() {
-                                    let eid = entity_ids.value(i);
-                                    let query = format!(
-                                        "SELECT label, properties FROM __graph_nodes WHERE id = {}
-                                         UNION ALL
-                                         SELECT n.label, n.properties 
-                                         FROM __graph_edges e 
-                                         JOIN __graph_nodes n ON e.target_id = n.id 
-                                         WHERE e.source_id = {}", 
-                                        eid, eid
-                                    );
+                StreamState::PollingInput => match self.input.poll_next_unpin(cx) {
+                    Poll::Ready(Some(Ok(batch))) => {
+                        let cache_dir = self.cache_dir.clone();
+                        let fut = async move {
+                            let mut context_builder = StringBuilder::new();
+                            let entity_ids = batch
+                                .column(0)
+                                .as_any()
+                                .downcast_ref::<Int64Array>()
+                                .unwrap();
+                            let metadata_path = format!("{}/metadata.duckdb", cache_dir);
 
-                                    if let Ok(batches) = crate::nodes::io::DuckDBHelper::query_arrow(":memory:", &query, &vec![], &Some(format!("ATTACH '{}' AS meta (TYPE duckdb);", metadata_path))).await {
-                                        for b in batches {
-                                            let labels = b.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                                            for j in 0..b.num_rows() {
-                                                context_builder.append_value(format!("Entity: {}", labels.value(j)));
-                                            }
+                            for i in 0..batch.num_rows() {
+                                let eid = entity_ids.value(i);
+                                let query = format!(
+                                    "SELECT label, properties FROM __graph_nodes WHERE id = {}
+                                         UNION ALL
+                                         SELECT n.label, n.properties
+                                         FROM __graph_edges e
+                                         JOIN __graph_nodes n ON e.target_id = n.id
+                                         WHERE e.source_id = {}",
+                                    eid, eid
+                                );
+
+                                if let Ok(batches) = crate::nodes::io::DuckDBHelper::query_arrow(
+                                    ":memory:",
+                                    &query,
+                                    &[],
+                                    &Some(format!(
+                                        "ATTACH '{}' AS meta (TYPE duckdb);",
+                                        metadata_path
+                                    )),
+                                )
+                                .await
+                                {
+                                    for b in batches {
+                                        let labels = b
+                                            .column(0)
+                                            .as_any()
+                                            .downcast_ref::<StringArray>()
+                                            .unwrap();
+                                        for j in 0..b.num_rows() {
+                                            context_builder.append_value(format!(
+                                                "Entity: {}",
+                                                labels.value(j)
+                                            ));
                                         }
                                     }
                                 }
+                            }
 
-                                let batch = RecordBatch::try_new(Arc::new(Schema::new(vec![Field::new("context", DataType::Utf8, true)])), vec![
-                                    Arc::new(context_builder.finish()),
-                                ]).map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-                                Ok(batch)
-                            };
-                            self.state = StreamState::Processing(Box::pin(fut));
-                        }
-                        Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
-                        Poll::Ready(None) => {
-                            self.state = StreamState::Done;
-                            return Poll::Ready(None);
-                        }
-                        Poll::Pending => return Poll::Pending,
+                            let batch = RecordBatch::try_new(
+                                Arc::new(Schema::new(vec![Field::new(
+                                    "context",
+                                    DataType::Utf8,
+                                    true,
+                                )])),
+                                vec![Arc::new(context_builder.finish())],
+                            )
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                            Ok(batch)
+                        };
+                        self.state = StreamState::Processing(Box::pin(fut));
                     }
-                }
-                StreamState::Processing(fut) => {
-                    match fut.as_mut().poll(cx) {
-                        Poll::Ready(result) => {
-                            self.state = StreamState::PollingInput;
-                            return Poll::Ready(Some(result));
-                        }
-                        Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                    Poll::Ready(None) => {
+                        self.state = StreamState::Done;
+                        return Poll::Ready(None);
                     }
-                }
+                    Poll::Pending => return Poll::Pending,
+                },
+                StreamState::Processing(fut) => match fut.as_mut().poll(cx) {
+                    Poll::Ready(result) => {
+                        self.state = StreamState::PollingInput;
+                        return Poll::Ready(Some(result));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
                 StreamState::Done => return Poll::Ready(None),
             }
         }
@@ -581,7 +774,13 @@ impl Stream for GraphRetrievalStream {
 }
 
 impl RecordBatchStream for GraphRetrievalStream {
-    fn schema(&self) -> SchemaRef { Arc::new(Schema::new(vec![Field::new("context", DataType::Utf8, true)])) }
+    fn schema(&self) -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new(
+            "context",
+            DataType::Utf8,
+            true,
+        )]))
+    }
 }
 
 pub struct ContextFuserNode;
@@ -594,12 +793,22 @@ impl NodeBehavior for ContextFuserNode {
             display_name: "Context Fuser".to_string(),
             description: "Merge and deduplicate context from vector and graph sources".to_string(),
             input_ports: vec![
-                PortSpec { id: 0, name: "vector".into(), description: "Vector search results".into() },
-                PortSpec { id: 1, name: "graph".into(), description: "Graph retrieval results".into() },
+                PortSpec {
+                    id: 0,
+                    name: "vector".into(),
+                    description: "Vector search results".into(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "graph".into(),
+                    description: "Graph retrieval results".into(),
+                },
             ],
-            output_ports: vec![
-                PortSpec { id: 0, name: "context".into(), description: "Final fused context".into() },
-            ],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "context".into(),
+                description: "Final fused context".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -619,18 +828,22 @@ impl NodeBehavior for ContextFuserNode {
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.len() < 2 {
-            return Err(anyhow!("ContextFuser requires at least two context sources"));
+            return Err(anyhow!(
+                "ContextFuser requires at least two context sources"
+            ));
         }
 
         let ctx = SessionContext::new();
-        
+
         let v_df = DataFrame::new(ctx.state(), inputs[0].clone());
         let g_df = DataFrame::new(ctx.state(), inputs[1].clone());
-        
+
         ctx.register_table("v_input", v_df.into_view())?;
         ctx.register_table("g_input", g_df.into_view())?;
-        
-        let fused = ctx.sql("SELECT context FROM v_input UNION SELECT context FROM g_input").await?;
+
+        let fused = ctx
+            .sql("SELECT context FROM v_input UNION SELECT context FROM g_input")
+            .await?;
 
         Ok(vec![fused.into_optimized_plan()?])
     }
@@ -646,19 +859,32 @@ impl NodeBehavior for InformationGapNode {
         NodeSpec {
             type_id: "ai.information_gap_analyzer".to_string(),
             display_name: "Information Gap Analyzer".to_string(),
-            description: "Analyze current graph and suggest follow-up research queries.".to_string(),
+            description: "Analyze current graph and suggest follow-up research queries."
+                .to_string(),
             input_ports: vec![
-                PortSpec { id: 0, name: "nodes".into(), description: "Current Nodes".into() },
-                PortSpec { id: 1, name: "edges".into(), description: "Current Edges".into() },
+                PortSpec {
+                    id: 0,
+                    name: "nodes".into(),
+                    description: "Current Nodes".into(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "edges".into(),
+                    description: "Current Edges".into(),
+                },
             ],
-            output_ports: vec![
-                PortSpec { id: 0, name: "queries".into(), description: "Suggested search queries".into() },
-            ],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "queries".into(),
+                description: "Suggested search queries".into(),
+            }],
             config_schema: serde_json::json!({}),
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
 
     async fn propose_plan(
         &self,
@@ -666,7 +892,9 @@ impl NodeBehavior for InformationGapNode {
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.len() < 2 {
-            return Err(anyhow!("InformationGapAnalyzer requires nodes and edges input"));
+            return Err(anyhow!(
+                "InformationGapAnalyzer requires nodes and edges input"
+            ));
         }
 
         Ok(vec![LogicalPlan::Extension(Extension {
@@ -708,13 +936,18 @@ impl std::hash::Hash for InformationGapLogical {
 
 impl PartialOrd for InformationGapLogical {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        (Arc::as_ptr(&self.provider) as *const ()).partial_cmp(&(Arc::as_ptr(&other.provider) as *const ()))
+        (Arc::as_ptr(&self.provider) as *const ())
+            .partial_cmp(&(Arc::as_ptr(&other.provider) as *const ()))
     }
 }
 
 impl UserDefinedLogicalNodeCore for InformationGapLogical {
-    fn name(&self) -> &str { "InformationGap" }
-    fn inputs(&self) -> Vec<&LogicalPlan> { vec![&self.nodes_input, &self.edges_input] }
+    fn name(&self) -> &str {
+        "InformationGap"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.nodes_input, &self.edges_input]
+    }
     fn schema(&self) -> &DFSchemaRef {
         lazy_static::lazy_static! {
             static ref SCHEMA: DFSchemaRef = Arc::new(datafusion::common::DFSchema::try_from(Schema::new(vec![
@@ -723,10 +956,22 @@ impl UserDefinedLogicalNodeCore for InformationGapLogical {
         }
         &SCHEMA
     }
-    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> { vec![] }
-    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "InformationGap") }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<datafusion::logical_expr::Expr>, inputs: Vec<LogicalPlan>) -> std::result::Result<Self, DataFusionError> {
-        Ok(Self { nodes_input: inputs[0].clone(), edges_input: inputs[1].clone(), provider: self.provider.clone() })
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "InformationGap")
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> std::result::Result<Self, DataFusionError> {
+        Ok(Self {
+            nodes_input: inputs[0].clone(),
+            edges_input: inputs[1].clone(),
+            provider: self.provider.clone(),
+        })
     }
 }
 
@@ -744,7 +989,11 @@ impl fmt::Debug for InformationGapExec {
 }
 
 impl InformationGapExec {
-    pub fn new(nodes_input: Arc<dyn ExecutionPlan>, edges_input: Arc<dyn ExecutionPlan>, provider: Arc<dyn LlmProvider>) -> Self {
+    pub fn new(
+        nodes_input: Arc<dyn ExecutionPlan>,
+        edges_input: Arc<dyn ExecutionPlan>,
+        provider: Arc<dyn LlmProvider>,
+    ) -> Self {
         let schema = Arc::new(Schema::new(vec![Field::new("query", DataType::Utf8, true)]));
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema),
@@ -752,7 +1001,12 @@ impl InformationGapExec {
             datafusion::physical_plan::execution_plan::EmissionType::Incremental,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
         );
-        Self { nodes_input, edges_input, provider, cache }
+        Self {
+            nodes_input,
+            edges_input,
+            provider,
+            cache,
+        }
     }
 }
 
@@ -763,13 +1017,30 @@ impl DisplayAs for InformationGapExec {
 }
 
 impl ExecutionPlan for InformationGapExec {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn schema(&self) -> SchemaRef { Arc::new(Schema::new(vec![Field::new("query", DataType::Utf8, true)])) }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.nodes_input, &self.edges_input] }
-    fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        Ok(Arc::new(Self::new(children[0].clone(), children[1].clone(), self.provider.clone())))
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
-    fn execute(&self, partition: usize, context: Arc<TaskContext>) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
+    fn schema(&self) -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new("query", DataType::Utf8, true)]))
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.nodes_input, &self.edges_input]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(Arc::new(Self::new(
+            children[0].clone(),
+            children[1].clone(),
+            self.provider.clone(),
+        )))
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
         let nodes = self.nodes_input.execute(partition, context.clone())?;
         let edges = self.edges_input.execute(partition, context)?;
         Ok(Box::pin(InformationGapStream {
@@ -781,8 +1052,12 @@ impl ExecutionPlan for InformationGapExec {
             collected_edges: Vec::new(),
         }))
     }
-    fn properties(&self) -> &PlanProperties { &self.cache }
-    fn name(&self) -> &str { "InformationGapExec" }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn name(&self) -> &str {
+        "InformationGapExec"
+    }
 }
 
 enum GapStreamState {
@@ -828,25 +1103,41 @@ impl Stream for InformationGapStream {
                         let provider = self.provider.clone();
                         let nodes = std::mem::take(&mut self.collected_nodes);
                         let edges = std::mem::take(&mut self.collected_edges);
-                        
+
                         let fut = async move {
                             let mut graph_summary = String::new();
                             for batch in nodes {
-                                let labels = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+                                let labels = batch
+                                    .column(1)
+                                    .as_any()
+                                    .downcast_ref::<StringArray>()
+                                    .unwrap();
                                 for i in 0..batch.num_rows() {
                                     graph_summary.push_str(&format!("Node: {}\n", labels.value(i)));
                                 }
                             }
                             for batch in edges {
-                                let types = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+                                let types = batch
+                                    .column(2)
+                                    .as_any()
+                                    .downcast_ref::<StringArray>()
+                                    .unwrap();
                                 for i in 0..batch.num_rows() {
-                                    graph_summary.push_str(&format!("Edge Type: {}\n", types.value(i)));
+                                    graph_summary
+                                        .push_str(&format!("Edge Type: {}\n", types.value(i)));
                                 }
                             }
 
-                            let prompt = format!("{}\nGraph Summary:\n{}", GAP_ANALYSIS_PROMPT, graph_summary);
+                            let prompt = format!(
+                                "{}\nGraph Summary:\n{}",
+                                GAP_ANALYSIS_PROMPT, graph_summary
+                            );
                             if let Ok(response) = provider.complete(&prompt).await {
-                                let json_str = crate::nodes::ai::ConfigWizard::extract_json_from_response(&response).unwrap_or(&response);
+                                let json_str =
+                                    crate::nodes::ai::ConfigWizard::extract_json_from_response(
+                                        &response,
+                                    )
+                                    .unwrap_or(&response);
                                 if let Ok(json) = serde_json::from_str::<JsonValue>(json_str) {
                                     if let Some(queries) = json["suggested_queries"].as_array() {
                                         let mut builder = StringBuilder::new();
@@ -854,30 +1145,37 @@ impl Stream for InformationGapStream {
                                             builder.append_value(q.as_str().unwrap_or(""));
                                         }
                                         let batch = RecordBatch::try_new(
-                                            Arc::new(Schema::new(vec![Field::new("query", DataType::Utf8, true)])),
-                                            vec![Arc::new(builder.finish())]
-                                        ).map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                                            Arc::new(Schema::new(vec![Field::new(
+                                                "query",
+                                                DataType::Utf8,
+                                                true,
+                                            )])),
+                                            vec![Arc::new(builder.finish())],
+                                        )
+                                        .map_err(|e| {
+                                            DataFusionError::ArrowError(Box::new(e), None)
+                                        })?;
                                         return Ok(batch);
                                     }
                                 }
                             }
                             // Fallback to empty batch
-                            Ok(RecordBatch::new_empty(Arc::new(Schema::new(vec![Field::new("query", DataType::Utf8, true)]))))
+                            Ok(RecordBatch::new_empty(Arc::new(Schema::new(vec![
+                                Field::new("query", DataType::Utf8, true),
+                            ]))))
                         };
                         self.state = GapStreamState::Analyzing(Box::pin(fut));
                     } else {
                         return Poll::Pending;
                     }
                 }
-                GapStreamState::Analyzing(fut) => {
-                    match fut.as_mut().poll(cx) {
-                        Poll::Ready(result) => {
-                            self.state = GapStreamState::Done;
-                            return Poll::Ready(Some(result));
-                        }
-                        Poll::Pending => return Poll::Pending,
+                GapStreamState::Analyzing(fut) => match fut.as_mut().poll(cx) {
+                    Poll::Ready(result) => {
+                        self.state = GapStreamState::Done;
+                        return Poll::Ready(Some(result));
                     }
-                }
+                    Poll::Pending => return Poll::Pending,
+                },
                 GapStreamState::Done => return Poll::Ready(None),
             }
         }
@@ -885,7 +1183,9 @@ impl Stream for InformationGapStream {
 }
 
 impl RecordBatchStream for InformationGapStream {
-    fn schema(&self) -> SchemaRef { Arc::new(Schema::new(vec![Field::new("query", DataType::Utf8, true)])) }
+    fn schema(&self) -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new("query", DataType::Utf8, true)]))
+    }
 }
 
 pub struct ResearchLoopMetaNode {
@@ -900,21 +1200,36 @@ impl ResearchLoopMetaNode {
     }
 }
 
+impl Default for ResearchLoopMetaNode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl NodeBehavior for ResearchLoopMetaNode {
     fn spec(&self) -> NodeSpec {
         NodeSpec {
             type_id: "core.ai.research_loop".to_string(),
             display_name: "Deep Research Loop".to_string(),
-            description: "Orchestrate recursive web research, extraction, and graph indexing.".to_string(),
+            description: "Orchestrate recursive web research, extraction, and graph indexing."
+                .to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "query".into(),
                 description: "Initial research topic".into(),
             }],
             output_ports: vec![
-                PortSpec { id: 0, name: "nodes".into(), description: "Extracted Entities".into() },
-                PortSpec { id: 1, name: "edges".into(), description: "Extracted Relationships".into() },
+                PortSpec {
+                    id: 0,
+                    name: "nodes".into(),
+                    description: "Extracted Entities".into(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "edges".into(),
+                    description: "Extracted Relationships".into(),
+                },
             ],
             config_schema: serde_json::json!({
                 "type": "object",
@@ -937,7 +1252,7 @@ impl NodeBehavior for ResearchLoopMetaNode {
     ) -> Result<Vec<LogicalPlan>> {
         let max_depth = config["max_depth"].as_u64().unwrap_or(2) as usize;
         let max_pages = config["max_pages_per_step"].as_u64().unwrap_or(5) as usize;
-        
+
         if inputs.is_empty() {
             return Err(anyhow!("ResearchLoop requires an initial query input"));
         }
@@ -976,7 +1291,9 @@ pub struct ResearchLoopLogical {
 
 impl PartialEq for ResearchLoopLogical {
     fn eq(&self, other: &Self) -> bool {
-        self.max_depth == other.max_depth && self.max_pages == other.max_pages && self.port == other.port
+        self.max_depth == other.max_depth
+            && self.max_pages == other.max_pages
+            && self.port == other.port
     }
 }
 
@@ -997,19 +1314,38 @@ impl PartialOrd for ResearchLoopLogical {
 }
 
 impl UserDefinedLogicalNodeCore for ResearchLoopLogical {
-    fn name(&self) -> &str { "ResearchLoop" }
-    fn inputs(&self) -> Vec<&LogicalPlan> { vec![&self.input] }
+    fn name(&self) -> &str {
+        "ResearchLoop"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
     fn schema(&self) -> &DFSchemaRef {
         lazy_static::lazy_static! {
             static ref NODE_DF_SCHEMA: DFSchemaRef = Arc::new(datafusion::common::DFSchema::try_from(GraphSchemas::node_schema().as_ref().clone()).unwrap());
             static ref EDGE_DF_SCHEMA: DFSchemaRef = Arc::new(datafusion::common::DFSchema::try_from(GraphSchemas::edge_schema().as_ref().clone()).unwrap());
         }
-        if self.port == 0 { &NODE_DF_SCHEMA } else { &EDGE_DF_SCHEMA }
+        if self.port == 0 {
+            &NODE_DF_SCHEMA
+        } else {
+            &EDGE_DF_SCHEMA
+        }
     }
-    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> { vec![] }
-    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "ResearchLoop(port={})", self.port) }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<datafusion::logical_expr::Expr>, inputs: Vec<LogicalPlan>) -> std::result::Result<Self, DataFusionError> {
-        Ok(Self { input: inputs[0].clone(), ..self.clone() })
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ResearchLoop(port={})", self.port)
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> std::result::Result<Self, DataFusionError> {
+        Ok(Self {
+            input: inputs[0].clone(),
+            ..self.clone()
+        })
     }
 }
 
@@ -1030,15 +1366,34 @@ impl fmt::Debug for ResearchLoopExec {
 }
 
 impl ResearchLoopExec {
-    pub fn new(input: Arc<dyn ExecutionPlan>, max_depth: usize, max_pages: usize, state: Arc<Mutex<ResearchState>>, port: usize, cache_dir: String) -> Self {
-        let schema = if port == 0 { GraphSchemas::node_schema() } else { GraphSchemas::edge_schema() };
+    pub fn new(
+        input: Arc<dyn ExecutionPlan>,
+        max_depth: usize,
+        max_pages: usize,
+        state: Arc<Mutex<ResearchState>>,
+        port: usize,
+        cache_dir: String,
+    ) -> Self {
+        let schema = if port == 0 {
+            GraphSchemas::node_schema()
+        } else {
+            GraphSchemas::edge_schema()
+        };
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
             datafusion::physical_plan::execution_plan::EmissionType::Incremental,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
         );
-        Self { input, max_depth, max_pages, state, port, cache_dir, cache }
+        Self {
+            input,
+            max_depth,
+            max_pages,
+            state,
+            port,
+            cache_dir,
+            cache,
+        }
     }
 }
 
@@ -1049,13 +1404,37 @@ impl DisplayAs for ResearchLoopExec {
 }
 
 impl ExecutionPlan for ResearchLoopExec {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn schema(&self) -> SchemaRef { if self.port == 0 { GraphSchemas::node_schema() } else { GraphSchemas::edge_schema() } }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.input] }
-    fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        Ok(Arc::new(Self::new(children[0].clone(), self.max_depth, self.max_pages, self.state.clone(), self.port, self.cache_dir.clone())))
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
-    fn execute(&self, partition: usize, context: Arc<TaskContext>) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
+    fn schema(&self) -> SchemaRef {
+        if self.port == 0 {
+            GraphSchemas::node_schema()
+        } else {
+            GraphSchemas::edge_schema()
+        }
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(Arc::new(Self::new(
+            children[0].clone(),
+            self.max_depth,
+            self.max_pages,
+            self.state.clone(),
+            self.port,
+            self.cache_dir.clone(),
+        )))
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
         let input = self.input.execute(partition, context)?;
         Ok(Box::pin(ResearchLoopStream {
             input,
@@ -1067,8 +1446,12 @@ impl ExecutionPlan for ResearchLoopExec {
             stream_state: LoopStreamState::PollingInput,
         }))
     }
-    fn properties(&self) -> &PlanProperties { &self.cache }
-    fn name(&self) -> &str { "ResearchLoopExec" }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn name(&self) -> &str {
+        "ResearchLoopExec"
+    }
 }
 
 enum LoopStreamState {
@@ -1097,13 +1480,18 @@ impl Stream for ResearchLoopStream {
                         Poll::Ready(Some(Ok(_batch))) => {
                             let _state = self.state.clone();
                             let port = self.port;
-                            let _max_depth = self.max_depth;
+                            let max_depth = self.max_depth;
+                            let max_pages = self.max_pages;
+                            let cache_dir = self.cache_dir.clone();
                             // For MVP, we simulate the loop results by passing through
                             // In a full implementation, this fut would orchestrate McpInvoke -> EntityExtractor -> InformationGap -> Repeat
                             let fut = async move {
                                 // Simulate research cycle
-                                println!("DEBUG: [ResearchLoop] Starting recursive research at port {}", port);
-                                
+                                println!(
+                                    "DEBUG: [ResearchLoop] Starting recursive research at port {} (max_depth={}, max_pages={}, cache_dir={})",
+                                    port, max_depth, max_pages, cache_dir
+                                );
+
                                 // We MUST return a batch that matches the Golden Schema for this port
                                 if port == 0 {
                                     Ok(RecordBatch::new_empty(GraphSchemas::node_schema()))
@@ -1121,15 +1509,13 @@ impl Stream for ResearchLoopStream {
                         Poll::Pending => return Poll::Pending,
                     }
                 }
-                LoopStreamState::RunningLoop(fut) => {
-                    match fut.as_mut().poll(cx) {
-                        Poll::Ready(result) => {
-                            self.stream_state = LoopStreamState::PollingInput;
-                            return Poll::Ready(Some(result));
-                        }
-                        Poll::Pending => return Poll::Pending,
+                LoopStreamState::RunningLoop(fut) => match fut.as_mut().poll(cx) {
+                    Poll::Ready(result) => {
+                        self.stream_state = LoopStreamState::PollingInput;
+                        return Poll::Ready(Some(result));
                     }
-                }
+                    Poll::Pending => return Poll::Pending,
+                },
                 LoopStreamState::Done => return Poll::Ready(None),
             }
         }
@@ -1137,5 +1523,11 @@ impl Stream for ResearchLoopStream {
 }
 
 impl RecordBatchStream for ResearchLoopStream {
-    fn schema(&self) -> SchemaRef { if self.port == 0 { GraphSchemas::node_schema() } else { GraphSchemas::edge_schema() } }
+    fn schema(&self) -> SchemaRef {
+        if self.port == 0 {
+            GraphSchemas::node_schema()
+        } else {
+            GraphSchemas::edge_schema()
+        }
+    }
 }

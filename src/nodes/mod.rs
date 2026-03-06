@@ -1,14 +1,14 @@
 use anyhow::{anyhow, Result};
-use datafusion::arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
 use datafusion::logical_expr::LogicalPlan;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use serde_json::json;
-use uuid::Uuid;
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use serde_json::Value as JsonValue;
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub mod ai;
 pub mod boundary;
@@ -53,10 +53,23 @@ pub enum NodeState {
 /// Event emitted by a node during its lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeEvent {
-    StateChanged { node_id: Uuid, state: NodeState },
-    Materialized { node_id: Uuid, table_name: String, parquet_path: String },
-    Progress { node_id: Uuid, percentage: f32 },
-    Error { node_id: Uuid, message: String },
+    StateChanged {
+        node_id: Uuid,
+        state: NodeState,
+    },
+    Materialized {
+        node_id: Uuid,
+        table_name: String,
+        parquet_path: String,
+    },
+    Progress {
+        node_id: Uuid,
+        percentage: f32,
+    },
+    Error {
+        node_id: Uuid,
+        message: String,
+    },
 }
 
 /// Error classes used for deterministic routing and policy decisions.

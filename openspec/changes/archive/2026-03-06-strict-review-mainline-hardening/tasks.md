@@ -25,10 +25,10 @@
 
 - [x] 5.1 Group P1/P2 findings by subsystem and add regression coverage.
 - [x] 5.2 Implement minimal subsystem fixes and run verification gates.
-- [ ] 5.3 Commit and push each verified subsystem batch to `origin/main`.
+- [x] 5.3 Commit and push each verified subsystem batch to `origin/main`.
 
 ## 6. Final Verification and Closure
 
-- [ ] 6.1 Rerun full strict-audit baseline and ensure all required gates pass.
-- [ ] 6.2 Publish strict-audit closure report with fixed items and residual risks.
-- [ ] 6.3 Complete OpenSpec status checks and archive the finished change.
+- [x] 6.1 Rerun full strict-audit baseline and ensure all required gates pass.
+- [x] 6.2 Publish strict-audit closure report with fixed items and residual risks.
+- [x] 6.3 Complete OpenSpec status checks and archive the finished change.

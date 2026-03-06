@@ -1,6 +1,5 @@
 use rustflow::nodes::registry::NodeRegistry;
 use serde_json::json;
-use std::sync::Arc;
 
 #[test]
 fn test_duckdb_read_node_validation() {

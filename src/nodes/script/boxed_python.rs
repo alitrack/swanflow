@@ -1,21 +1,24 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore, Extension};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
+use datafusion::logical_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use serde_json::Value as JsonValue;
-use std::sync::Arc;
 use std::any::Any;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::nodes::config as cfg;
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
-use datafusion::physical_plan::{ExecutionPlan, DisplayAs, DisplayFormatType, Partitioning, PlanProperties, SendableRecordBatchStream, RecordBatchStream};
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::execution::TaskContext;
 use datafusion::arrow::record_batch::RecordBatch;
-use futures::{Stream, Future, StreamExt};
+use datafusion::execution::TaskContext;
+use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream,
+};
+use futures::{Future, Stream, StreamExt};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -35,15 +38,30 @@ impl PartialOrd for BoxedPythonLogical {
 }
 
 impl UserDefinedLogicalNodeCore for BoxedPythonLogical {
-    fn name(&self) -> &str { "BoxedPython" }
-    fn inputs(&self) -> Vec<&LogicalPlan> { vec![&self.input] }
-    fn schema(&self) -> &DFSchemaRef { &self.schema }
-    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> { vec![] }
+    fn name(&self) -> &str {
+        "BoxedPython"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        &self.schema
+    }
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "BoxedPython: image={}", self.image)
     }
-    fn with_exprs_and_inputs(&self, _exprs: Vec<datafusion::logical_expr::Expr>, inputs: Vec<LogicalPlan>) -> Result<Self, DataFusionError> {
-        Ok(Self { input: inputs[0].clone(), ..self.clone() })
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> Result<Self, DataFusionError> {
+        Ok(Self {
+            input: inputs[0].clone(),
+            ..self.clone()
+        })
     }
 }
 
@@ -71,7 +89,14 @@ impl BoxedPythonExec {
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
-        Self { input, code, image, s3_bucket, schema, cache }
+        Self {
+            input,
+            code,
+            image,
+            s3_bucket,
+            schema,
+            cache,
+        }
     }
 }
 
@@ -82,16 +107,39 @@ impl DisplayAs for BoxedPythonExec {
 }
 
 impl ExecutionPlan for BoxedPythonExec {
-    fn name(&self) -> &str { "BoxedPythonExec" }
-    fn as_any(&self) -> &dyn Any { self }
-    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef { self.schema.clone() }
-    fn properties(&self) -> &PlanProperties { &self.cache }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> { vec![&self.input] }
-    fn with_new_children(self: Arc<Self>, children: Vec<Arc<dyn ExecutionPlan>>) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        Ok(Arc::new(Self::new(children[0].clone(), self.code.clone(), self.image.clone(), self.s3_bucket.clone(), self.schema.clone())))
+    fn name(&self) -> &str {
+        "BoxedPythonExec"
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef {
+        self.schema.clone()
+    }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(Arc::new(Self::new(
+            children[0].clone(),
+            self.code.clone(),
+            self.image.clone(),
+            self.s3_bucket.clone(),
+            self.schema.clone(),
+        )))
     }
 
-    fn execute(&self, partition: usize, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream, DataFusionError> {
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream, DataFusionError> {
         let input = self.input.execute(partition, context.clone())?;
         Ok(Box::pin(BoxedPythonStream {
             input,
@@ -111,41 +159,53 @@ pub struct BoxedPythonStream {
     image: String,
     s3_bucket: String,
     schema: datafusion::arrow::datatypes::SchemaRef,
-    fut: Option<Pin<Box<dyn Future<Output = Result<RecordBatch, anyhow::Error>> + Send>>>,
+    fut: Option<BoxedPythonFuture>,
     done: bool,
 }
+
+type BoxedPythonFuture = Pin<Box<dyn Future<Output = Result<RecordBatch, anyhow::Error>> + Send>>;
 
 impl Stream for BoxedPythonStream {
     type Item = Result<RecordBatch, DataFusionError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.done { return Poll::Ready(None); }
+        if self.done {
+            return Poll::Ready(None);
+        }
 
         if self.fut.is_none() {
             let _code = self.code.clone();
+            let image = self.image.clone();
             let bucket = self.s3_bucket.clone();
             let schema = self.schema.clone();
             let empty_schema = self.schema.clone();
             let mut input_stream = std::mem::replace(
                 &mut self.input,
-                Box::pin(datafusion::physical_plan::stream::EmptyRecordBatchStream::new(
-                    empty_schema,
-                )),
+                Box::pin(
+                    datafusion::physical_plan::stream::EmptyRecordBatchStream::new(empty_schema),
+                ),
             );
-            
+
             let fut = async move {
                 // 1. Collect input batches
                 let mut batches = Vec::new();
                 while let Some(batch) = input_stream.next().await {
                     batches.push(batch?);
                 }
-                
+
                 // 2. Upload to S3 (Simplified for MVP demo)
-                println!("DEBUG: [BoxedPython] Uploading {} batches to S3 bucket: {}", batches.len(), bucket);
-                
+                println!(
+                    "DEBUG: [BoxedPython] Uploading {} batches to S3 bucket: {}",
+                    batches.len(),
+                    bucket
+                );
+
                 // 3. Call Sidecar MCP (Placeholder for actual MCP invocation)
-                println!("DEBUG: [BoxedPython] Calling BoxLite MCP with image: {}", "python:3.11-slim");
-                
+                println!(
+                    "DEBUG: [BoxedPython] Calling BoxLite MCP with image: {}",
+                    image
+                );
+
                 // 4. Return results (Simulate results for now)
                 Ok(RecordBatch::new_empty(schema))
             };
@@ -157,18 +217,23 @@ impl Stream for BoxedPythonStream {
             Poll::Pending => return Poll::Pending,
         };
 
-        self.fut = None; 
+        self.fut = None;
         self.done = true;
 
         match res {
             Ok(batch) => Poll::Ready(Some(Ok(batch))),
-            Err(e) => Poll::Ready(Some(Err(DataFusionError::Execution(format!("Boxed execution failed: {}", e))))),
+            Err(e) => Poll::Ready(Some(Err(DataFusionError::Execution(format!(
+                "Boxed execution failed: {}",
+                e
+            ))))),
         }
     }
 }
 
 impl RecordBatchStream for BoxedPythonStream {
-    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef { self.schema.clone() }
+    fn schema(&self) -> datafusion::arrow::datatypes::SchemaRef {
+        self.schema.clone()
+    }
 }
 
 pub struct BoxedPythonNode;
@@ -214,10 +279,10 @@ impl NodeBehavior for BoxedPythonNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let code = cfg::required_string(config, "code")?;
-        let image = cfg::optional_string(config, "image")
-            .unwrap_or_else(|| "python:3.11-slim".to_string());
+        let image =
+            cfg::optional_string(config, "image").unwrap_or_else(|| "python:3.11-slim".to_string());
         let s3_bucket = cfg::required_string(config, "s3_bucket")?;
-        
+
         let schema = Arc::new(DFSchema::try_from(inputs[0].schema().as_arrow().clone())?);
 
         Ok(vec![LogicalPlan::Extension(Extension {

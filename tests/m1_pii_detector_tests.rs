@@ -24,7 +24,10 @@ fn test_pii_detector_filters_by_category() {
     let input = "Email bob@example.com and phone 415-555-9988";
 
     let result = node
-        .detect_pii(input, &json!({ "categories": ["email"], "min_confidence": 0.0 }))
+        .detect_pii(
+            input,
+            &json!({ "categories": ["email"], "min_confidence": 0.0 }),
+        )
         .expect("PII detection should succeed");
 
     assert_eq!(result.matches.len(), 1);

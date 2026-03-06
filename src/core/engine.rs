@@ -1,30 +1,32 @@
-use std::sync::Arc;
-use std::collections::HashMap;
-use tokio::sync::mpsc::{self, UnboundedSender};
-use datafusion::prelude::*;
+use async_trait::async_trait;
+use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::Result;
+use datafusion::execution::context::{QueryPlanner, SessionState};
+use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner, DefaultPhysicalPlanner};
-use datafusion::execution::context::{SessionState, QueryPlanner};
-use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
-use async_trait::async_trait;
-use uuid::Uuid;
+use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
+use datafusion::prelude::*;
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::mpsc::{self, UnboundedSender};
+use uuid::Uuid;
 
-use crate::core::graph::Workflow;
 use crate::core::compiler::WorkflowCompiler;
-use crate::core::observer::{StateProbeLogical, StateProbeExec, MaterializerLogical, MaterializerExec};
 use crate::core::datasource::{
-    ExcelScanLogical, ExcelScanExec, ExcelSinkLogical, ExcelSinkExec, 
-    ExcelTemplateSinkLogical, ExcelTemplateExec, ExcelReportSinkLogical, ExcelReportExec,
-    DuckDBScanLogical, DuckDBScanExec, SqlxScanLogical, SqlxScanExec,
+    DuckDBScanExec, DuckDBScanLogical, ExcelReportExec, ExcelReportSinkLogical, ExcelScanExec,
+    ExcelScanLogical, ExcelSinkExec, ExcelSinkLogical, ExcelTemplateExec, ExcelTemplateSinkLogical,
+    SqlxScanExec, SqlxScanLogical,
 };
-use crate::nodes::sql::SqlProxyLogical;
+use crate::core::graph::Workflow;
+use crate::core::observer::{
+    MaterializerExec, MaterializerLogical, StateProbeExec, StateProbeLogical,
+};
 use crate::nodes::missing::{MissingNodeExec, MissingNodeLogical};
-use crate::nodes::script::python::{PythonLogical, PythonExec};
 use crate::nodes::registry::NodeRegistry;
+use crate::nodes::script::python::{PythonExec, PythonLogical};
+use crate::nodes::sql::SqlProxyLogical;
 use crate::nodes::{NodeDiagnostic, NodeErrorClass, NodeEvent};
 
 use duckdb::Connection;
@@ -32,7 +34,7 @@ use duckdb::Connection;
 /// Hooks for injecting AI intelligence into the execution flow.
 #[async_trait]
 pub trait IntelligenceHook: Send + Sync {
-    /// Called when a node execution fails. 
+    /// Called when a node execution fails.
     /// Returns Some(new_config) to retry, or None to fail.
     async fn on_error(
         &self,
@@ -62,14 +64,13 @@ async fn sync_metadata_to_context(ctx: &Arc<SessionContext>, cache_dir: &str) {
     let tables = {
         let mut tables_data = Vec::new();
         if let Ok(conn) = Connection::open(&metadata_path) {
-            if let Ok(mut stmt) = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata") {
+            if let Ok(mut stmt) = conn.prepare("SELECT table_name, parquet_path FROM flow_metadata")
+            {
                 if let Ok(rows) = stmt.query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 }) {
-                    for row in rows {
-                        if let Ok(res) = row {
-                            tables_data.push(res);
-                        }
+                    for res in rows.flatten() {
+                        tables_data.push(res);
                     }
                 }
             }
@@ -79,7 +80,9 @@ async fn sync_metadata_to_context(ctx: &Arc<SessionContext>, cache_dir: &str) {
 
     for (table_name, path) in tables {
         let _ = ctx.deregister_table(&table_name);
-        ctx.register_parquet(&table_name, &path, ParquetReadOptions::default()).await.ok();
+        ctx.register_parquet(&table_name, &path, ParquetReadOptions::default())
+            .await
+            .ok();
     }
 }
 
@@ -98,9 +101,9 @@ impl SwanFlowEngine {
 
     pub fn with_cache_dir(registry: Arc<NodeRegistry>, cache_dir: String) -> Self {
         std::fs::create_dir_all(&cache_dir).ok();
-        
+
         let ctx = Arc::new(SessionContext::new());
-        
+
         // Initialize metadata table in DuckDB directly
         let metadata_path = format!("{}/metadata.duckdb", cache_dir);
         let conn = Connection::open(&metadata_path).expect("Failed to open DuckDB metadata");
@@ -113,7 +116,8 @@ impl SwanFlowEngine {
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )",
             [],
-        ).expect("Failed to create metadata table");
+        )
+        .expect("Failed to create metadata table");
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS __graph_nodes (
@@ -122,7 +126,8 @@ impl SwanFlowEngine {
                 properties TEXT
             )",
             [],
-        ).expect("Failed to create graph nodes table");
+        )
+        .expect("Failed to create graph nodes table");
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS __graph_edges (
@@ -133,18 +138,27 @@ impl SwanFlowEngine {
                 PRIMARY KEY (source_id, target_id, type)
             )",
             [],
-        ).expect("Failed to create graph edges table");
+        )
+        .expect("Failed to create graph edges table");
 
-        Self { ctx, registry, cache_dir, hook: None }
+        Self {
+            ctx,
+            registry,
+            cache_dir,
+            hook: None,
+        }
     }
 
-    pub async fn execute_workflow(&self, workflow: &Workflow) -> Result<mpsc::UnboundedReceiver<NodeEvent>> {
+    pub async fn execute_workflow(
+        &self,
+        workflow: &Workflow,
+    ) -> Result<mpsc::UnboundedReceiver<NodeEvent>> {
         let (tx, rx) = mpsc::unbounded_channel();
-        
+
         let mut compiler = WorkflowCompiler::with_cache_dir(true, self.cache_dir.clone());
         compiler.ctx = self.ctx.clone(); // CRITICAL: Share the same context!
         compiler.event_tx = Some(tx.clone());
-        
+
         let stages = match compiler
             .compile(workflow, &self.registry, Some(self.ctx.clone()))
             .await
@@ -168,13 +182,21 @@ impl SwanFlowEngine {
                 return Ok(rx);
             }
         };
-        
+
         if stages.is_empty() {
-            return Err(datafusion::error::DataFusionError::Plan("Workflow has no outputs".to_string()));
+            return Err(datafusion::error::DataFusionError::Plan(
+                "Workflow has no outputs".to_string(),
+            ));
         }
 
-        let planner = SwanFlowPlanner { event_tx: tx.clone(), ctx: self.ctx.clone(), cache_dir: self.cache_dir.clone() };
-        let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(planner.clone())]));
+        let planner = SwanFlowPlanner {
+            event_tx: tx.clone(),
+            ctx: self.ctx.clone(),
+            cache_dir: self.cache_dir.clone(),
+        };
+        let physical_planner = Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![
+            Arc::new(planner.clone()),
+        ]));
         let query_planner = Arc::new(SwanFlowQueryPlanner { physical_planner });
 
         // Use shared context directly in the task
@@ -188,12 +210,9 @@ impl SwanFlowEngine {
             // STAGED TOPOLOGICAL EXECUTION: run each level stage in order
             for (level, mut terminals) in stages.into_iter().enumerate() {
                 println!("DEBUG: Executing Stage Level {}", level);
-                terminals.sort_by(|a, b| {
-                    a.node_id
-                        .cmp(&b.node_id)
-                        .then_with(|| a.port.cmp(&b.port))
-                });
-                
+                terminals
+                    .sort_by(|a, b| a.node_id.cmp(&b.node_id).then_with(|| a.port.cmp(&b.port)));
+
                 // 1. Initial Sync for this level
                 sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
 
@@ -203,8 +222,11 @@ impl SwanFlowEngine {
                     let node_type = stage_plan.node_type.clone();
                     let port = stage_plan.port;
                     let logical_plan = stage_plan.plan;
-                    println!("DEBUG: Stage Execution for level {}, node {}, port {}", level, node_id, port);
-                    
+                    println!(
+                        "DEBUG: Stage Execution for level {}, node {}, port {}",
+                        level, node_id, port
+                    );
+
                     let state = ctx_shared.state();
                     let state = SessionStateBuilder::new_from_existing(state)
                         .with_query_planner(query_planner_clone.clone())
@@ -213,23 +235,27 @@ impl SwanFlowEngine {
                     match state.create_physical_plan(&logical_plan).await {
                         Ok(physical_plan) => {
                             let task_ctx = ctx_shared.task_ctx();
-                            match datafusion::physical_plan::collect(physical_plan, task_ctx).await {
+                            match datafusion::physical_plan::collect(physical_plan, task_ctx).await
+                            {
                                 Ok(batches) => {
                                     if let Some(hook) = &hook_shared {
                                         if !batches.is_empty() {
-                                            let _ = hook.on_data_quality(node_id, &batches[0]).await;
+                                            let _ =
+                                                hook.on_data_quality(node_id, &batches[0]).await;
                                         }
                                     }
-                                    
+
                                     // MANUAL MATERIALIZATION: Register as table so it's queryable
                                     if !batches.is_empty() {
-                                        let table_name = format!("node_{}", &node_id.to_string()[..8]);
+                                        let table_name =
+                                            format!("node_{}", &node_id.to_string()[..8]);
                                         if let Ok(df) = ctx_shared.read_batches(batches.clone()) {
-                                            let _ = ctx_shared.register_table(&table_name, df.into_view());
-                                            let _ = tx.send(NodeEvent::Materialized { 
-                                                node_id, 
-                                                table_name, 
-                                                parquet_path: "".to_string() // In-memory for now
+                                            let _ = ctx_shared
+                                                .register_table(&table_name, df.into_view());
+                                            let _ = tx.send(NodeEvent::Materialized {
+                                                node_id,
+                                                table_name,
+                                                parquet_path: "".to_string(), // In-memory for now
                                             });
                                         }
                                     }
@@ -250,7 +276,12 @@ impl SwanFlowEngine {
                                     if let Some(hook) = &hook_shared {
                                         if should_invoke_self_healing(&diagnostic) {
                                             if let Some(_fix) = hook
-                                                .on_error(node_id, &node_type, &json!({}), &diagnostic.message)
+                                                .on_error(
+                                                    node_id,
+                                                    &node_type,
+                                                    &json!({}),
+                                                    &diagnostic.message,
+                                                )
                                                 .await
                                             {
                                                 println!("DEBUG: IntelligenceHook proposed a fix for node {}", node_id);
@@ -272,16 +303,21 @@ impl SwanFlowEngine {
                             println!("DEBUG: Level {} node {} port {} planning failed, retrying after sync...", level, node_id, port);
                             sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            
+
                             let state = ctx_shared.state();
                             let state = SessionStateBuilder::new_from_existing(state)
                                 .with_query_planner(query_planner_clone.clone())
                                 .build();
-                            
+
                             match state.create_physical_plan(&logical_plan).await {
                                 Ok(physical_plan) => {
                                     let task_ctx = ctx_shared.task_ctx();
-                                    match datafusion::physical_plan::collect(physical_plan, task_ctx).await {
+                                    match datafusion::physical_plan::collect(
+                                        physical_plan,
+                                        task_ctx,
+                                    )
+                                    .await
+                                    {
                                         Ok(_batches) => {
                                             let _ = tx.send(NodeEvent::StateChanged {
                                                 node_id,
@@ -299,7 +335,12 @@ impl SwanFlowEngine {
                                             if let Some(hook) = &hook_shared {
                                                 if should_invoke_self_healing(&diagnostic) {
                                                     if let Some(_fix) = hook
-                                                        .on_error(node_id, &node_type, &json!({}), &diagnostic.message)
+                                                        .on_error(
+                                                            node_id,
+                                                            &node_type,
+                                                            &json!({}),
+                                                            &diagnostic.message,
+                                                        )
                                                         .await
                                                     {
                                                         handled = true;
@@ -320,13 +361,21 @@ impl SwanFlowEngine {
                                         node_id,
                                         node_type.clone(),
                                         NodeErrorClass::Planning,
-                                        format!("Planning error after sync: {} (Original: {})", e2, e),
+                                        format!(
+                                            "Planning error after sync: {} (Original: {})",
+                                            e2, e
+                                        ),
                                     );
                                     let mut handled = false;
                                     if let Some(hook) = &hook_shared {
                                         if should_invoke_self_healing(&diagnostic) {
                                             if let Some(_fix) = hook
-                                                .on_error(node_id, &node_type, &json!({}), &diagnostic.message)
+                                                .on_error(
+                                                    node_id,
+                                                    &node_type,
+                                                    &json!({}),
+                                                    &diagnostic.message,
+                                                )
                                                 .await
                                             {
                                                 println!("DEBUG: IntelligenceHook proposed a fix for planning error on node {}", node_id);
@@ -335,8 +384,8 @@ impl SwanFlowEngine {
                                         }
                                     }
                                     if !handled {
-                                        let _ = tx.send(NodeEvent::Error { 
-                                            node_id, 
+                                        let _ = tx.send(NodeEvent::Error {
+                                            node_id,
                                             message: diagnostic.to_event_message(),
                                         });
                                     }
@@ -345,7 +394,7 @@ impl SwanFlowEngine {
                         }
                     }
                 }
-                
+
                 // Final Sync after this level to be absolutely sure
                 sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
             }
@@ -361,9 +410,11 @@ impl SwanFlowEngine {
         let mut compiler = WorkflowCompiler::with_cache_dir(true, self.cache_dir.clone());
         compiler.ctx = self.ctx.clone();
         let registry = self.registry.clone();
-        let _ = compiler.compile(workflow, &registry, Some(self.ctx.clone())).await
+        let _ = compiler
+            .compile(workflow, &registry, Some(self.ctx.clone()))
+            .await
             .map_err(|e| datafusion::error::DataFusionError::Plan(e.to_string()))?;
-        
+
         Ok(WorkflowMetadata {
             schemas: compiler.inferred_schemas,
             sample_data: compiler.sample_data,
@@ -380,10 +431,11 @@ pub struct SwanFlowPlanner {
     pub cache_dir: String,
 }
 
-
 impl std::fmt::Debug for SwanFlowPlanner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SwanFlowPlanner").field("cache_dir", &self.cache_dir).finish()
+        f.debug_struct("SwanFlowPlanner")
+            .field("cache_dir", &self.cache_dir)
+            .finish()
     }
 }
 
@@ -416,30 +468,46 @@ impl ExtensionPlanner for SwanFlowPlanner {
         if let Some(missing) = node.as_any().downcast_ref::<MissingNodeLogical>() {
             return Ok(Some(Arc::new(MissingNodeExec::new(missing))));
         }
-        if let Some(entity_port) = node.as_any().downcast_ref::<crate::nodes::ai::graph::EntityPortLogical>() {
-            return Ok(Some(Arc::new(crate::nodes::ai::graph::EntityExtractorExec::new(
-                physical_inputs[0].clone(),
-                entity_port.base.entity_types.clone(),
-                entity_port.base.relation_types.clone(),
-                entity_port.base.provider.clone(),
-                entity_port.port,
-            ))));
+        if let Some(entity_port) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::graph::EntityPortLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::graph::EntityExtractorExec::new(
+                    physical_inputs[0].clone(),
+                    entity_port.base.entity_types.clone(),
+                    entity_port.base.relation_types.clone(),
+                    entity_port.base.provider.clone(),
+                    entity_port.port,
+                ),
+            )));
         }
-        if let Some(_indexer) = node.as_any().downcast_ref::<crate::nodes::io::GraphIndexWriterLogical>() {
+        if let Some(_indexer) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::io::GraphIndexWriterLogical>()
+        {
             return Ok(Some(Arc::new(crate::nodes::io::GraphIndexWriterExec::new(
                 physical_inputs[0].clone(),
                 physical_inputs[1].clone(),
                 self.cache_dir.clone(),
             ))));
         }
-        if let Some(retriever) = node.as_any().downcast_ref::<crate::nodes::ai::graph::GraphRetrieverLogical>() {
-            return Ok(Some(Arc::new(crate::nodes::ai::graph::GraphRetrieverExec::new(
-                physical_inputs[0].clone(),
-                retriever.depth,
-                self.cache_dir.clone(),
-            ))));
+        if let Some(retriever) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::graph::GraphRetrieverLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::graph::GraphRetrieverExec::new(
+                    physical_inputs[0].clone(),
+                    retriever.depth,
+                    self.cache_dir.clone(),
+                ),
+            )));
         }
-        if let Some(mcp) = node.as_any().downcast_ref::<crate::nodes::ai::mcp::McpInvokeLogical>() {
+        if let Some(mcp) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::mcp::McpInvokeLogical>()
+        {
             let arguments = serde_json::from_str(&mcp.arguments).unwrap_or(serde_json::Value::Null);
             return Ok(Some(Arc::new(crate::nodes::ai::mcp::McpInvokeExec::new(
                 mcp.tool_name.clone(),
@@ -449,35 +517,59 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 Arc::new(mcp.schema.as_arrow().clone()),
             ))));
         }
-        if let Some(gap) = node.as_any().downcast_ref::<crate::nodes::ai::graph::InformationGapLogical>() {
-            return Ok(Some(Arc::new(crate::nodes::ai::graph::InformationGapExec::new(
-                physical_inputs[0].clone(),
-                physical_inputs[1].clone(),
-                gap.provider.clone(),
-            ))));
+        if let Some(gap) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::graph::InformationGapLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::graph::InformationGapExec::new(
+                    physical_inputs[0].clone(),
+                    physical_inputs[1].clone(),
+                    gap.provider.clone(),
+                ),
+            )));
         }
-        if let Some(research) = node.as_any().downcast_ref::<crate::nodes::ai::graph::ResearchLoopLogical>() {
-            return Ok(Some(Arc::new(crate::nodes::ai::graph::ResearchLoopExec::new(
-                physical_inputs[0].clone(),
-                research.max_depth,
-                research.max_pages,
-                research.state.clone(),
-                research.port,
-                self.cache_dir.clone(),
-            ))));
+        if let Some(research) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::graph::ResearchLoopLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::graph::ResearchLoopExec::new(
+                    physical_inputs[0].clone(),
+                    research.max_depth,
+                    research.max_pages,
+                    research.state.clone(),
+                    research.port,
+                    self.cache_dir.clone(),
+                ),
+            )));
         }
-        if let Some(boxed) = node.as_any().downcast_ref::<crate::nodes::script::boxed_python::BoxedPythonLogical>() {
-            return Ok(Some(Arc::new(crate::nodes::script::boxed_python::BoxedPythonExec::new(
-                physical_inputs[0].clone(),
-                boxed.code.clone(),
-                boxed.image.clone(),
-                boxed.s3_bucket.clone(),
-                Arc::new(boxed.schema.as_arrow().clone()),
-            ))));
+        if let Some(boxed) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::script::boxed_python::BoxedPythonLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::script::boxed_python::BoxedPythonExec::new(
+                    physical_inputs[0].clone(),
+                    boxed.code.clone(),
+                    boxed.image.clone(),
+                    boxed.s3_bucket.clone(),
+                    Arc::new(boxed.schema.as_arrow().clone()),
+                ),
+            )));
         }
         if let Some(excel_scan) = node.as_any().downcast_ref::<ExcelScanLogical>() {
-            let fields = excel_scan.schema.fields().iter()
-                .map(|f| datafusion::arrow::datatypes::Field::new(f.name(), f.data_type().clone(), f.is_nullable()))
+            let fields = excel_scan
+                .schema
+                .fields()
+                .iter()
+                .map(|f| {
+                    datafusion::arrow::datatypes::Field::new(
+                        f.name(),
+                        f.data_type().clone(),
+                        f.is_nullable(),
+                    )
+                })
                 .collect::<Vec<_>>();
             let arrow_schema = datafusion::arrow::datatypes::Schema::new(fields);
             return Ok(Some(Arc::new(ExcelScanExec::new(
@@ -490,10 +582,14 @@ impl ExtensionPlanner for SwanFlowPlanner {
         if let Some(excel_sink) = node.as_any().downcast_ref::<ExcelSinkLogical>() {
             return Ok(Some(Arc::new(ExcelSinkExec::new(
                 excel_sink.path.clone(),
-                vec![excel_sink.sheets.first().cloned().unwrap_or_else(|| "Sheet1".to_string())],
-                json!({}), 
-                true, 
-                json!({}), 
+                vec![excel_sink
+                    .sheets
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Sheet1".to_string())],
+                json!({}),
+                true,
+                json!({}),
                 vec![physical_inputs[0].clone()],
             ))));
         }
@@ -516,7 +612,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
         }
         if let Some(proxy) = node.as_any().downcast_ref::<SqlProxyLogical>() {
             // Late-binding: Register inputs and parse SQL now
-            
+
             // LAZY REGISTRATION: Sync materialized tables from metadata.duckdb
             sync_metadata_to_context(&self.ctx, &self.cache_dir).await;
 
@@ -524,13 +620,18 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 let table_name = format!("input_{}", i);
                 let df = datafusion::prelude::DataFrame::new(self.ctx.state(), input_plan.clone());
                 let _ = self.ctx.deregister_table(&table_name);
-                self.ctx.register_table(&table_name, df.into_view()).map_err(|e| {
-                    datafusion::error::DataFusionError::Plan(format!("Failed to register input_{}: {}", i, e))
-                })?;
+                self.ctx
+                    .register_table(&table_name, df.into_view())
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Plan(format!(
+                            "Failed to register input_{}: {}",
+                            i, e
+                        ))
+                    })?;
             }
 
             let mut query = proxy.query.clone();
-            
+
             // WORKAROUND for DataFusion 52.1.0 sql() limitation with $1 placeholders
             for (i, param) in proxy.params.iter().enumerate() {
                 let placeholder = format!("${}", i + 1);
@@ -544,11 +645,13 @@ impl ExtensionPlanner for SwanFlowPlanner {
             let df = self.ctx.sql(&query).await.map_err(|e| {
                 datafusion::error::DataFusionError::Plan(format!("Late-binding SQL error: {}", e))
             })?;
-            
+
             let logical_plan = df.into_optimized_plan()?;
             // We MUST use the latest session state from our context which now has the tables!
-            let physical_plan = _planner.create_physical_plan(&logical_plan, &self.ctx.state()).await?;
-            
+            let physical_plan = _planner
+                .create_physical_plan(&logical_plan, &self.ctx.state())
+                .await?;
+
             // Check if schema matches logical proxy schema
             let logical_schema = proxy.schema.clone();
             let physical_plan = self.align_schemas(physical_plan, logical_schema.as_ref())?;
@@ -561,8 +664,17 @@ impl ExtensionPlanner for SwanFlowPlanner {
             ))));
         }
         if let Some(duck_scan) = node.as_any().downcast_ref::<DuckDBScanLogical>() {
-            let fields = duck_scan.schema.fields().iter()
-                .map(|f| datafusion::arrow::datatypes::Field::new(f.name(), f.data_type().clone(), f.is_nullable()))
+            let fields = duck_scan
+                .schema
+                .fields()
+                .iter()
+                .map(|f| {
+                    datafusion::arrow::datatypes::Field::new(
+                        f.name(),
+                        f.data_type().clone(),
+                        f.is_nullable(),
+                    )
+                })
                 .collect::<Vec<_>>();
             let arrow_schema = datafusion::arrow::datatypes::Schema::new(fields);
             return Ok(Some(Arc::new(DuckDBScanExec::new(
@@ -574,8 +686,17 @@ impl ExtensionPlanner for SwanFlowPlanner {
             ))));
         }
         if let Some(sqlx_scan) = node.as_any().downcast_ref::<SqlxScanLogical>() {
-            let fields = sqlx_scan.schema.fields().iter()
-                .map(|f| datafusion::arrow::datatypes::Field::new(f.name(), f.data_type().clone(), f.is_nullable()))
+            let fields = sqlx_scan
+                .schema
+                .fields()
+                .iter()
+                .map(|f| {
+                    datafusion::arrow::datatypes::Field::new(
+                        f.name(),
+                        f.data_type().clone(),
+                        f.is_nullable(),
+                    )
+                })
                 .collect::<Vec<_>>();
             let arrow_schema = datafusion::arrow::datatypes::Schema::new(fields);
             return Ok(Some(Arc::new(SqlxScanExec::new(
@@ -590,7 +711,11 @@ impl ExtensionPlanner for SwanFlowPlanner {
 }
 
 impl SwanFlowPlanner {
-    fn align_schemas(&self, plan: Arc<dyn ExecutionPlan>, target: &DFSchema) -> Result<Arc<dyn ExecutionPlan>> {
+    fn align_schemas(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        target: &DFSchema,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
         let plan_schema = plan.schema();
         let plan_df_schema = DFSchema::try_from(plan_schema.as_ref().clone())?;
         if plan_df_schema == *target {
@@ -606,16 +731,15 @@ impl SwanFlowPlanner {
                 ));
             } else {
                 let null_expr = datafusion::physical_expr::expressions::Literal::new(
-                    ScalarValue::try_from(field.data_type())?
+                    ScalarValue::try_from(field.data_type())?,
                 );
                 exprs.push((Arc::new(null_expr), field.name().to_string()));
             }
         }
 
-        Ok(Arc::new(datafusion::physical_plan::projection::ProjectionExec::try_new(
-            exprs,
-            plan,
-        )?))
+        Ok(Arc::new(
+            datafusion::physical_plan::projection::ProjectionExec::try_new(exprs, plan)?,
+        ))
     }
 }
 
@@ -636,7 +760,9 @@ impl QueryPlanner for SwanFlowQueryPlanner {
         logical_plan: &LogicalPlan,
         session_state: &SessionState,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.physical_planner.create_physical_plan(logical_plan, session_state).await
+        self.physical_planner
+            .create_physical_plan(logical_plan, session_state)
+            .await
     }
 }
 

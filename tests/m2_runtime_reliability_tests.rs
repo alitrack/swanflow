@@ -12,13 +12,23 @@ fn test_retry_backoff_guard_deduplicates_idempotency_key_and_delays() {
     let mut seen = std::collections::HashSet::new();
 
     let first = node
-        .plan_retry("run-1", "step-a", &mut seen, &json!({ "max_retries": 3, "base_delay_ms": 50 }))
+        .plan_retry(
+            "run-1",
+            "step-a",
+            &mut seen,
+            &json!({ "max_retries": 3, "base_delay_ms": 50 }),
+        )
         .expect("first run should be accepted");
     assert_eq!(first.delays_ms, vec![50, 100, 200]);
     assert!(!first.duplicate);
 
     let second = node
-        .plan_retry("run-1", "step-a", &mut seen, &json!({ "max_retries": 3, "base_delay_ms": 50 }))
+        .plan_retry(
+            "run-1",
+            "step-a",
+            &mut seen,
+            &json!({ "max_retries": 3, "base_delay_ms": 50 }),
+        )
         .expect("duplicate idempotency key should be handled");
     assert!(second.duplicate);
     assert!(second.delays_ms.is_empty());
@@ -55,9 +65,12 @@ fn test_run_state_store_put_get_delete() {
 fn test_audit_ledger_records_and_filters_events() {
     let mut node = ObservabilityAuditLedgerNode::default();
 
-    node.record_event("run-3", "info", "started").expect("record info");
-    node.record_event("run-3", "error", "failed once").expect("record error");
-    node.record_event("run-9", "info", "other").expect("record other");
+    node.record_event("run-3", "info", "started")
+        .expect("record info");
+    node.record_event("run-3", "error", "failed once")
+        .expect("record error");
+    node.record_event("run-9", "info", "other")
+        .expect("record other");
 
     let run3 = node.query_events(Some("run-3"), None);
     assert_eq!(run3.len(), 2);
@@ -72,11 +85,9 @@ fn test_agent_loop_orchestrator_stops_at_max_iterations() {
     let node = AgentLoopOrchestratorNode;
 
     let report = node
-        .orchestrate(
-            "research",
-            &json!({ "max_iterations": 3 }),
-            |iteration| format!("step-{}", iteration),
-        )
+        .orchestrate("research", &json!({ "max_iterations": 3 }), |iteration| {
+            format!("step-{}", iteration)
+        })
         .expect("orchestration should succeed");
 
     assert_eq!(report.iterations, 3);

@@ -72,12 +72,66 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         sub_workflow: None,
     });
 
-    workflow.add_edge(source, planner, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    workflow.add_edge(planner, chunker, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    workflow.add_edge(chunker, writer, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    workflow.add_edge(writer, retriever, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    workflow.add_edge(retriever, structured, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
-    workflow.add_edge(structured, citation, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    workflow
+        .add_edge(
+            source,
+            planner,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    workflow
+        .add_edge(
+            planner,
+            chunker,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    workflow
+        .add_edge(
+            chunker,
+            writer,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    workflow
+        .add_edge(
+            writer,
+            retriever,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    workflow
+        .add_edge(
+            retriever,
+            structured,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
+    workflow
+        .add_edge(
+            structured,
+            citation,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     let mut compiler = WorkflowCompiler::new(false);
     let registry = NodeRegistry::default();

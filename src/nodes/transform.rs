@@ -18,8 +18,16 @@ impl NodeBehavior for FilterNode {
             type_id: "core.transform.filter".to_string(),
             display_name: "Filter".to_string(),
             description: "Filter rows based on a SQL expression.".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data to filter".into() }],
-            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Filtered data".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data to filter".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Filtered data".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -61,8 +69,16 @@ impl NodeBehavior for ProjectNode {
             type_id: "core.transform.project".to_string(),
             display_name: "Project".to_string(),
             description: "Select and rename columns using SQL expressions.".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Input data".into() }],
-            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Projected data".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Input data".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Projected data".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -102,8 +118,16 @@ impl NodeBehavior for AggregateNode {
             type_id: "core.transform.aggregate".to_string(),
             display_name: "Aggregate".to_string(),
             description: "Compute aggregations (sum, count, etc) over groups.".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data to aggregate".into() }],
-            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Aggregated data".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data to aggregate".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Aggregated data".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -114,7 +138,9 @@ impl NodeBehavior for AggregateNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
 
     async fn propose_plan(
         &self,
@@ -123,15 +149,17 @@ impl NodeBehavior for AggregateNode {
     ) -> Result<Vec<LogicalPlan>> {
         let group_by = cfg::optional_string_array(config, "group_by")?;
         let aggs = cfg::optional_string_array(config, "aggs")?;
-        
+
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         ctx.register_table("agg_input", df.into_view())?;
-        
+
         let mut sql = "SELECT ".to_string();
         if !group_by.is_empty() {
             sql += &group_by.join(", ");
-            if !aggs.is_empty() { sql += ", "; }
+            if !aggs.is_empty() {
+                sql += ", ";
+            }
         }
         sql += &aggs.join(", ");
         sql += " FROM agg_input";
@@ -139,7 +167,7 @@ impl NodeBehavior for AggregateNode {
             sql += " GROUP BY ";
             sql += &group_by.join(", ");
         }
-        
+
         let agg_df = ctx.sql(&sql).await?;
         Ok(vec![agg_df.into_optimized_plan()?])
     }
@@ -154,8 +182,16 @@ impl NodeBehavior for WindowNode {
             type_id: "core.transform.window".to_string(),
             display_name: "Window Functions".to_string(),
             description: "Apply window functions like RANK, ROW_NUMBER, etc.".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Input data".into() }],
-            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Data with window results".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Input data".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Data with window results".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -165,7 +201,9 @@ impl NodeBehavior for WindowNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
 
     async fn propose_plan(
         &self,
@@ -191,10 +229,22 @@ impl NodeBehavior for ConditionNode {
             type_id: "core.transform.condition".to_string(),
             display_name: "Condition (IF)".to_string(),
             description: "Branch workflow based on a boolean condition.".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data to branch".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data to branch".into(),
+            }],
             output_ports: vec![
-                PortSpec { id: 0, name: "true".into(), description: "Executed if condition is true".into() },
-                PortSpec { id: 1, name: "false".into(), description: "Executed if condition is false".into() },
+                PortSpec {
+                    id: 0,
+                    name: "true".into(),
+                    description: "Executed if condition is true".into(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "false".into(),
+                    description: "Executed if condition is false".into(),
+                },
             ],
             config_schema: serde_json::json!({
                 "type": "object",
@@ -205,7 +255,9 @@ impl NodeBehavior for ConditionNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
 
     async fn propose_plan(
         &self,
@@ -225,13 +277,23 @@ impl NodeBehavior for ForEachNode {
             type_id: "core.transform.foreach".to_string(),
             display_name: "For Each (Map)".to_string(),
             description: "Process each item in a collection separately.".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "items".into(), description: "Collection of items".into() }],
-            output_ports: vec![PortSpec { id: 0, name: "output".into(), description: "Processed items".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "items".into(),
+                description: "Collection of items".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Processed items".into(),
+            }],
             config_schema: serde_json::json!({}),
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
 
     async fn propose_plan(
         &self,
@@ -251,13 +313,23 @@ impl NodeBehavior for ProfilerNode {
             type_id: "core.transform.profiler".to_string(),
             display_name: "Data Profiler".to_string(),
             description: "Compute column-level statistics (min, max, unique, nulls).".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Data to profile".into() }],
-            output_ports: vec![PortSpec { id: 0, name: "profile".into(), description: "Statistical summary".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data to profile".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "profile".into(),
+                description: "Statistical summary".into(),
+            }],
             config_schema: serde_json::json!({}),
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
 
     async fn propose_plan(
         &self,
@@ -267,7 +339,7 @@ impl NodeBehavior for ProfilerNode {
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         let schema = df.schema();
-        
+
         let mut select_parts = Vec::new();
         for field in schema.fields() {
             let col = field.name();
@@ -285,7 +357,7 @@ impl NodeBehavior for ProfilerNode {
             ));
             select_parts.push(format!("AVG(\"{0}\") as \"{0}_avg\"", col));
         }
-        
+
         ctx.register_table("profile_input", df.into_view())?;
         let sql = format!("SELECT {} FROM profile_input", select_parts.join(", "));
         let profile_df = ctx.sql(&sql).await?;
@@ -311,7 +383,9 @@ impl NodeBehavior for VariableCreatorNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
 
     async fn propose_plan(
         &self,
@@ -331,13 +405,19 @@ impl NodeBehavior for TableToVariableNode {
             type_id: "core.flow.table_to_variable".to_string(),
             display_name: "Table to Variable".to_string(),
             description: "Convert a single-row table into workflow variables.".to_string(),
-            input_ports: vec![PortSpec { id: 0, name: "input".into(), description: "Single-row table".into() }],
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Single-row table".into(),
+            }],
             output_ports: vec![],
             config_schema: serde_json::json!({}),
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> { Ok(()) }
+    fn validate(&self, _config: &JsonValue) -> Result<()> {
+        Ok(())
+    }
 
     async fn propose_plan(
         &self,
@@ -356,16 +436,41 @@ impl NodeBehavior for GraphMergerNode {
         NodeSpec {
             type_id: "core.transform.graph_merger".to_string(),
             display_name: "Graph Merger".to_string(),
-            description: "Merge multiple graph node/edge streams with conflict resolution.".to_string(),
+            description: "Merge multiple graph node/edge streams with conflict resolution."
+                .to_string(),
             input_ports: vec![
-                PortSpec { id: 0, name: "nodes_a".into(), description: "Nodes Set A".into() },
-                PortSpec { id: 1, name: "edges_a".into(), description: "Edges Set A".into() },
-                PortSpec { id: 2, name: "nodes_b".into(), description: "Nodes Set B".into() },
-                PortSpec { id: 3, name: "edges_b".into(), description: "Edges Set B".into() },
+                PortSpec {
+                    id: 0,
+                    name: "nodes_a".into(),
+                    description: "Nodes Set A".into(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "edges_a".into(),
+                    description: "Edges Set A".into(),
+                },
+                PortSpec {
+                    id: 2,
+                    name: "nodes_b".into(),
+                    description: "Nodes Set B".into(),
+                },
+                PortSpec {
+                    id: 3,
+                    name: "edges_b".into(),
+                    description: "Edges Set B".into(),
+                },
             ],
             output_ports: vec![
-                PortSpec { id: 0, name: "nodes".into(), description: "Merged Nodes".into() },
-                PortSpec { id: 1, name: "edges".into(), description: "Merged Edges".into() },
+                PortSpec {
+                    id: 0,
+                    name: "nodes".into(),
+                    description: "Merged Nodes".into(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "edges".into(),
+                    description: "Merged Edges".into(),
+                },
             ],
             config_schema: serde_json::json!({}),
         }
@@ -381,7 +486,7 @@ impl NodeBehavior for GraphMergerNode {
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let ctx = SessionContext::new();
-        
+
         let nodes_a = inputs[0].clone();
         let edges_a = inputs[1].clone();
         let nodes_b = inputs[2].clone();
@@ -432,7 +537,7 @@ impl NodeBehavior for TableSchemaValidatorNode {
                 "type": "object",
                 "properties": {
                     "mode": { "type": "string", "enum": ["node", "edge", "auto"], "default": "auto" },
-                    "mapping": { 
+                    "mapping": {
                         "type": "object",
                         "description": "Optional explicit mapping. If missing, LLM will suggest one based on schema."
                     }
@@ -453,7 +558,8 @@ impl NodeBehavior for TableSchemaValidatorNode {
         use crate::nodes::GraphSchemas;
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
-        let input_schema: datafusion::arrow::datatypes::SchemaRef = Arc::new(df.schema().as_arrow().clone());
+        let input_schema: datafusion::arrow::datatypes::SchemaRef =
+            Arc::new(df.schema().as_arrow().clone());
 
         let to_sql_type = |dt: &datafusion::arrow::datatypes::DataType| match dt {
             datafusion::arrow::datatypes::DataType::Int64 => "BIGINT",
@@ -461,35 +567,50 @@ impl NodeBehavior for TableSchemaValidatorNode {
             datafusion::arrow::datatypes::DataType::Float64 => "DOUBLE",
             _ => "TEXT",
         };
-        
+
         let mapping = config["mapping"].as_object();
-        
+
         let node_plan = if let Some(m) = mapping {
-             let mut projections = Vec::new();
-             let node_fields = GraphSchemas::node_schema().fields().clone();
-             for field in &node_fields {
-                 let field_name = field.name().as_str();
-                 let sql_type = to_sql_type(field.data_type());
-                 if let Some(src_col) = m.get(field_name) {
-                     let src_col = src_col
-                         .as_str()
-                         .ok_or_else(|| anyhow!("mapping field '{}' must map to a string column name", field_name))?;
-                     projections.push(format!("CAST(\"{}\" AS {}) as \"{}\"", src_col, sql_type, field_name));
-                 } else {
-                     projections.push(format!("CAST(NULL AS {}) as \"{}\"", sql_type, field_name));
-                 }
-             }
-             ctx.register_table("val_input", df.clone().into_view())?;
-             let sql = format!("SELECT {} FROM val_input", projections.join(", "));
-             ctx.sql(&sql).await?.into_optimized_plan()?
+            let mut projections = Vec::new();
+            let node_fields = GraphSchemas::node_schema().fields().clone();
+            for field in &node_fields {
+                let field_name = field.name().as_str();
+                let sql_type = to_sql_type(field.data_type());
+                if let Some(src_col) = m.get(field_name) {
+                    let src_col = src_col.as_str().ok_or_else(|| {
+                        anyhow!(
+                            "mapping field '{}' must map to a string column name",
+                            field_name
+                        )
+                    })?;
+                    projections.push(format!(
+                        "CAST(\"{}\" AS {}) as \"{}\"",
+                        src_col, sql_type, field_name
+                    ));
+                } else {
+                    projections.push(format!("CAST(NULL AS {}) as \"{}\"", sql_type, field_name));
+                }
+            }
+            ctx.register_table("val_input", df.clone().into_view())?;
+            let sql = format!("SELECT {} FROM val_input", projections.join(", "));
+            ctx.sql(&sql).await?.into_optimized_plan()?
         } else {
             let mut projections = Vec::new();
             for field in GraphSchemas::node_schema().fields() {
                 let sql_type = to_sql_type(field.data_type());
                 if input_schema.field_with_name(field.name()).is_ok() {
-                    projections.push(format!("CAST(\"{}\" AS {}) as \"{}\"", field.name(), sql_type, field.name()));
+                    projections.push(format!(
+                        "CAST(\"{}\" AS {}) as \"{}\"",
+                        field.name(),
+                        sql_type,
+                        field.name()
+                    ));
                 } else {
-                    projections.push(format!("CAST(NULL AS {}) as \"{}\"", sql_type, field.name()));
+                    projections.push(format!(
+                        "CAST(NULL AS {}) as \"{}\"",
+                        sql_type,
+                        field.name()
+                    ));
                 }
             }
             ctx.register_table("val_input_auto", df.clone().into_view())?;
@@ -502,9 +623,18 @@ impl NodeBehavior for TableSchemaValidatorNode {
             for field in GraphSchemas::edge_schema().fields() {
                 let sql_type = to_sql_type(field.data_type());
                 if input_schema.field_with_name(field.name()).is_ok() {
-                    projections.push(format!("CAST(\"{}\" AS {}) as \"{}\"", field.name(), sql_type, field.name()));
+                    projections.push(format!(
+                        "CAST(\"{}\" AS {}) as \"{}\"",
+                        field.name(),
+                        sql_type,
+                        field.name()
+                    ));
                 } else {
-                    projections.push(format!("CAST(NULL AS {}) as \"{}\"", sql_type, field.name()));
+                    projections.push(format!(
+                        "CAST(NULL AS {}) as \"{}\"",
+                        sql_type,
+                        field.name()
+                    ));
                 }
             }
             ctx.register_table("val_input_edge", df.into_view())?;
@@ -524,7 +654,9 @@ impl NodeBehavior for SemanticCleanerNode {
         NodeSpec {
             type_id: "core.transform.semantic_cleaner".to_string(),
             display_name: "Semantic Cleaner".to_string(),
-            description: "Clean semantic inconsistencies using AI-generated rules based on a data sample.".to_string(),
+            description:
+                "Clean semantic inconsistencies using AI-generated rules based on a data sample."
+                    .to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".into(),
@@ -539,7 +671,7 @@ impl NodeBehavior for SemanticCleanerNode {
                 "type": "object",
                 "properties": {
                     "column": { "type": "string" },
-                    "rules": { 
+                    "rules": {
                         "type": "object",
                         "description": "Mapping of incorrect values to correct ones (generated by AI)."
                     },
@@ -562,16 +694,21 @@ impl NodeBehavior for SemanticCleanerNode {
     ) -> Result<Vec<LogicalPlan>> {
         let column = cfg::required_string(config, "column")?;
         let rules = config["rules"].as_object();
-        
+
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
-        
+
         if let Some(r) = rules {
             let mut case_parts = Vec::new();
             for (incorrect, correct) in r {
-                case_parts.push(format!("WHEN \"{}\" = '{}' THEN '{}'", column, incorrect, correct.as_str().unwrap_or("")));
+                case_parts.push(format!(
+                    "WHEN \"{}\" = '{}' THEN '{}'",
+                    column,
+                    incorrect,
+                    correct.as_str().unwrap_or("")
+                ));
             }
-            
+
             if case_parts.is_empty() {
                 return Ok(vec![inputs[0].clone()]);
             }
@@ -599,15 +736,24 @@ impl NodeBehavior for AiRouterNode {
         NodeSpec {
             type_id: "core.transform.ai_router".to_string(),
             display_name: "AI Router".to_string(),
-            description: "Inspect data profile and dynamically route to downstream branches.".to_string(),
+            description: "Inspect data profile and dynamically route to downstream branches."
+                .to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".into(),
                 description: "Data to route".into(),
             }],
             output_ports: vec![
-                PortSpec { id: 0, name: "branch_a".into(), description: "Primary branch".into() },
-                PortSpec { id: 1, name: "branch_b".into(), description: "Secondary branch".into() },
+                PortSpec {
+                    id: 0,
+                    name: "branch_a".into(),
+                    description: "Primary branch".into(),
+                },
+                PortSpec {
+                    id: 1,
+                    name: "branch_b".into(),
+                    description: "Secondary branch".into(),
+                },
             ],
             config_schema: serde_json::json!({
                 "type": "object",
@@ -629,9 +775,9 @@ impl NodeBehavior for AiRouterNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let selected = cfg::optional_number(config, "selected_branch").unwrap_or(0.0) as usize;
-        
+
         use datafusion::logical_expr::EmptyRelation;
-        
+
         let mut plans = Vec::new();
         for i in 0..2 {
             if i == selected {
@@ -643,7 +789,7 @@ impl NodeBehavior for AiRouterNode {
                 }));
             }
         }
-        
+
         Ok(plans)
     }
 }

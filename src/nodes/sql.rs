@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
+use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use serde_json::Value as JsonValue;
 use std::fmt;
 use std::sync::Arc;
@@ -21,7 +21,10 @@ pub struct SqlProxyLogical {
 
 impl std::cmp::PartialEq for SqlProxyLogical {
     fn eq(&self, other: &Self) -> bool {
-        self.node_id == other.node_id && self.query == other.query && self.inputs == other.inputs && self.params == other.params
+        self.node_id == other.node_id
+            && self.query == other.query
+            && self.inputs == other.inputs
+            && self.params == other.params
     }
 }
 
@@ -60,7 +63,11 @@ impl UserDefinedLogicalNodeCore for SqlProxyLogical {
     }
 
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SqlProxy(node_id={}, query={})", self.node_id, self.query)
+        write!(
+            f,
+            "SqlProxy(node_id={}, query={})",
+            self.node_id, self.query
+        )
     }
 
     fn with_exprs_and_inputs(
@@ -122,19 +129,22 @@ impl NodeBehavior for SqlNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let mut query = cfg::required_string(config, "query")?;
-        
+
         let params = if let Some(p_array) = cfg::optional_array(config, "params") {
-            p_array.iter().map(|v| {
-                if let Some(i) = v.as_i64() {
-                    ScalarValue::Int64(Some(i))
-                } else if let Some(f) = v.as_f64() {
-                    ScalarValue::Float64(Some(f))
-                } else if let Some(b) = v.as_bool() {
-                    ScalarValue::Boolean(Some(b))
-                } else {
-                    ScalarValue::Utf8(v.as_str().map(|s| s.to_string()))
-                }
-            }).collect()
+            p_array
+                .iter()
+                .map(|v| {
+                    if let Some(i) = v.as_i64() {
+                        ScalarValue::Int64(Some(i))
+                    } else if let Some(f) = v.as_f64() {
+                        ScalarValue::Float64(Some(f))
+                    } else if let Some(b) = v.as_bool() {
+                        ScalarValue::Boolean(Some(b))
+                    } else {
+                        ScalarValue::Utf8(v.as_str().map(|s| s.to_string()))
+                    }
+                })
+                .collect()
         } else {
             vec![]
         };
@@ -178,8 +188,10 @@ impl NodeBehavior for SqlNode {
             params,
         };
 
-        Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
-            node: Arc::new(proxy),
-        })])
+        Ok(vec![LogicalPlan::Extension(
+            datafusion::logical_expr::Extension {
+                node: Arc::new(proxy),
+            },
+        )])
     }
 }

@@ -6,8 +6,21 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
+fn python_has_pyarrow() -> bool {
+    std::process::Command::new("python3")
+        .args(["-c", "import pyarrow"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 #[tokio::test]
 async fn test_python_restricted_import() {
+    if !python_has_pyarrow() {
+        println!("Skipping python security test: python3 module 'pyarrow' is not installed.");
+        return;
+    }
+
     let registry = Arc::new(NodeRegistry::default());
     let mut workflow = Workflow::new("Python Security Test");
 
@@ -36,7 +49,16 @@ return batch" }),
         sub_workflow: None,
     });
 
-    workflow.add_edge(read_idx, python_idx, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    workflow
+        .add_edge(
+            read_idx,
+            python_idx,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     let engine = SwanFlowEngine::new(registry);
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
@@ -56,6 +78,11 @@ return batch" }),
 
 #[tokio::test]
 async fn test_python_valid_transform() {
+    if !python_has_pyarrow() {
+        println!("Skipping python security test: python3 module 'pyarrow' is not installed.");
+        return;
+    }
+
     let registry = Arc::new(NodeRegistry::default());
     let mut workflow = Workflow::new("Python Success Test");
 
@@ -83,14 +110,27 @@ async fn test_python_valid_transform() {
         sub_workflow: None,
     });
 
-    workflow.add_edge(read_idx, python_idx, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+    workflow
+        .add_edge(
+            read_idx,
+            python_idx,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
 
     let engine = SwanFlowEngine::new(registry);
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
 
     let mut executed = false;
     while let Some(event) = rx.recv().await {
-        if let NodeEvent::StateChanged { state: NodeState::Executed, .. } = event {
+        if let NodeEvent::StateChanged {
+            state: NodeState::Executed,
+            ..
+        } = event
+        {
             executed = true;
         }
         if let NodeEvent::Error { message, .. } = event {

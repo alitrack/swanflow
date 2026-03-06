@@ -1,13 +1,13 @@
+use crate::nodes::ai::ConfigWizard;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
-use crate::nodes::ai::ConfigWizard;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
@@ -27,8 +27,7 @@ impl QueryPlanningNode {
         }
 
         let mut normalized = goal
-            .replace('\n', " ")
-            .replace('\r', " ")
+            .replace(['\n', '\r'], " ")
             .replace('；', ";")
             .replace('，', ",")
             .replace('。', ".");
@@ -421,7 +420,11 @@ impl RerankerNode {
         let query_terms: HashSet<String> = query
             .to_lowercase()
             .split_whitespace()
-            .map(|token| token.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+            .map(|token| {
+                token
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_string()
+            })
             .filter(|token| !token.is_empty())
             .collect();
 
@@ -432,7 +435,11 @@ impl RerankerNode {
                     .content
                     .to_lowercase()
                     .split_whitespace()
-                    .map(|token| token.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+                    .map(|token| {
+                        token
+                            .trim_matches(|c: char| !c.is_alphanumeric())
+                            .to_string()
+                    })
                     .filter(|token| !token.is_empty() && query_terms.contains(token))
                     .count();
 
@@ -533,12 +540,7 @@ impl RerankerNode {
 
         if endpoint.is_none() {
             // Allow gradual rollout: if model endpoint is not configured, keep deterministic ranking.
-            return Ok(self.rerank_with_overlap(
-                query,
-                candidates,
-                top_k,
-                fallback_term_boost,
-            ));
+            return Ok(self.rerank_with_overlap(query, candidates, top_k, fallback_term_boost));
         }
         let endpoint = endpoint.unwrap();
 
@@ -595,17 +597,16 @@ impl RerankerNode {
                         let external_scores = match self.extract_external_scores(&body) {
                             Ok(scores) => scores,
                             Err(error) => {
-                                last_error = Some(anyhow!(
-                                    "model backend response parse failed: {}",
-                                    error
-                                ));
+                                last_error =
+                                    Some(anyhow!("model backend response parse failed: {}", error));
                                 continue;
                             }
                         };
 
                         if external_scores.is_empty() {
-                            last_error =
-                                Some(anyhow!("model backend response does not contain usable candidates"));
+                            last_error = Some(anyhow!(
+                                "model backend response does not contain usable candidates"
+                            ));
                             continue;
                         }
 
@@ -628,12 +629,7 @@ impl RerankerNode {
         }
 
         if fail_open {
-            return Ok(self.rerank_with_overlap(
-                query,
-                candidates,
-                top_k,
-                fallback_term_boost,
-            ));
+            return Ok(self.rerank_with_overlap(query, candidates, top_k, fallback_term_boost));
         }
 
         Err(last_error.unwrap_or_else(|| anyhow!("model backend rerank failed")))
@@ -653,12 +649,7 @@ impl RerankerNode {
             .filter(|value| !value.is_empty());
 
         if endpoint.is_none() {
-            return Ok(self.rerank_with_overlap(
-                query,
-                candidates,
-                top_k,
-                fallback_term_boost,
-            ));
+            return Ok(self.rerank_with_overlap(query, candidates, top_k, fallback_term_boost));
         }
         let endpoint = endpoint.unwrap();
 
@@ -672,10 +663,8 @@ impl RerankerNode {
             .or_else(|| std::env::var("LLM_RERANK_API_KEY").ok());
         let llm_max_candidates = config["llm_max_candidates"].as_u64().unwrap_or(20) as usize;
 
-        let limited: Vec<&RetrievalCandidate> = candidates
-            .iter()
-            .take(llm_max_candidates.max(1))
-            .collect();
+        let limited: Vec<&RetrievalCandidate> =
+            candidates.iter().take(llm_max_candidates.max(1)).collect();
         let candidate_lines = limited
             .iter()
             .map(|candidate| {
@@ -734,17 +723,16 @@ impl RerankerNode {
                         let external_scores = match self.extract_external_scores(&body) {
                             Ok(scores) => scores,
                             Err(error) => {
-                                last_error = Some(anyhow!(
-                                    "llm backend response parse failed: {}",
-                                    error
-                                ));
+                                last_error =
+                                    Some(anyhow!("llm backend response parse failed: {}", error));
                                 continue;
                             }
                         };
 
                         if external_scores.is_empty() {
-                            last_error =
-                                Some(anyhow!("llm backend response does not contain usable candidates"));
+                            last_error = Some(anyhow!(
+                                "llm backend response does not contain usable candidates"
+                            ));
                             continue;
                         }
 
@@ -767,12 +755,7 @@ impl RerankerNode {
         }
 
         if fail_open {
-            return Ok(self.rerank_with_overlap(
-                query,
-                candidates,
-                top_k,
-                fallback_term_boost,
-            ));
+            return Ok(self.rerank_with_overlap(query, candidates, top_k, fallback_term_boost));
         }
 
         Err(last_error.unwrap_or_else(|| anyhow!("llm backend rerank failed")))
@@ -798,13 +781,7 @@ impl RerankerNode {
                     .as_f64()
                     .map(|v| v as f32)
                     .unwrap_or(query_term_boost);
-                self.rerank_with_model_backend(
-                    query,
-                    candidates,
-                    config,
-                    top_k,
-                    model_term_boost,
-                )?
+                self.rerank_with_model_backend(query, candidates, config, top_k, model_term_boost)?
             }
             // Placeholder: llm backend currently shares deterministic overlap ranking path.
             RerankBackend::Llm => {
@@ -812,13 +789,7 @@ impl RerankerNode {
                     .as_f64()
                     .map(|v| v as f32)
                     .unwrap_or(query_term_boost);
-                self.rerank_with_llm_backend(
-                    query,
-                    candidates,
-                    config,
-                    top_k,
-                    llm_term_boost,
-                )?
+                self.rerank_with_llm_backend(query, candidates, config, top_k, llm_term_boost)?
             }
         };
 
@@ -886,9 +857,7 @@ impl NodeBehavior for HybridRetrieverNode {
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
-            return Err(anyhow!(
-                "Hybrid Retriever requires at least one input plan"
-            ));
+            return Err(anyhow!("Hybrid Retriever requires at least one input plan"));
         }
         Ok(vec![inputs[0].clone()])
     }

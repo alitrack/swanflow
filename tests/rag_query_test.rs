@@ -1,31 +1,40 @@
 use anyhow::Result;
 use rustflow::core::engine::SwanFlowEngine;
-use rustflow::core::graph::{Workflow, NodeInstance};
-use rustflow::nodes::NodeState;
+use rustflow::core::graph::{NodeInstance, Workflow};
 use rustflow::nodes::registry::NodeRegistry;
+use rustflow::nodes::NodeState;
 use serde_json::json;
 use std::sync::Arc;
-use uuid::Uuid;
 use tempfile::tempdir;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn test_rag_query_workflow() -> Result<()> {
     let tmp = tempdir()?;
     let cache_dir = tmp.path().to_str().unwrap().to_string();
-    
+
     // PRE-SEED DUCKDB
     let metadata_path = format!("{}/metadata.duckdb", cache_dir);
     {
         let conn = duckdb::Connection::open(&metadata_path)?;
         conn.execute("CREATE TABLE IF NOT EXISTS __graph_nodes (id BIGINT PRIMARY KEY, label TEXT, properties TEXT)", [])?;
         conn.execute("CREATE TABLE IF NOT EXISTS __graph_edges (source_id BIGINT, target_id BIGINT, type TEXT, weight DOUBLE, PRIMARY KEY (source_id, target_id, type))", [])?;
-        
+
         let alice_id = rustflow::nodes::common::hash_string_to_i64("Alice");
         let acme_id = rustflow::nodes::common::hash_string_to_i64("ACME");
-        
-        conn.execute("INSERT INTO __graph_nodes VALUES (?, ?, ?)", duckdb::params![alice_id, "PERSON", "{}"])?;
-        conn.execute("INSERT INTO __graph_nodes VALUES (?, ?, ?)", duckdb::params![acme_id, "ORG", "{}"])?;
-        conn.execute("INSERT INTO __graph_edges VALUES (?, ?, ?, ?)", duckdb::params![alice_id, acme_id, "works_for", 1.0])?;
+
+        conn.execute(
+            "INSERT INTO __graph_nodes VALUES (?, ?, ?)",
+            duckdb::params![alice_id, "PERSON", "{}"],
+        )?;
+        conn.execute(
+            "INSERT INTO __graph_nodes VALUES (?, ?, ?)",
+            duckdb::params![acme_id, "ORG", "{}"],
+        )?;
+        conn.execute(
+            "INSERT INTO __graph_edges VALUES (?, ?, ?, ?)",
+            duckdb::params![alice_id, acme_id, "works_for", 1.0],
+        )?;
     }
 
     let mut registry = NodeRegistry::new();
@@ -57,11 +66,14 @@ async fn test_rag_query_workflow() -> Result<()> {
         materialize: true,
         sub_workflow: None,
     });
-    let _ = workflow.add_edge
-(entities_idx, retriever_idx, rustflow::core::graph::EdgeInstance {
-        source_port: 0,
-        target_port: 0,
-    });
+    let _ = workflow.add_edge(
+        entities_idx,
+        retriever_idx,
+        rustflow::core::graph::EdgeInstance {
+            source_port: 0,
+            target_port: 0,
+        },
+    );
 
     // 3. Output Node
     let output_id = Uuid::new_v4();
@@ -73,11 +85,14 @@ async fn test_rag_query_workflow() -> Result<()> {
         materialize: false,
         sub_workflow: None,
     });
-    let _ = workflow.add_edge
-(retriever_idx, output_idx, rustflow::core::graph::EdgeInstance {
-        source_port: 0,
-        target_port: 0,
-    });
+    let _ = workflow.add_edge(
+        retriever_idx,
+        output_idx,
+        rustflow::core::graph::EdgeInstance {
+            source_port: 0,
+            target_port: 0,
+        },
+    );
 
     let rx = engine.execute_workflow(&workflow).await?;
     let mut rx = rx;
@@ -93,12 +108,12 @@ async fn test_rag_query_workflow() -> Result<()> {
 async fn test_research_loop_workflow() -> Result<()> {
     let tmp = tempdir()?;
     let cache_dir = tmp.path().to_str().unwrap().to_string();
-    
+
     let registry = Arc::new(NodeRegistry::default());
     let engine = SwanFlowEngine::with_cache_dir(registry, cache_dir.clone());
-    
+
     let mut workflow = Workflow::new("recursive_research");
-    
+
     // 1. Initial Query
     let query_id = Uuid::new_v4();
     let query_idx = workflow.add_node(NodeInstance {
@@ -123,11 +138,14 @@ async fn test_research_loop_workflow() -> Result<()> {
         materialize: true,
         sub_workflow: None,
     });
-    let _ = workflow.add_edge
-(query_idx, loop_idx, rustflow::core::graph::EdgeInstance {
-        source_port: 0,
-        target_port: 0,
-    });
+    let _ = workflow.add_edge(
+        query_idx,
+        loop_idx,
+        rustflow::core::graph::EdgeInstance {
+            source_port: 0,
+            target_port: 0,
+        },
+    );
 
     let rx = engine.execute_workflow(&workflow).await?;
     let mut rx = rx;
@@ -137,6 +155,9 @@ async fn test_research_loop_workflow() -> Result<()> {
         events_received += 1;
     }
 
-    assert!(events_received > 0, "Should have received workflow execution events");
+    assert!(
+        events_received > 0,
+        "Should have received workflow execution events"
+    );
     Ok(())
 }

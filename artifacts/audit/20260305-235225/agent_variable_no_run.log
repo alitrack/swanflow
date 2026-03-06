@@ -1,0 +1,54 @@
+warning: unused import: `Extension`
+ --> src/nodes/ai/mcp.rs:3:73
+  |
+3 | use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore, Extension};
+  |                                                                         ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated function `aws_config::load_from_env`: Use the `aws_config::load_defaults` function. If you don't care about future default behavior changes, you can continue to use this function by enabling the `behavior-version-latest` feature. Doing so will make this deprecation notice go away.
+    --> src/core/datasource.rs:1640:34
+     |
+1640 |         let config = aws_config::load_from_env().await;
+     |                                  ^^^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated associated function `pyo3::Python::<'_>::with_gil`: use `Python::attach` instead
+   --> src/nodes/script/python.rs:143:35
+    |
+143 |         let compiled_fn = Python::with_gil(|py| -> Result<Py<PyAny>> {
+    |                                   ^^^^^^^^
+
+warning: use of deprecated associated function `pyo3::Python::<'_>::with_gil`: use `Python::attach` instead
+   --> src/nodes/script/python.rs:223:38
+    |
+223 |                 let result = Python::with_gil(|py| -> Result<RecordBatch> {
+    |                                      ^^^^^^^^
+
+warning: fields `max_pages` and `cache_dir` are never read
+    --> src/nodes/ai/graph.rs:1083:5
+     |
+1080 | struct ResearchLoopStream {
+     |        ------------------ fields in this struct
+...
+1083 |     max_pages: usize,
+     |     ^^^^^^^^^
+...
+1086 |     cache_dir: String,
+     |     ^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `image` is never read
+   --> src/nodes/script/boxed_python.rs:111:5
+    |
+108 | pub struct BoxedPythonStream {
+    |            ----------------- field in this struct
+...
+111 |     image: String,
+    |     ^^^^^
+
+warning: `rustflow` (lib) generated 6 warnings (run `cargo fix --lib -p rustflow` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.30s
+  Executable tests/agent_variable_tests.rs (target/debug/deps/agent_variable_tests-89dfc5c678cb69d1)
