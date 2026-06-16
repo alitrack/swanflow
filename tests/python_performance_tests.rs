@@ -1,6 +1,6 @@
-use rustflow::core::engine::SwanFlowEngine;
-use rustflow::core::graph::{NodeInstance, Workflow};
-use rustflow::nodes::registry::NodeRegistry;
+use swanflow::core::engine::SwanFlowEngine;
+use swanflow::core::graph::{NodeInstance, Workflow};
+use swanflow::nodes::registry::NodeRegistry;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ async fn test_python_zero_copy_execution() {
         id: uuid::Uuid::new_v4(),
         type_id: "core.io.csv".to_string(),
         config: json!({ "path": "test_python.csv" }),
-        state: rustflow::nodes::NodeState::Configured,
+        state: swanflow::nodes::NodeState::Configured,
         materialize: false,
         sub_workflow: None,
     });
@@ -44,7 +44,7 @@ async fn test_python_zero_copy_execution() {
         config: json!({
             "script": "import pyarrow as pa\nimport pyarrow.compute as pc\n# batch is an arro3 object, convert to pyarrow\npa_batch = pa.record_batch(batch)\nval_col = pa_batch.column('val')\nnew_val = pc.add(val_col, 10)\nreturn pa.RecordBatch.from_arrays([new_val], names=['val'])"
         }),
-        state: rustflow::nodes::NodeState::Configured,
+        state: swanflow::nodes::NodeState::Configured,
         materialize: false,
         sub_workflow: None,
     });
@@ -53,7 +53,7 @@ async fn test_python_zero_copy_execution() {
         .add_edge(
             reader_idx,
             python_idx,
-            rustflow::core::graph::EdgeInstance {
+            swanflow::core::graph::EdgeInstance {
                 source_port: 0,
                 target_port: 0,
             },
@@ -65,13 +65,13 @@ async fn test_python_zero_copy_execution() {
     let mut success = false;
     while let Some(event) = rx.recv().await {
         println!("  Event: {:?}", event);
-        if let rustflow::nodes::NodeEvent::StateChanged { node_id, state } = event {
+        if let swanflow::nodes::NodeEvent::StateChanged { node_id, state } = event {
             if node_id == workflow.graph[python_idx].id
-                && matches!(state, rustflow::nodes::NodeState::Executed)
+                && matches!(state, swanflow::nodes::NodeState::Executed)
             {
                 success = true;
             }
-            if let rustflow::nodes::NodeState::Error(e) = state {
+            if let swanflow::nodes::NodeState::Error(e) = state {
                 panic!("Workflow error: {}", e);
             }
         }

@@ -2,6 +2,7 @@
 name = "swanflow"
 version = "0.1.0"
 edition = "2021"
+autobins = false
 description = "Rust-native Data Science DAG Engine — WASM UDF · AI Agent · DBX-Compatible Connectors"
 license = "Apache-2.0"
 repository = "https://github.com/alitrack/swanflow"
@@ -16,6 +17,16 @@ extended-connectors = []
 [lib]
 name = "swanflow"
 crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "swanflow"
+path = "src/main.rs"
+test = false
+
+[[bin]]
+name = "swanflow-adapter"
+path = "src/bin/swanflow-adapter.rs"
+test = false
 
 [dependencies]
 datafusion = "52.1.0"
@@ -44,7 +55,7 @@ pyo3-arrow = "0.14"
 parquet = { version = "57.0", features = ["arrow"] }
 calamine = "0.33.0"
 rust_xlsxwriter = "0.93.0"
-duckdb = "1.4"
+duckdb = "1.10503.1"
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls", "tokio-util"] }
 mongodb = "3.2.5"
 bson = { version = "2", features = ["chrono-0_4"] }

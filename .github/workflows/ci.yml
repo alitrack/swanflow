@@ -70,11 +70,8 @@ jobs:
 
       - name: Install DuckDB shared library
         run: |
-          wget -q https://github.com/duckdb/duckdb/releases/download/v1.4.0/libduckdb-manylinux-x64.zip
-          unzip -q libduckdb-manylinux-x64.zip -d /tmp/duckdb
-          sudo cp /tmp/duckdb/libduckdb.so /usr/lib/
-          sudo ldconfig
-          rm -rf /tmp/duckdb libduckdb-manylinux-x64.zip
+          # libduckdb-sys auto-downloads official libduckdb.so via DUCKDB_DOWNLOAD_LIB=1
+          # Configured in .cargo/config.toml — no manual download needed.
 
       - name: cargo test (lib)
         run: cargo test --lib

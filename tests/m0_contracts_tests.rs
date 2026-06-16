@@ -1,4 +1,4 @@
-use rustflow::nodes::ai::contracts::CitationItem;
+use swanflow::nodes::ai::contracts::CitationItem;
 
 #[test]
 fn test_contract_types_are_serializable() {

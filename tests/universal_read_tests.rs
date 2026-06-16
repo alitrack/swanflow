@@ -1,8 +1,8 @@
 use datafusion::dataframe::DataFrameWriteOptions;
-use rustflow::core::engine::SwanFlowEngine;
-use rustflow::core::graph::{NodeInstance, Workflow};
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::NodeState;
+use swanflow::core::engine::SwanFlowEngine;
+use swanflow::core::graph::{NodeInstance, Workflow};
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::NodeState;
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;
@@ -39,7 +39,7 @@ async fn test_universal_read_parquet() {
     // 3. Execute
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
     while let Some(event) = rx.recv().await {
-        if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
+        if let swanflow::nodes::NodeEvent::Error { message, .. } = event {
             panic!("Workflow failed: {}", message);
         }
     }
@@ -83,7 +83,7 @@ async fn test_universal_read_csv() {
     // 3. Execute
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
     while let Some(event) = rx.recv().await {
-        if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
+        if let swanflow::nodes::NodeEvent::Error { message, .. } = event {
             panic!("Workflow failed: {}", message);
         }
     }

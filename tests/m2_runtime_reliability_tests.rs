@@ -1,9 +1,9 @@
-use rustflow::nodes::ai::runtime::{
+use swanflow::nodes::ai::runtime::{
     AgentLoopOrchestratorNode, CheckpointResumeControllerNode, ObservabilityAuditLedgerNode,
     RetryBackoffGuardNode, RunStateStoreNode,
 };
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::NodeBehavior;
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::NodeBehavior;
 use serde_json::json;
 
 #[test]

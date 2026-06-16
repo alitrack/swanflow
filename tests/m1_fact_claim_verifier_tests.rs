@@ -1,6 +1,6 @@
-use rustflow::nodes::ai::verification::FactClaimVerifierNode;
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::NodeBehavior;
+use swanflow::nodes::ai::verification::FactClaimVerifierNode;
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::NodeBehavior;
 use serde_json::json;
 
 #[test]

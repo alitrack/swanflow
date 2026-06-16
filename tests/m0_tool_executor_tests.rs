@@ -1,5 +1,5 @@
-use rustflow::nodes::ai::tool_executor::ToolExecutorNode;
-use rustflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::ai::tool_executor::ToolExecutorNode;
+use swanflow::nodes::registry::NodeRegistry;
 use serde_json::json;
 
 #[test]

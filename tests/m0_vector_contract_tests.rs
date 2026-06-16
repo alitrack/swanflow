@@ -1,5 +1,5 @@
-use rustflow::nodes::ai::retrieval::{VectorIndexWriterNode, VectorRetrieverNode};
-use rustflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::ai::retrieval::{VectorIndexWriterNode, VectorRetrieverNode};
+use swanflow::nodes::registry::NodeRegistry;
 
 #[test]
 fn test_vector_writer_outputs_index_metadata_contract() {

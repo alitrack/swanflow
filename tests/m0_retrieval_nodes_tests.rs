@@ -1,5 +1,5 @@
-use rustflow::nodes::ai::retrieval::{QueryPlanningNode, SemanticChunkerNode};
-use rustflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::ai::retrieval::{QueryPlanningNode, SemanticChunkerNode};
+use swanflow::nodes::registry::NodeRegistry;
 use serde_json::json;
 
 #[test]

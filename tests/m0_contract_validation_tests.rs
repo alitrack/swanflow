@@ -1,11 +1,11 @@
-use rustflow::nodes::ai::contracts::{CitationTrackerNode, StructuredIoContractNode};
-use rustflow::nodes::ai::retrieval::{
+use swanflow::nodes::ai::contracts::{CitationTrackerNode, StructuredIoContractNode};
+use swanflow::nodes::ai::retrieval::{
     EmbeddingGeneratorNode, QueryPlanningNode, SemanticChunkerNode, VectorIndexWriterNode,
     VectorRetrieverNode,
 };
-use rustflow::nodes::ai::tool_executor::ToolExecutorNode;
-use rustflow::nodes::io::UniversalReadNode;
-use rustflow::nodes::NodeBehavior;
+use swanflow::nodes::ai::tool_executor::ToolExecutorNode;
+use swanflow::nodes::io::UniversalReadNode;
+use swanflow::nodes::NodeBehavior;
 use serde_json::json;
 
 #[test]

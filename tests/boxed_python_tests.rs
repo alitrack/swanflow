@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rustflow::core::datasource::S3Manager;
+use swanflow::core::datasource::S3Manager;
 use std::time::Duration;
 
 #[tokio::test]

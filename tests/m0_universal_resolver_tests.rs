@@ -1,4 +1,4 @@
-use rustflow::nodes::io::UniversalReadNode;
+use swanflow::nodes::io::UniversalReadNode;
 use serde_json::json;
 
 #[test]

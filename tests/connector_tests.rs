@@ -1,7 +1,7 @@
-use rustflow::core::engine::SwanFlowEngine;
-use rustflow::core::graph::{NodeInstance, Workflow};
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::NodeState;
+use swanflow::core::engine::SwanFlowEngine;
+use swanflow::core::graph::{NodeInstance, Workflow};
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::NodeState;
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;
@@ -50,7 +50,7 @@ async fn test_db_connector_sqlx_sqlite_basic() {
 
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
     while let Some(event) = rx.recv().await {
-        if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
+        if let swanflow::nodes::NodeEvent::Error { message, .. } = event {
             panic!("Workflow failed: {}", message);
         }
     }
@@ -113,7 +113,7 @@ async fn test_db_connector_sqlx_numeric_aggregation() {
         .add_edge(
             db_node_idx,
             sql_node_idx,
-            rustflow::core::graph::EdgeInstance {
+            swanflow::core::graph::EdgeInstance {
                 source_port: 0,
                 target_port: 0,
             },
@@ -123,7 +123,7 @@ async fn test_db_connector_sqlx_numeric_aggregation() {
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
     while let Some(event) = rx.recv().await {
         println!("DEBUG: Event: {:?}", event);
-        if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
+        if let swanflow::nodes::NodeEvent::Error { message, .. } = event {
             panic!("Workflow failed: {}", message);
         }
     }
@@ -220,7 +220,7 @@ async fn test_sql_node_parameterization() {
         .add_edge(
             db_node_idx,
             sql_node_idx,
-            rustflow::core::graph::EdgeInstance {
+            swanflow::core::graph::EdgeInstance {
                 source_port: 0,
                 target_port: 0,
             },
@@ -229,7 +229,7 @@ async fn test_sql_node_parameterization() {
 
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
     while let Some(event) = rx.recv().await {
-        if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
+        if let swanflow::nodes::NodeEvent::Error { message, .. } = event {
             panic!("Workflow failed: {}", message);
         }
     }
@@ -284,7 +284,7 @@ async fn test_db_connector_sqlx_timestamps() {
 
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
     while let Some(event) = rx.recv().await {
-        if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
+        if let swanflow::nodes::NodeEvent::Error { message, .. } = event {
             panic!("Workflow failed: {}", message);
         }
     }

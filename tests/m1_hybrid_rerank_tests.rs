@@ -1,8 +1,8 @@
-use rustflow::nodes::ai::retrieval::{
+use swanflow::nodes::ai::retrieval::{
     HybridRetrieverNode, RerankBackend, RerankerNode, RetrievalCandidate,
 };
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::NodeBehavior;
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::NodeBehavior;
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::TcpListener;

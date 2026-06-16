@@ -1,9 +1,9 @@
 use calamine::Reader;
 use rust_xlsxwriter::Workbook;
-use rustflow::core::engine::SwanFlowEngine;
-use rustflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::NodeState;
+use swanflow::core::engine::SwanFlowEngine;
+use swanflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::NodeState;
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -141,7 +141,7 @@ async fn test_excel_template_filling() {
     // 4. Execute Workflow
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
     while let Some(event) = rx.recv().await {
-        if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
+        if let swanflow::nodes::NodeEvent::Error { message, .. } = event {
             panic!("Workflow failed: {}", message);
         }
     }
@@ -220,7 +220,7 @@ async fn test_excel_styling_and_table() {
 
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
     while let Some(event) = rx.recv().await {
-        if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
+        if let swanflow::nodes::NodeEvent::Error { message, .. } = event {
             panic!("Workflow failed: {}", message);
         }
     }
@@ -297,7 +297,7 @@ async fn test_excel_report_and_metadata() {
 
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
     while let Some(event) = rx.recv().await {
-        if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
+        if let swanflow::nodes::NodeEvent::Error { message, .. } = event {
             panic!("Report generation failed: {}", message);
         }
     }
@@ -321,7 +321,7 @@ async fn test_excel_report_and_metadata() {
 
     let mut rx = engine.execute_workflow(&workflow_meta).await.unwrap();
     while let Some(event) = rx.recv().await {
-        if let rustflow::nodes::NodeEvent::Error { message, .. } = event {
+        if let swanflow::nodes::NodeEvent::Error { message, .. } = event {
             panic!("Metadata extraction failed: {}", message);
         }
     }

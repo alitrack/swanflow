@@ -1,4 +1,4 @@
-use rustflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::registry::NodeRegistry;
 use serde_json::json;
 
 #[test]

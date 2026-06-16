@@ -1,9 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use rustflow::nodes::ai::providers::LlmProvider;
-use rustflow::nodes::ai::ConfigWizard;
-use rustflow::nodes::transform::FilterNode;
-use rustflow::nodes::NodeBehavior;
+use swanflow::nodes::ai::providers::LlmProvider;
+use swanflow::nodes::ai::ConfigWizard;
+use swanflow::nodes::transform::FilterNode;
+use swanflow::nodes::NodeBehavior;
 use std::sync::Arc;
 
 struct MockProvider {

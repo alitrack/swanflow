@@ -1,8 +1,8 @@
 use dotenvy::dotenv;
-use rustflow::agent::AnalystAgent;
-use rustflow::core::engine::SwanFlowEngine;
-use rustflow::nodes::ai::providers::{LlmConfig, OpenAiProvider, ProviderKind};
-use rustflow::nodes::registry::NodeRegistry;
+use swanflow::agent::AnalystAgent;
+use swanflow::core::engine::SwanFlowEngine;
+use swanflow::nodes::ai::providers::{LlmConfig, OpenAiProvider, ProviderKind};
+use swanflow::nodes::registry::NodeRegistry;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -27,7 +27,7 @@ async fn test_real_ai_workflow_generation() {
         endpoint: Some(api_base),
     };
 
-    let provider: Arc<dyn rustflow::nodes::ai::providers::LlmProvider> =
+    let provider: Arc<dyn swanflow::nodes::ai::providers::LlmProvider> =
         Arc::new(OpenAiProvider::new(config).unwrap());
     let registry = Arc::new(NodeRegistry::default());
     let engine = Arc::new(SwanFlowEngine::new(registry.clone()));

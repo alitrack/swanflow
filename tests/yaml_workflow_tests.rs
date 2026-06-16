@@ -1,7 +1,7 @@
-use rustflow::core::engine::SwanFlowEngine;
-use rustflow::core::graph::Workflow;
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::NodeEvent;
+use swanflow::core::engine::SwanFlowEngine;
+use swanflow::core::graph::Workflow;
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::NodeEvent;
 use std::sync::Arc;
 
 fn should_run_engine_integration_tests() -> bool {

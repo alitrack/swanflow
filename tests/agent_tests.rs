@@ -1,9 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use rustflow::agent::AnalystAgent;
-use rustflow::core::engine::SwanFlowEngine;
-use rustflow::nodes::ai::providers::LlmProvider;
-use rustflow::nodes::registry::NodeRegistry;
+use swanflow::agent::AnalystAgent;
+use swanflow::core::engine::SwanFlowEngine;
+use swanflow::nodes::ai::providers::LlmProvider;
+use swanflow::nodes::registry::NodeRegistry;
 use std::sync::Arc;
 
 struct MockAnalystProvider {

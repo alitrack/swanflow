@@ -1,7 +1,7 @@
-use rustflow::core::engine::SwanFlowEngine;
-use rustflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::NodeState;
+use swanflow::core::engine::SwanFlowEngine;
+use swanflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::NodeState;
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;

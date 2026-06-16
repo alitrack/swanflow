@@ -1,12 +1,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use rustflow::core::engine::SwanFlowEngine;
-use rustflow::core::graph::{NodeInstance, Workflow};
-use rustflow::nodes::ai::graph::EntityExtractorNode;
-use rustflow::nodes::ai::providers::LlmProvider;
-use rustflow::nodes::io::GraphIndexWriterNode;
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::NodeState;
+use swanflow::core::engine::SwanFlowEngine;
+use swanflow::core::graph::{NodeInstance, Workflow};
+use swanflow::nodes::ai::graph::EntityExtractorNode;
+use swanflow::nodes::ai::providers::LlmProvider;
+use swanflow::nodes::io::GraphIndexWriterNode;
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::NodeState;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -81,7 +81,7 @@ async fn test_rag_build_workflow() -> Result<()> {
     let _ = workflow.add_edge(
         values_idx,
         extractor_idx,
-        rustflow::core::graph::EdgeInstance {
+        swanflow::core::graph::EdgeInstance {
             source_port: 0,
             target_port: 0,
         },
@@ -100,7 +100,7 @@ async fn test_rag_build_workflow() -> Result<()> {
     let _ = workflow.add_edge(
         extractor_idx,
         writer_idx,
-        rustflow::core::graph::EdgeInstance {
+        swanflow::core::graph::EdgeInstance {
             source_port: 0,
             target_port: 0,
         },
@@ -108,7 +108,7 @@ async fn test_rag_build_workflow() -> Result<()> {
     let _ = workflow.add_edge(
         extractor_idx,
         writer_idx,
-        rustflow::core::graph::EdgeInstance {
+        swanflow::core::graph::EdgeInstance {
             source_port: 1,
             target_port: 1,
         },

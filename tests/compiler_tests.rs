@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use rustflow::core::compiler::WorkflowCompiler;
-use rustflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::{NodeBehavior, NodeState};
+use swanflow::core::compiler::WorkflowCompiler;
+use swanflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::{NodeBehavior, NodeState};
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -10,13 +10,13 @@ use uuid::Uuid;
 struct TestNode;
 #[async_trait]
 impl NodeBehavior for TestNode {
-    fn spec(&self) -> rustflow::nodes::NodeSpec {
-        rustflow::nodes::NodeSpec {
+    fn spec(&self) -> swanflow::nodes::NodeSpec {
+        swanflow::nodes::NodeSpec {
             type_id: "test".into(),
             display_name: "Test".into(),
             description: "Test".into(),
             input_ports: vec![],
-            output_ports: vec![rustflow::nodes::PortSpec {
+            output_ports: vec![swanflow::nodes::PortSpec {
                 id: 0,
                 name: "out".into(),
                 description: "out".into(),
