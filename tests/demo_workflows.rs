@@ -45,6 +45,7 @@ async fn run_and_print_events(engine: &SwanFlowEngine, workflow: &Workflow, titl
             NodeEvent::Error { node_id, message } => {
                 println!("Node[{}] -> ERROR: {}", node_id, message);
             }
+            _ => {} // wildcard required by #[non_exhaustive]
         }
     }
 }
