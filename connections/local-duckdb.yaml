@@ -1,0 +1,10 @@
+name: "Local DuckDB"
+db_type: duckdb
+host: localhost
+port: 0
+user: ""
+password: ""
+database: /home/analyst/.swanflow/cache/metadata.duckdb
+ssl: false
+connect_timeout: 5
+query_timeout: 30

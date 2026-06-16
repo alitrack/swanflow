@@ -1,0 +1,14 @@
+# DBX-compatible database connection config
+# Usable by both SwanFlow and DBX (Beekeeper Studio)
+# See: https://github.com/supernovae-st/nika (schema compatible)
+name: "Production PostgreSQL"
+db_type: postgres
+host: db-prod.example.com
+port: 5432
+user: analyst
+password: "${DB_PASSWORD}"  # Or use environment variable
+database: analytics
+ssl: true
+connect_timeout: 30
+query_timeout: 120
+read_only: true

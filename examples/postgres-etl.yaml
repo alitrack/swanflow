@@ -1,0 +1,43 @@
+# SwanFlow Example: PostgreSQL ETL Pipeline
+#
+# Reads data from a PostgreSQL source, transforms with SQL,
+# and materializes results as Parquet.
+#
+# Connection config is loaded from DBX-compatible profile:
+#   connections/postgres-prod.yaml
+#
+# Usage:
+#   swanflow run examples/postgres-etl.yaml
+
+workflow: postgres-etl
+version: v1
+description: "PostgreSQL → SQL transform → Parquet export"
+
+nodes:
+  - id: source
+    type: db_scan
+    config:
+      connection: "connections/postgres-prod.yaml"
+      table: "orders"
+      limit: 10000
+
+  - id: summary
+    type: sql_transform
+    inputs: [source]
+    config:
+      sql: |
+        SELECT
+          DATE_TRUNC('month', order_date) AS month,
+          customer_id,
+          COUNT(*) AS order_count,
+          SUM(amount) AS total_amount
+        FROM input
+        GROUP BY 1, 2
+        ORDER BY 1 DESC, 3 DESC
+
+  - id: export
+    type: parquet_sink
+    inputs: [summary]
+    config:
+      path: "output/monthly_summary.parquet"
+      mode: "overwrite"

@@ -1,0 +1,10 @@
+name: "Analytics ClickHouse"
+db_type: clickhouse
+host: clickhouse.internal
+port: 8123
+user: default
+password: ""
+database: default
+ssl: false
+connect_timeout: 10
+query_timeout: 60

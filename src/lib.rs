@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod core;
+pub mod mcp;
 pub mod nodes;
 
 use std::sync::Arc;

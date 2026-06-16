@@ -1,0 +1,31 @@
+# SwanFlow Example: Hello World
+#
+# A minimal workflow demonstrating SwanFlow's DAG data pipeline.
+# Uses DuckDB's built-in generate_series to produce sample data,
+# then applies a SQL transform.
+#
+# Usage:
+#   swanflow run examples/hello-world.yaml
+
+workflow: hello-world
+version: v1
+description: "Minimal SwanFlow DAG: generate → transform"
+
+nodes:
+  - id: data_source
+    type: duckdb_source    # DuckDB: can query CSV, Parquet, or inline SQL
+    config:
+      query: "SELECT range as id, 'item_' || range::VARCHAR as label FROM generate_series(1, 5) AS t(range)"
+      materialize: true
+
+  - id: transform
+    type: sql_transform
+    inputs: [data_source]
+    config:
+      sql: "SELECT id, label, id * 10 AS scaled FROM input"
+
+  - id: output
+    type: table_view
+    inputs: [transform]
+    config:
+      limit: 10

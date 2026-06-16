@@ -10,3 +10,12 @@ test_data.csv
 .env
 *.xlsx
 .worktrees/
+.cargo/
+.rustup/
+artifacts/
+demo_data.csv
+test_data_cache.csv
+test_data_events.csv
+test_data_schema.csv
+test_multi_term.csv
+libduckdb.zip
