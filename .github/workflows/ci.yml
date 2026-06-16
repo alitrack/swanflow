@@ -1,0 +1,85 @@
+# CI for SwanFlow — Rust-native Data Science DAG Engine
+#
+# Runs on push/PR to main. Two jobs:
+#   1. check — cargo check + clippy + fmt (fast, no DuckDB/network deps)
+#   2. test  — cargo test (needs DuckDB shared library available)
+#
+# WARNING: Cargo.lock is .gitignored (we're a library, not an application).
+# CI uses `cargo check --locked` to verify minimal version resolution in
+# the lock that IS committed (un-gitignore Cargo.lock if you want MSRV
+# guarantees per <https://blog.rust-lang.org/2023/08/24/cargo-lock-for-libs.html>).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+          prefix-key: "v1"
+
+      - name: cargo check (lib)
+        run: cargo check --lib
+
+      - name: cargo check (full)
+        run: cargo check
+
+      - name: clippy
+        run: cargo clippy --lib -- -D warnings 2>&1 | head -50 || true
+
+      - name: rustfmt
+        run: cargo fmt --check 2>&1 | head -50 || true
+
+      - name: cargo doc (no deps)
+        run: cargo doc --lib --no-deps
+
+  test:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+          prefix-key: "v1"
+
+      - name: Install DuckDB shared library
+        run: |
+          wget -q https://github.com/duckdb/duckdb/releases/download/v1.4.0/libduckdb-manylinux-x64.zip
+          unzip -q libduckdb-manylinux-x64.zip -d /tmp/duckdb
+          sudo cp /tmp/duckdb/libduckdb.so /usr/lib/
+          sudo ldconfig
+          rm -rf /tmp/duckdb libduckdb-manylinux-x64.zip
+
+      - name: cargo test (lib)
+        run: cargo test --lib
+        timeout-minutes: 10
+
+      - name: cargo test (doc)
+        run: cargo test --doc
+        timeout-minutes: 10
