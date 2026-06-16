@@ -249,10 +249,10 @@ fn bson_value_to_type(value: &Bson) -> BsonType {
         Bson::Int32(_) => BsonType::Int32,
         Bson::Int64(_) => BsonType::Int64,
         Bson::Double(_) | Bson::Decimal128(_) => BsonType::Float64,
-        Bson::String(_) | Bson::ObjectId(_) | Bson::Binary(_) | Bson::Uuid(_) => {
+        Bson::String(_) | Bson::ObjectId(_) | Bson::Binary(_) => {
             BsonType::String
         }
-        Bson::DateTime(_) => BsonType::Date,
+        Bson::DateTime(_) | Bson::Timestamp(_) => BsonType::Date,
         Bson::Array(_) => BsonType::Array,
         Bson::Document(_) => BsonType::Document,
     }
@@ -351,7 +351,7 @@ fn docs_to_batch(
                         DataType::Timestamp(_, _) => {
                             ts_cols[col_idx][row_idx] = bson_val
                                 .as_datetime()
-                                .map(|dt| dt.timestamp_nanos_opt().unwrap_or(0));
+                                .map(|dt| dt.timestamp_millis() * 1_000_000);
                         }
                         _ => {
                             // Utf8 or other — serialize to string

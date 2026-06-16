@@ -53,6 +53,18 @@ pub enum NodeState {
     Error(String),
 }
 
+/// Capability model for nodes — inspired by Nika's read-XOR-write model.
+///
+/// - `ReadOnly`: transforms data in-memory, no external side effects
+/// - `ReadWrite`: may read from or write to external systems
+/// - `WriteOnly`: sends data out (e.g. email, webhook), no output port
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum NodeCapability {
+    ReadOnly,
+    ReadWrite,
+    WriteOnly,
+}
+
 /// Event emitted by a node during its lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeEvent {
@@ -212,6 +224,18 @@ pub trait NodeBehavior: Send + Sync {
     /// Current config schema version for this node.
     fn config_version(&self) -> u32 {
         1
+    }
+
+    /// Returns the capability model for this node.
+    ///
+    /// - `ReadOnly`: transforms data in-memory, no external side effects
+    /// - `ReadWrite`: may read from or write to external systems
+    /// - `WriteOnly`: sends data to external systems (e.g. email, webhook)
+    ///
+    /// Default is ReadWrite. Pure transform nodes (filter, project, aggregate)
+    /// should override to ReadOnly for safety gating.
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadWrite
     }
 
     /// Migrate config from one schema version to the next.

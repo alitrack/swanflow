@@ -14,9 +14,8 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
-use futures::StreamExt;
 
-use crate::core::datasource::{ConnConfig, Connector, DynamicArrayBuilder};
+use crate::core::datasource::{ConnConfig, Connector};
 
 /// Redis key-value connector.
 pub struct RedisConnector {
@@ -24,26 +23,43 @@ pub struct RedisConnector {
     _config: ConnConfig,
 }
 
+async fn scan_keys(client: &redis::Client) -> Result<Vec<String>> {
+    let mut con = client.get_async_connection()
+        .await
+        .map_err(|e| anyhow!("Redis connection failed: {}", e))?;
+
+    let mut cursor = 0i64;
+    let mut all_keys: Vec<String> = Vec::new();
+    loop {
+        let result: (i64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("COUNT")
+            .arg(1000)
+            .query_async(&mut con)
+            .await
+            .map_err(|e| anyhow!("Redis SCAN failed: {}", e))?;
+        cursor = result.0;
+        all_keys.extend(result.1);
+        if cursor == 0 {
+            break;
+        }
+    }
+    all_keys.sort();
+    all_keys.truncate(100);
+    Ok(all_keys)
+}
+
 #[async_trait]
 impl Connector for RedisConnector {
     async fn connect(config: ConnConfig) -> Result<Self> {
-        let client = redis::Client::open(&config.url)
+        let client = redis::Client::open(config.url.as_str())
             .map_err(|e| anyhow!("Invalid Redis URL: {}", e))?;
         Ok(Self { client, _config: config })
     }
 
     async fn list_tables(&self) -> Result<Vec<String>> {
-        let mut con = self.client.get_multiplexed_async_connection().await
-            .map_err(|e| anyhow!("Redis connection failed: {}", e))?;
+        let keys = scan_keys(&self.client).await?;
 
-        // Use SCAN to discover key patterns
-        use redis::AsyncCommands;
-        let mut keys: Vec<String> = con.scan().await
-            .map_err(|e| anyhow!("Redis SCAN failed: {}", e))?;
-        keys.sort();
-        keys.truncate(100);
-
-        // Extract common prefixes as "table" names
         let mut prefixes: Vec<String> = Vec::new();
         for key in &keys {
             if let Some(pos) = key.find(':') {
@@ -70,19 +86,19 @@ impl Connector for RedisConnector {
         Ok(Arc::new(schema))
     }
 
-    async fn scan(&self, _table: &str, _projection: &[usize]) -> Result<SendableRecordBatchStream> {
-        let mut con = self.client.get_multiplexed_async_connection().await
-            .map_err(|e| anyhow!("Redis connection failed: {}", e))?;
-
-        use redis::AsyncCommands;
-        let keys: Vec<String> = con.scan().await
-            .map_err(|e| anyhow!("Redis SCAN failed: {}", e))?;
+    async fn scan(
+        &self,
+        _table: &str,
+        _projection: &[usize],
+    ) -> Result<SendableRecordBatchStream> {
+        let keys = scan_keys(&self.client).await?;
 
         let schema = self.get_schema(_table).await?;
         let schema_clone = schema.clone();
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let mut builder = RecordBatchReceiverStream::builder(schema.clone(), 1);
+        let tx = builder.tx();
 
-        tokio::spawn(async move {
+        builder.spawn(async move {
             let mut key_builder = datafusion::arrow::array::StringBuilder::new();
             let mut value_builder = datafusion::arrow::array::StringBuilder::new();
             let mut type_builder = datafusion::arrow::array::StringBuilder::new();
@@ -106,12 +122,15 @@ impl Connector for RedisConnector {
                 Err(e) => {
                     let _ = tx.send(Err(
                         datafusion::error::DataFusionError::ArrowError(Box::new(e), None),
-                    )).await;
+                    ))
+                    .await;
                 }
             }
+
+            Ok(())
         });
 
-        Ok(Box::pin(RecordBatchReceiverStream::new(schema, rx)))
+        Ok(builder.build())
     }
 
     fn name(&self) -> &'static str {

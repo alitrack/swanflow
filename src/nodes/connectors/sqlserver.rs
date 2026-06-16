@@ -107,7 +107,7 @@ impl SqlServerConnector {
     }
 
     /// Create a tiberius client connection.
-    async fn connect_client(&self) -> Result<Client<TcpStream>> {
+    async fn connect_client(&self) -> Result<Client<tokio_util::compat::Compat<TcpStream>>> {
         let mut config = Config::new();
         config.host(&self.server);
         config.port(self.port);
