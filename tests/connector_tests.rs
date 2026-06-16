@@ -46,6 +46,7 @@ async fn test_db_connector_sqlx_sqlite_basic() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();
@@ -95,6 +96,7 @@ async fn test_db_connector_sqlx_numeric_aggregation() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let sql_node_id = Uuid::new_v4();
@@ -107,6 +109,7 @@ async fn test_db_connector_sqlx_numeric_aggregation() {
         state: NodeState::Configured,
         materialize: true, // MUST materialize to be queryable by caller via 'node_...' table
         sub_workflow: None,
+        ..Default::default()
     });
 
     workflow
@@ -201,6 +204,7 @@ async fn test_sql_node_parameterization() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let sql_node_id = Uuid::new_v4();
@@ -214,6 +218,7 @@ async fn test_sql_node_parameterization() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     workflow
@@ -280,6 +285,7 @@ async fn test_db_connector_sqlx_timestamps() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let mut rx = engine.execute_workflow(&workflow).await.unwrap();

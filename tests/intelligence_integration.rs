@@ -148,6 +148,7 @@ async fn test_self_healing_error_capture() -> Result<()> {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
     let rx = engine.execute_workflow(&workflow).await?;
     let mut rx = rx;
@@ -188,6 +189,7 @@ async fn test_mcp_node_integration() -> Result<()> {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+    ..Default::default()
     });
     let rx = engine.execute_workflow(&workflow).await?;
     let mut rx = rx;

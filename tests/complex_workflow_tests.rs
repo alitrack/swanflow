@@ -34,6 +34,7 @@ async fn test_complex_metanode_optimization() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
     let sub_sql = sub_workflow.add_node(NodeInstance {
         id: Uuid::new_v4(),
@@ -42,6 +43,7 @@ async fn test_complex_metanode_optimization() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
     let sub_out = sub_workflow.add_node(NodeInstance {
         id: Uuid::new_v4(),
@@ -50,6 +52,7 @@ async fn test_complex_metanode_optimization() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
     sub_workflow
         .add_edge(
@@ -81,6 +84,7 @@ async fn test_complex_metanode_optimization() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
     let meta_idx = main_workflow.add_node(NodeInstance {
         id: Uuid::new_v4(),
@@ -89,6 +93,7 @@ async fn test_complex_metanode_optimization() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: Some(Box::new(sub_workflow)),
+        ..Default::default()
     });
     let project_idx = main_workflow.add_node(NodeInstance {
         id: Uuid::new_v4(),
@@ -97,6 +102,7 @@ async fn test_complex_metanode_optimization() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     main_workflow

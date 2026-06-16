@@ -16,6 +16,7 @@ async fn test_m0_rag_with_tool_executor_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let tool_executor = workflow.add_node(NodeInstance {
@@ -25,6 +26,7 @@ async fn test_m0_rag_with_tool_executor_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let structured = workflow.add_node(NodeInstance {
@@ -34,6 +36,7 @@ async fn test_m0_rag_with_tool_executor_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let citation = workflow.add_node(NodeInstance {
@@ -43,6 +46,7 @@ async fn test_m0_rag_with_tool_executor_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     workflow

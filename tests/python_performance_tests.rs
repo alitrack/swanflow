@@ -35,6 +35,7 @@ async fn test_python_zero_copy_execution() {
         state: swanflow::nodes::NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     // 2. Add Python Node that increments values
@@ -47,6 +48,7 @@ async fn test_python_zero_copy_execution() {
         state: swanflow::nodes::NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     workflow

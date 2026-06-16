@@ -50,6 +50,7 @@ async fn test_excel_read_preview() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     // 4. Infer Metadata (Preview)
@@ -110,6 +111,7 @@ async fn test_excel_template_filling() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     let node_b_id = Uuid::new_v4();
@@ -125,6 +127,7 @@ async fn test_excel_template_filling() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     workflow
@@ -189,6 +192,7 @@ async fn test_excel_styling_and_table() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     let node_b_id = Uuid::new_v4();
@@ -205,6 +209,7 @@ async fn test_excel_styling_and_table() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     workflow
@@ -262,6 +267,7 @@ async fn test_excel_report_and_metadata() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     let node_b_id = Uuid::new_v4();
@@ -282,6 +288,7 @@ async fn test_excel_report_and_metadata() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     workflow
@@ -314,6 +321,7 @@ async fn test_excel_report_and_metadata() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     // let metadata = engine.infer_metadata(&workflow_meta).await.unwrap();

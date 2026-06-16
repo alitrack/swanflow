@@ -34,6 +34,7 @@ async fn test_universal_read_parquet() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     // 3. Execute
@@ -78,6 +79,7 @@ async fn test_universal_read_csv() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     // 3. Execute

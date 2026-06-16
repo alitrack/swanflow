@@ -36,6 +36,7 @@ async fn test_python_restricted_import() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     // This script tries to import 'os' which should be blocked
@@ -47,6 +48,7 @@ return batch" }),
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     workflow
@@ -98,6 +100,7 @@ async fn test_python_valid_transform() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     // Valid script: multiplies column 'val' by 2
@@ -108,6 +111,7 @@ async fn test_python_valid_transform() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     workflow

@@ -183,6 +183,7 @@ async fn test_preflight_validation_error_is_classified() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let mut compiler = WorkflowCompiler::new(false);
@@ -218,6 +219,7 @@ async fn test_preflight_runs_multi_step_migration_with_defaults() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let mut compiler = WorkflowCompiler::new(false);
@@ -254,6 +256,7 @@ async fn test_unknown_node_degraded_loading_and_execution_failure() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let metadata = engine
@@ -318,6 +321,7 @@ async fn test_self_healing_is_skipped_for_validation_or_migration_failures() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let mut rx = engine
@@ -355,6 +359,7 @@ async fn test_self_healing_runs_for_recoverable_planning_or_execution_errors() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let mut rx = engine

@@ -16,6 +16,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     let planner = workflow.add_node(NodeInstance {
@@ -25,6 +26,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     let chunker = workflow.add_node(NodeInstance {
@@ -34,6 +36,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     let writer = workflow.add_node(NodeInstance {
@@ -43,6 +46,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     let retriever = workflow.add_node(NodeInstance {
@@ -52,6 +56,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     let structured = workflow.add_node(NodeInstance {
@@ -61,6 +66,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     let citation = workflow.add_node(NodeInstance {
@@ -70,6 +76,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
 
     workflow

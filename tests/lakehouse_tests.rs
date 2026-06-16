@@ -23,6 +23,7 @@ async fn test_decoupled_sql_querying() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let table_name = format!("node_{}", &node_a_id.to_string()[..8]);
@@ -35,6 +36,7 @@ async fn test_decoupled_sql_querying() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     workflow
@@ -111,6 +113,7 @@ async fn test_chained_decoupled_sql() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
     let table_a = format!("node_{}", &node_a_id.to_string()[..8]);
 
@@ -123,6 +126,7 @@ async fn test_chained_decoupled_sql() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
     let table_b = format!("node_{}", &node_b_id.to_string()[..8]);
 
@@ -135,6 +139,7 @@ async fn test_chained_decoupled_sql() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
     let table_c = format!("node_{}", &node_c_id.to_string()[..8]);
 

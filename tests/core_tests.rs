@@ -64,6 +64,7 @@ fn test_workflow_graph_construction() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
     let n2 = workflow.add_node(NodeInstance {
         id: Uuid::new_v4(),
@@ -72,6 +73,7 @@ fn test_workflow_graph_construction() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     workflow
@@ -99,6 +101,7 @@ fn test_cycle_detection() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
     let n2 = workflow.add_node(NodeInstance {
         id: Uuid::new_v4(),
@@ -107,6 +110,7 @@ fn test_cycle_detection() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     workflow
@@ -143,6 +147,7 @@ fn test_metanode_structure() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let metanode_idx = main_workflow.add_node(NodeInstance {
@@ -152,6 +157,7 @@ fn test_metanode_structure() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: Some(Box::new(sub_workflow)),
+        ..Default::default()
     });
 
     let metanode = main_workflow.get_node(metanode_idx).unwrap();

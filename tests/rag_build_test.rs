@@ -66,6 +66,7 @@ async fn test_rag_build_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
 
     // 2. Entity Extractor
@@ -77,6 +78,7 @@ async fn test_rag_build_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+        ..Default::default()
     });
     let _ = workflow.add_edge(
         values_idx,
@@ -96,6 +98,7 @@ async fn test_rag_build_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
     let _ = workflow.add_edge(
         extractor_idx,

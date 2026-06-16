@@ -37,6 +37,7 @@ async fn test_engine_execution_with_events() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let sql_node_id = Uuid::new_v4();
@@ -47,6 +48,7 @@ async fn test_engine_execution_with_events() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     workflow
@@ -99,6 +101,7 @@ async fn test_materialization_and_cache() {
         state: NodeState::Configured,
         materialize: true, // Enable materialization
         sub_workflow: None,
+        ..Default::default()
     });
 
     // 1. First execution: should materialize
@@ -156,6 +159,7 @@ async fn test_schema_inference() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     let sql_id = Uuid::new_v4();
@@ -166,6 +170,7 @@ async fn test_schema_inference() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+        ..Default::default()
     });
 
     workflow

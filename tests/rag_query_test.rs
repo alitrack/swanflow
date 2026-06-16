@@ -54,6 +54,7 @@ async fn test_rag_query_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+    ..Default::default()
     });
 
     // 2. Graph Retriever
@@ -65,6 +66,7 @@ async fn test_rag_query_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+    ..Default::default()
     });
     let _ = workflow.add_edge(
         entities_idx,
@@ -84,6 +86,7 @@ async fn test_rag_query_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
+    ..Default::default()
     });
     let _ = workflow.add_edge(
         retriever_idx,
@@ -123,6 +126,7 @@ async fn test_research_loop_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+    ..Default::default()
     });
 
     // 2. Research Loop
@@ -137,6 +141,7 @@ async fn test_research_loop_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
+    ..Default::default()
     });
     let _ = workflow.add_edge(
         query_idx,
