@@ -5,6 +5,7 @@
 //! DataFusion query engine.
 
 pub mod clickhouse;
+pub mod mock;
 #[cfg(feature = "extended-connectors")]
 pub mod mongodb;
 pub mod mysql;
