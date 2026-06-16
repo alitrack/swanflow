@@ -836,6 +836,27 @@ impl SwanFlowEngine {
             }
         };
 
+        // Capability gate: log the node's capability for auditability
+        match spec.capability() {
+            crate::nodes::NodeCapability::ReadOnly => {
+                // Pure transform — no side effects expected
+            }
+            crate::nodes::NodeCapability::ReadWrite => {
+                println!(
+                    "CAPABILITY: ReadWrite node {} ({}) — may access external systems",
+                    node.id,
+                    spec.spec().type_id
+                );
+            }
+            crate::nodes::NodeCapability::WriteOnly => {
+                println!(
+                    "CAPABILITY: WriteOnly node {} ({}) — may send data externally",
+                    node.id,
+                    spec.spec().type_id
+                );
+            }
+        }
+
         let compiled_plans = spec
             .propose_plan(input_plans, &rendered_config)
             .await

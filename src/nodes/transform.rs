@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
 use crate::nodes::config as cfg;
-use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
+use crate::nodes::{NodeBehavior, NodeCapability, NodeSpec, PortSpec};
 
 /// Filter rows based on a SQL expression.
 pub struct FilterNode;
@@ -41,6 +41,10 @@ impl NodeBehavior for FilterNode {
     fn validate(&self, config: &JsonValue) -> Result<()> {
         cfg::required_string(config, "expr")?;
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(
@@ -95,6 +99,10 @@ impl NodeBehavior for ProjectNode {
     fn validate(&self, config: &JsonValue) -> Result<()> {
         cfg::required_array(config, "exprs")?;
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(
@@ -153,6 +161,10 @@ impl NodeBehavior for AggregateNode {
             );
         }
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(
@@ -221,6 +233,10 @@ impl NodeBehavior for WindowNode {
         Ok(())
     }
 
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
+    }
+
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
@@ -277,6 +293,10 @@ impl NodeBehavior for ConditionNode {
     fn validate(&self, config: &JsonValue) -> Result<()> {
         cfg::required_string(config, "expr")?;
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(
@@ -343,6 +363,10 @@ impl NodeBehavior for ForEachNode {
         Ok(())
     }
 
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
+    }
+
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
@@ -394,6 +418,10 @@ impl NodeBehavior for ProfilerNode {
 
     fn validate(&self, _config: &JsonValue) -> Result<()> {
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(
@@ -462,6 +490,10 @@ impl NodeBehavior for VariableCreatorNode {
         Ok(())
     }
 
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
+    }
+
     async fn propose_plan(
         &self,
         _inputs: Vec<LogicalPlan>,
@@ -518,6 +550,10 @@ impl NodeBehavior for TableToVariableNode {
 
     fn validate(&self, _config: &JsonValue) -> Result<()> {
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(
@@ -587,6 +623,10 @@ impl NodeBehavior for GraphMergerNode {
 
     fn validate(&self, _config: &JsonValue) -> Result<()> {
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(
@@ -662,6 +702,10 @@ impl NodeBehavior for TableSchemaValidatorNode {
 
     fn validate(&self, _config: &JsonValue) -> Result<()> {
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(
@@ -804,6 +848,10 @@ impl NodeBehavior for SemanticCleanerNode {
         Ok(())
     }
 
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
+    }
+
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
@@ -887,6 +935,10 @@ impl NodeBehavior for AiRouterNode {
 
     fn validate(&self, _config: &JsonValue) -> Result<()> {
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(

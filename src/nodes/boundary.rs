@@ -4,7 +4,7 @@ use datafusion::logical_expr::LogicalPlan;
 use duckdb::Connection;
 use serde_json::Value as JsonValue;
 
-use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
+use crate::nodes::{NodeBehavior, NodeCapability, NodeSpec, PortSpec};
 
 /// Input boundary node for sub-workflows.
 pub struct InputNode;
@@ -33,6 +33,10 @@ impl NodeBehavior for InputNode {
 
     fn validate(&self, _config: &JsonValue) -> Result<()> {
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(
@@ -71,6 +75,10 @@ impl NodeBehavior for OutputNode {
 
     fn validate(&self, _config: &JsonValue) -> Result<()> {
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(

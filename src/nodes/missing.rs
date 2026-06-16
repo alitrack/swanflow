@@ -17,7 +17,7 @@ use datafusion::physical_plan::{
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
-use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
+use crate::nodes::{NodeBehavior, NodeCapability, NodeSpec, PortSpec};
 
 #[derive(Debug)]
 pub struct MissingNode {
@@ -61,6 +61,10 @@ impl NodeBehavior for MissingNode {
 
     fn validate(&self, _config: &JsonValue) -> Result<()> {
         Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
     }
 
     async fn propose_plan(
