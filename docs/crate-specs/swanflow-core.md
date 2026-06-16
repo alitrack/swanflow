@@ -15,7 +15,12 @@ swanflow/                     — 单 crate, cdylib+rlib
 │   │   │   └── metadata.rs   — WorkflowMetadata
 │   │   ├── datasource.rs     — 🔴 1,933 行 ⏳ 待拆分
 │   │   ├── error.rs          — 🟢 SwanFlowError
-│   │   ├── kernel.rs         — 🟢 Kernel traits
+│   │   ├── kernel/           — 🟢 Kernel traits (17 traits, 3 groups)
+│   │   │   ├── mod.rs        — re-export 统一入口
+│   │   │   ├── core.rs       — 8 traits: DbRead/DbWrite/FsRead/HttpFetch/KeyStore/Clock/BlobStore/ShellExec/ProcessManager
+│   │   │   ├── ai.rs         — 3 traits: LLMInfer/Embedding/Tokenize
+│   │   │   ├── runtime.rs    — 3 traits: CancellationToken/Timeout/Progress
+│   │   │   └── mock.rs       — 所有 mock 实现 + 27 个测试
 │   │   ├── graph.rs          — 🟢 Workflow DAG
 │   │   ├── compiler.rs       — 🟢 Workflow compiler
 │   │   ├── connection_config.rs — 🟢 DBX-compatible config

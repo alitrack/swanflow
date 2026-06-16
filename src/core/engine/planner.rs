@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde_json::json;
 use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::Result;
 use datafusion::execution::context::{QueryPlanner, SessionState};
