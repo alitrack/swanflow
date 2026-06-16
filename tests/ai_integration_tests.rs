@@ -1,9 +1,9 @@
 use dotenvy::dotenv;
+use std::sync::Arc;
 use swanflow::agent::AnalystAgent;
 use swanflow::core::engine::SwanFlowEngine;
 use swanflow::nodes::ai::providers::{LlmConfig, OpenAiProvider, ProviderKind};
 use swanflow::nodes::registry::NodeRegistry;
-use std::sync::Arc;
 
 #[tokio::test]
 async fn test_real_ai_workflow_generation() {

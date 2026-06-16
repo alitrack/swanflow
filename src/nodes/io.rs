@@ -31,7 +31,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-
 use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
 use crate::nodes::config as cfg;
 use crate::nodes::connectors::clickhouse::ClickHouseConnector;
@@ -1252,7 +1251,10 @@ impl DbConnectorNode {
         let (path, attach_sql) = if driver == DbDriver::DuckDBPostgres {
             (
                 ":memory:".to_string(),
-                Some(format!("ATTACH '{}' AS ext_db (TYPE postgres);", expanded_url)),
+                Some(format!(
+                    "ATTACH '{}' AS ext_db (TYPE postgres);",
+                    expanded_url
+                )),
             )
         } else {
             let db_path = expanded_url.trim_start_matches("sqlite://");
@@ -1262,8 +1264,8 @@ impl DbConnectorNode {
             )
         };
 
-        let batches = DuckDBHelper::query_arrow(&path, query, &[ext.to_string()], &attach_sql)
-            .await?;
+        let batches =
+            DuckDBHelper::query_arrow(&path, query, &[ext.to_string()], &attach_sql).await?;
         if batches.is_empty() {
             return Err(anyhow!("Query returned no data for schema inference"));
         }
@@ -1283,10 +1285,7 @@ impl DbConnectorNode {
         )])
     }
 
-    async fn build_sqlx_any_plan(
-        expanded_url: &str,
-        query: &str,
-    ) -> Result<Vec<LogicalPlan>> {
+    async fn build_sqlx_any_plan(expanded_url: &str, query: &str) -> Result<Vec<LogicalPlan>> {
         sqlx::any::install_default_drivers();
         let normalized_url = if expanded_url.starts_with("sqlite3://") {
             expanded_url.replace("sqlite3://", "sqlite://")
@@ -1360,8 +1359,14 @@ impl NodeBehavior for DbConnectorNode {
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
         cfg::required_string(config, "url")?;
-        if config.get("query").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty())
-            && config.get("table").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty())
+        if config
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map_or(true, |s| s.is_empty())
+            && config
+                .get("table")
+                .and_then(|v| v.as_str())
+                .map_or(true, |s| s.is_empty())
         {
             return Err(anyhow!("Either 'query' or 'table' must be provided"));
         }
@@ -1433,7 +1438,9 @@ impl NodeBehavior for DbConnectorNode {
                     timeout_secs: 30,
                 };
                 let connector = PostgresConnector::connect(conn_config).await?;
-                let schema = connector.get_schema(&effective_query.trim_start_matches("SELECT * FROM ")).await?;
+                let schema = connector
+                    .get_schema(&effective_query.trim_start_matches("SELECT * FROM "))
+                    .await?;
                 let df_schema = Arc::new(datafusion::common::DFSchema::try_from(schema.clone())?);
 
                 Ok(vec![LogicalPlan::Extension(
@@ -1456,7 +1463,9 @@ impl NodeBehavior for DbConnectorNode {
                     timeout_secs: 30,
                 };
                 let connector = MySqlConnector::connect(conn_config).await?;
-                let schema = connector.get_schema(&effective_query.trim_start_matches("SELECT * FROM ")).await?;
+                let schema = connector
+                    .get_schema(&effective_query.trim_start_matches("SELECT * FROM "))
+                    .await?;
                 let df_schema = Arc::new(datafusion::common::DFSchema::try_from(schema.clone())?);
 
                 Ok(vec![LogicalPlan::Extension(
@@ -1479,7 +1488,9 @@ impl NodeBehavior for DbConnectorNode {
                     timeout_secs: 30,
                 };
                 let connector = ClickHouseConnector::connect(conn_config).await?;
-                let schema = connector.get_schema(&effective_query.trim_start_matches("SELECT * FROM ")).await?;
+                let schema = connector
+                    .get_schema(&effective_query.trim_start_matches("SELECT * FROM "))
+                    .await?;
                 let df_schema = Arc::new(datafusion::common::DFSchema::try_from(schema.clone())?);
 
                 Ok(vec![LogicalPlan::Extension(

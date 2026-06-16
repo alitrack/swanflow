@@ -130,12 +130,7 @@ impl Default for NodeInstance {
 
 impl NodeInstance {
     /// Create a new NodeInstance with all optional fields defaulted.
-    pub fn new(
-        id: Uuid,
-        type_id: impl Into<String>,
-        config: JsonValue,
-        state: NodeState,
-    ) -> Self {
+    pub fn new(id: Uuid, type_id: impl Into<String>, config: JsonValue, state: NodeState) -> Self {
         Self {
             id,
             type_id: type_id.into(),

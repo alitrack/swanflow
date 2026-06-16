@@ -1,8 +1,8 @@
+use serde_json::json;
 use swanflow::core::compiler::WorkflowCompiler;
 use swanflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeState;
-use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]

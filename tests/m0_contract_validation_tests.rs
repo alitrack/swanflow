@@ -1,3 +1,4 @@
+use serde_json::json;
 use swanflow::nodes::ai::contracts::{CitationTrackerNode, StructuredIoContractNode};
 use swanflow::nodes::ai::retrieval::{
     EmbeddingGeneratorNode, QueryPlanningNode, SemanticChunkerNode, VectorIndexWriterNode,
@@ -6,7 +7,6 @@ use swanflow::nodes::ai::retrieval::{
 use swanflow::nodes::ai::tool_executor::ToolExecutorNode;
 use swanflow::nodes::io::UniversalReadNode;
 use swanflow::nodes::NodeBehavior;
-use serde_json::json;
 
 #[test]
 fn test_structured_io_contract_rejects_empty_required_fields() {

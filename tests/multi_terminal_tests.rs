@@ -1,9 +1,9 @@
+use serde_json::json;
+use std::sync::Arc;
 use swanflow::core::engine::SwanFlowEngine;
 use swanflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::{NodeEvent, NodeState};
-use serde_json::json;
-use std::sync::Arc;
 use uuid::Uuid;
 
 fn should_run_engine_integration_tests() -> bool {
@@ -38,7 +38,7 @@ bob,25";
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let terminal_1_id = Uuid::new_v4();
@@ -49,7 +49,7 @@ bob,25";
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let terminal_2_id = Uuid::new_v4();
@@ -60,7 +60,7 @@ bob,25";
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     workflow
@@ -130,7 +130,7 @@ async fn test_variable_dependency_ordering() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
     workflow.context.insert("threshold".to_string(), json!(28));
 
@@ -147,7 +147,7 @@ bob,25";
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let sql_id = Uuid::new_v4();
@@ -158,7 +158,7 @@ bob,25";
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     // Explicit edge for data

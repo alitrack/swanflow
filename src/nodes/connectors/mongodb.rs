@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use crate::core::error::{CoreResult, SwanFlowError};
 use async_trait::async_trait;
 use bson::{Bson, Document};
 use datafusion::arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
@@ -30,18 +30,18 @@ pub struct MongoDbConnector {
 
 #[async_trait]
 impl Connector for MongoDbConnector {
-    async fn connect(config: ConnConfig) -> Result<Self> {
+    async fn connect(config: ConnConfig) -> CoreResult<Self> {
         // The MongoDB connection URL is like: mongodb://user:pass@host:27017/db
         let mut client_options = ClientOptions::parse(&config.url)
             .await
-            .map_err(|e| anyhow!("Failed to parse MongoDB URL: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to parse MongoDB URL: {}",  e)))?;
 
         client_options.app_name = Some("rustflow".to_string());
         client_options.connect_timeout =
             Some(std::time::Duration::from_secs(config.timeout_secs));
 
         let client = Client::with_options(client_options)
-            .map_err(|e| anyhow!("Failed to create MongoDB client: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to create MongoDB client: {}",  e)))?;
 
         // Extract database name from URL
         let db_name = extract_db_name(&config.url)?;
@@ -51,7 +51,7 @@ impl Connector for MongoDbConnector {
         database
             .run_command(bson::doc! { "ping": 1 })
             .await
-            .map_err(|e| anyhow!("MongoDB ping failed: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("MongoDB ping failed: {}",  e)))?;
 
         Ok(Self {
             client,
@@ -61,18 +61,18 @@ impl Connector for MongoDbConnector {
         })
     }
 
-    async fn list_tables(&self) -> Result<Vec<String>> {
+    async fn list_tables(&self) -> CoreResult<Vec<String>> {
         let mut collections = self
             .database
             .list_collection_names()
             .await
-            .map_err(|e| anyhow!("Failed to list MongoDB collections: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to list MongoDB collections: {}",  e)))?;
 
         collections.sort();
         Ok(collections)
     }
 
-    async fn get_schema(&self, table: &str) -> Result<SchemaRef> {
+    async fn get_schema(&self, table: &str) -> CoreResult<SchemaRef> {
         let collection: Collection<Document> = self.database.collection(table);
 
         // Sample up to 100 documents to infer schema
@@ -80,7 +80,7 @@ impl Connector for MongoDbConnector {
             .find(bson::doc! {})
             .limit(100)
             .await
-            .map_err(|e| anyhow!("Failed to query collection '{}': {}", table, e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to query collection '{}': {}",  table, e)))?;
 
         let mut fields: std::collections::BTreeMap<String, FieldInfo> =
             std::collections::BTreeMap::new();
@@ -88,7 +88,7 @@ impl Connector for MongoDbConnector {
 
         while let Some(doc_result) = cursor.next().await {
             let doc = doc_result.map_err(|e| {
-                anyhow!("Failed to read document from '{}': {}", table, e)
+                SwanFlowError::unknown(format!("Failed to read document from '{}': {}",  table, e))
             })?;
             doc_count += 1;
             for (key, value) in &doc {
@@ -125,7 +125,7 @@ impl Connector for MongoDbConnector {
         &self,
         table: &str,
         projection: &[usize],
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> CoreResult<SendableRecordBatchStream> {
         let schema = self.get_schema(table).await?;
 
         let projected_schema: SchemaRef = if projection.is_empty() {
@@ -439,7 +439,7 @@ fn extract_db_name(url: &str) -> Result<String> {
     let rest = url
         .strip_prefix("mongodb://")
         .or_else(|| url.strip_prefix("mongodb+srv://"))
-        .ok_or_else(|| anyhow!("Invalid MongoDB URL: missing 'mongodb://' prefix"))?;
+        .ok_or_else(|| SwanFlowError::unknown("Invalid MongoDB URL: missing 'mongodb://' prefix"))?;
 
     // Split off query string
     let without_query = rest.split('?').next().unwrap_or(rest);

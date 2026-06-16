@@ -115,7 +115,9 @@ pub struct ContentLengthTransport<R, W> {
     writer: tokio::io::BufWriter<W>,
 }
 
-impl<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin> ContentLengthTransport<R, W> {
+impl<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>
+    ContentLengthTransport<R, W>
+{
     pub fn new(reader: R, writer: W) -> Self {
         Self {
             reader: tokio::io::BufReader::new(reader),
@@ -169,7 +171,10 @@ impl<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin> ContentL
         self.reader.read_exact(&mut body).await?;
 
         String::from_utf8(body).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Invalid UTF-8: {e}"))
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid UTF-8: {e}"),
+            )
         })
     }
 

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use crate::core::error::{CoreResult, SwanFlowError};
 use async_trait::async_trait;
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -21,22 +21,22 @@ pub struct MySqlConnector {
 
 #[async_trait]
 impl Connector for MySqlConnector {
-    async fn connect(config: ConnConfig) -> Result<Self> {
+    async fn connect(config: ConnConfig) -> CoreResult<Self> {
         let pool = sqlx::MySqlPool::connect(&config.url)
             .await
-            .map_err(|e| anyhow!("MySQL connection failed: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("MySQL connection failed: {}",  e)))?;
         Ok(Self { pool, _config: config })
     }
 
-    async fn list_tables(&self) -> Result<Vec<String>> {
+    async fn list_tables(&self) -> CoreResult<Vec<String>> {
         let rows = sqlx::query_as::<_, (String,)>("SHOW TABLES")
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| anyhow!("Failed to list MySQL tables: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to list MySQL tables: {}",  e)))?;
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
-    async fn get_schema(&self, table: &str) -> Result<SchemaRef> {
+    async fn get_schema(&self, table: &str) -> CoreResult<SchemaRef> {
         let rows = sqlx::query_as::<_, (String, String, String)>(
             "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE \
              FROM information_schema.COLUMNS \
@@ -46,10 +46,10 @@ impl Connector for MySqlConnector {
         .bind(table)
         .fetch_all(&self.pool)
             .await
-            .map_err(|e| anyhow!("Failed to get schema for MySQL table '{}': {}", table, e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to get schema for MySQL table '{}': {}",  table, e)))?;
 
         if rows.is_empty() {
-            return Err(anyhow!("Table '{}' not found in MySQL", table));
+            return Err(SwanFlowError::unknown(format!("Table '{}' not found in MySQL",  table)));
         }
 
         let fields: Vec<Field> = rows
@@ -67,7 +67,7 @@ impl Connector for MySqlConnector {
         &self,
         table: &str,
         projection: &[usize],
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> CoreResult<SendableRecordBatchStream> {
         let schema = self.get_schema(table).await?;
 
         let projected_schema: SchemaRef = if projection.is_empty() {

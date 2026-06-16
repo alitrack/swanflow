@@ -1,6 +1,6 @@
+use serde_json::json;
 use swanflow::nodes::ai::contracts::{CitationItem, CitationTrackerNode};
 use swanflow::nodes::registry::NodeRegistry;
-use serde_json::json;
 
 #[test]
 fn test_citation_tracker_emits_source_mapping() {

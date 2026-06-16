@@ -1,5 +1,5 @@
-use swanflow::nodes::registry::NodeRegistry;
 use serde_json::json;
+use swanflow::nodes::registry::NodeRegistry;
 
 #[test]
 fn test_duckdb_read_node_validation() {

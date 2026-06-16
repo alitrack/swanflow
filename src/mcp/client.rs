@@ -76,7 +76,11 @@ impl McpClient {
     }
 
     /// Send a JSON-RPC request and wait for the matching response.
-    async fn call_internal(&mut self, method: &str, params: JsonValue) -> anyhow::Result<JsonValue> {
+    async fn call_internal(
+        &mut self,
+        method: &str,
+        params: JsonValue,
+    ) -> anyhow::Result<JsonValue> {
         let id = self.next_id;
         self.next_id += 1;
 

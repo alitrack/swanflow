@@ -1,5 +1,5 @@
-use swanflow::nodes::io::UniversalReadNode;
 use serde_json::json;
+use swanflow::nodes::io::UniversalReadNode;
 
 #[test]
 fn test_universal_resolver_routes_url_file_table_sources() {

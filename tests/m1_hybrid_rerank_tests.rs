@@ -1,14 +1,14 @@
-use swanflow::nodes::ai::retrieval::{
-    HybridRetrieverNode, RerankBackend, RerankerNode, RetrievalCandidate,
-};
-use swanflow::nodes::registry::NodeRegistry;
-use swanflow::nodes::NodeBehavior;
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use swanflow::nodes::ai::retrieval::{
+    HybridRetrieverNode, RerankBackend, RerankerNode, RetrievalCandidate,
+};
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::NodeBehavior;
 
 fn spawn_mock_rerank_server(responses: Vec<(u16, String)>) -> Option<String> {
     let listener = match TcpListener::bind("127.0.0.1:0") {

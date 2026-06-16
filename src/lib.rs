@@ -41,20 +41,19 @@ impl PySwanFlowEngine {
     pub fn run(&self, workflow: &PyWorkflow) -> PyResult<Vec<String>> {
         let wf = workflow.inner.clone();
         let e = &self.engine;
-        self.rt
-            .block_on(async {
-                let mut rx = e
-                    .execute_workflow(&wf)
-                    .await
-                    .map_err(|dfe| PyRuntimeError::new_err(format!("Execution failed: {dfe}")))?;
-                let mut results = Vec::new();
-                while let Some(event) = rx.recv().await {
-                    let json_str = serde_json::to_string(&event)
-                        .map_err(|se| PyRuntimeError::new_err(format!("Serialization error: {se}")))?;
-                    results.push(json_str);
-                }
-                Ok(results)
-            })
+        self.rt.block_on(async {
+            let mut rx = e
+                .execute_workflow(&wf)
+                .await
+                .map_err(|dfe| PyRuntimeError::new_err(format!("Execution failed: {dfe}")))?;
+            let mut results = Vec::new();
+            while let Some(event) = rx.recv().await {
+                let json_str = serde_json::to_string(&event)
+                    .map_err(|se| PyRuntimeError::new_err(format!("Serialization error: {se}")))?;
+                results.push(json_str);
+            }
+            Ok(results)
+        })
     }
 
     /// Infer metadata (schemas, diagnostics) from a Workflow without executing it.
@@ -62,43 +61,42 @@ impl PySwanFlowEngine {
     pub fn inspect(&self, workflow: &PyWorkflow) -> PyResult<String> {
         let wf = workflow.inner.clone();
         let e = &self.engine;
-        self.rt
-            .block_on(async {
-                let metadata = e
-                    .infer_metadata(&wf)
-                    .await
-                    .map_err(|dfe| PyRuntimeError::new_err(format!("Inspection failed: {dfe}")))?;
-                let schemas_json: Vec<String> = metadata
-                    .schemas
-                    .iter()
-                    .map(|(uid, fields)| {
-                        format!(
-                            r#""{}":{{"schemas":[{}],"diagnostics":[]}}"#,
-                            uid,
-                            fields
-                                .iter()
-                                .map(|s| {
-                                    format!(
-                                        r#""{}""#,
-                                        s.fields()
-                                            .iter()
-                                            .map(|f| format!("{}: {:?}", f.name(), f.data_type()))
-                                            .collect::<Vec<_>>()
-                                            .join(",")
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                // Return a simplified JSON representation
-                Ok(format!(
-                    r#"{{"schemas":[{}],"nodes":{}}}"#,
-                    schemas_json.join(","),
-                    metadata.diagnostics.len()
-                ))
-            })
+        self.rt.block_on(async {
+            let metadata = e
+                .infer_metadata(&wf)
+                .await
+                .map_err(|dfe| PyRuntimeError::new_err(format!("Inspection failed: {dfe}")))?;
+            let schemas_json: Vec<String> = metadata
+                .schemas
+                .iter()
+                .map(|(uid, fields)| {
+                    format!(
+                        r#""{}":{{"schemas":[{}],"diagnostics":[]}}"#,
+                        uid,
+                        fields
+                            .iter()
+                            .map(|s| {
+                                format!(
+                                    r#""{}""#,
+                                    s.fields()
+                                        .iter()
+                                        .map(|f| format!("{}: {:?}", f.name(), f.data_type()))
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                })
+                .collect::<Vec<_>>();
+            // Return a simplified JSON representation
+            Ok(format!(
+                r#"{{"schemas":[{}],"nodes":{}}}"#,
+                schemas_json.join(","),
+                metadata.diagnostics.len()
+            ))
+        })
     }
 }
 
@@ -117,9 +115,8 @@ impl PyWorkflow {
     /// Load a Workflow from a YAML or JSON file path.
     #[staticmethod]
     pub fn from_file(path: &str) -> PyResult<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            PyFileNotFoundError::new_err(format!("Cannot read file '{path}': {e}"))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| PyFileNotFoundError::new_err(format!("Cannot read file '{path}': {e}")))?;
         Self::from_str(&content)
     }
 

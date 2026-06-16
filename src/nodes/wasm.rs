@@ -93,11 +93,7 @@ pub struct WasmExec {
 }
 
 impl WasmExec {
-    pub fn new(
-        module_path: String,
-        function_name: String,
-        input: Arc<dyn ExecutionPlan>,
-    ) -> Self {
+    pub fn new(module_path: String, function_name: String, input: Arc<dyn ExecutionPlan>) -> Self {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(input.schema()),
             input.properties().output_partitioning().clone(),
@@ -186,17 +182,10 @@ impl RecordBatchStream for WasmStream {
 impl Stream for WasmStream {
     type Item = DFResult<RecordBatch>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.input.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(batch))) => {
-                let result = run_wasm_udf(
-                    &self.module_path,
-                    &self.function_name,
-                    batch,
-                );
+                let result = run_wasm_udf(&self.module_path, &self.function_name, batch);
                 match result {
                     Ok(out_batch) => Poll::Ready(Some(Ok(out_batch))),
                     Err(e) => Poll::Ready(Some(Err(
@@ -219,15 +208,10 @@ impl Stream for WasmStream {
 ///   - Input: Arrow IPC stream bytes placed in WASM linear memory at (ptr, len).
 ///   - Output: The transform function returns a pointer. The first 4 bytes at that
 ///     pointer contain the output length (i32), followed by the Arrow IPC stream bytes.
-fn run_wasm_udf(
-    module_path: &str,
-    function_name: &str,
-    batch: RecordBatch,
-) -> Result<RecordBatch> {
+fn run_wasm_udf(module_path: &str, function_name: &str, batch: RecordBatch) -> Result<RecordBatch> {
     // 1. Read WASM module bytes
-    let wasm_bytes = std::fs::read(module_path).map_err(|e| {
-        anyhow!("Failed to read WASM module '{}': {}", module_path, e)
-    })?;
+    let wasm_bytes = std::fs::read(module_path)
+        .map_err(|e| anyhow!("Failed to read WASM module '{}': {}", module_path, e))?;
 
     // 2. Setup wasmtime engine, module, store, instance
     let engine = Engine::new(&Config::new())?;
@@ -311,8 +295,7 @@ fn serialize_record_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>> {
 /// Deserialize a RecordBatch from Arrow IPC stream format bytes.
 fn deserialize_record_batch_from_ipc(data: &[u8]) -> Result<RecordBatch> {
     let reader = StreamReader::try_new(data, None)?;
-    let batches: Vec<RecordBatch> = reader
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let batches: Vec<RecordBatch> = reader.collect::<std::result::Result<Vec<_>, _>>()?;
     batches
         .into_iter()
         .next()

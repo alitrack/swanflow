@@ -148,7 +148,9 @@ impl NodeBehavior for AggregateNode {
         let group_by = cfg::optional_string_array(config, "group_by")?;
         let aggs = cfg::optional_string_array(config, "aggs")?;
         if group_by.is_empty() && aggs.is_empty() {
-            anyhow::bail!("AggregateNode requires at least one of 'group_by' or 'aggs' to be non-empty");
+            anyhow::bail!(
+                "AggregateNode requires at least one of 'group_by' or 'aggs' to be non-empty"
+            );
         }
         Ok(())
     }
@@ -465,7 +467,8 @@ impl NodeBehavior for VariableCreatorNode {
         _inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let obj = config.as_object()
+        let obj = config
+            .as_object()
             .ok_or_else(|| anyhow!("VariableCreatorNode config must be a JSON object"))?;
 
         if obj.is_empty() {
@@ -475,7 +478,8 @@ impl NodeBehavior for VariableCreatorNode {
         // Build a SQL SELECT with literal values for each key/value pair
         let mut select_parts = Vec::new();
         for (key, value) in obj {
-            let val_str = value.as_str()
+            let val_str = value
+                .as_str()
                 .ok_or_else(|| anyhow!("Variable '{}' must be a string", key))?;
             // Escape single quotes in the value by doubling them
             let escaped = val_str.replace('\'', "''");
@@ -591,7 +595,9 @@ impl NodeBehavior for GraphMergerNode {
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.len() < 4 {
-            anyhow::bail!("GraphMergerNode requires at least 4 inputs (nodes_a, edges_a, nodes_b, edges_b)");
+            anyhow::bail!(
+                "GraphMergerNode requires at least 4 inputs (nodes_a, edges_a, nodes_b, edges_b)"
+            );
         }
         let ctx = SessionContext::new();
 

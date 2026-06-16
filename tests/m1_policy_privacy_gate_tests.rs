@@ -1,7 +1,7 @@
+use serde_json::json;
 use swanflow::nodes::ai::privacy::PolicyPrivacyGateNode;
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeBehavior;
-use serde_json::json;
 
 #[test]
 fn test_policy_gate_denies_when_pii_present() {

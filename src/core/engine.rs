@@ -570,15 +570,14 @@ impl SwanFlowEngine {
         if node.mode == crate::core::graph::StepMode::Conditional {
             // Find previous step output
             let mut prev_output = String::new();
-            for edge in workflow
-                .graph
-                .edges_directed(node_idx, Direction::Incoming)
-            {
+            for edge in workflow.graph.edges_directed(node_idx, Direction::Incoming) {
                 let src_node = workflow.graph.node_weight(edge.source()).unwrap();
                 let table_name = format!("node_{}", &src_node.id.to_string()[..8]);
-                if let Ok(df) = ctx.sql(&format!("SELECT * FROM \"{}\" LIMIT 1", table_name)).await
+                if let Ok(df) = ctx
+                    .sql(&format!("SELECT * FROM \"{}\" LIMIT 1", table_name))
+                    .await
                 {
-                            if let Ok(batches) = df.collect().await {
+                    if let Ok(batches) = df.collect().await {
                         for batch in &batches {
                             use datafusion::arrow::util::display::ArrayFormatter;
                             use datafusion::arrow::util::display::FormatOptions;
@@ -602,7 +601,10 @@ impl SwanFlowEngine {
                 prev_output.contains(cond)
             } else if let Some(when_expr) = &node.when {
                 // Simple when expression: check if {{input}} contains the when value
-                let input_val = step_context.get("input").and_then(|v| v.as_str()).unwrap_or("");
+                let input_val = step_context
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 input_val.contains(when_expr)
             } else {
                 true
@@ -631,13 +633,18 @@ impl SwanFlowEngine {
                 );
 
                 // Update context with iteration count
-                step_context.insert(
-                    "iteration".to_string(),
-                    serde_json::json!(iteration + 1),
-                );
+                step_context.insert("iteration".to_string(), serde_json::json!(iteration + 1));
 
                 let output = Self::compile_and_execute_node(
-                    node, workflow, node_idx, step_context, ctx, cache_dir, registry, tx, hook,
+                    node,
+                    workflow,
+                    node_idx,
+                    step_context,
+                    ctx,
+                    cache_dir,
+                    registry,
+                    tx,
+                    hook,
                 )
                 .await?;
 
@@ -669,7 +676,15 @@ impl SwanFlowEngine {
             if children.is_empty() {
                 // No fan-out children, just execute this node normally
                 return Self::compile_and_execute_node(
-                    node, workflow, node_idx, step_context, ctx, cache_dir, registry, tx, hook,
+                    node,
+                    workflow,
+                    node_idx,
+                    step_context,
+                    ctx,
+                    cache_dir,
+                    registry,
+                    tx,
+                    hook,
                 )
                 .await;
             }
@@ -735,10 +750,7 @@ impl SwanFlowEngine {
             let mut collected = Vec::new();
             for pred in &predecessors {
                 let table_name = format!("node_{}", &pred.id.to_string()[..8]);
-                if let Ok(df) = ctx
-                    .sql(&format!("SELECT * FROM \"{}\"", table_name))
-                    .await
-                {
+                if let Ok(df) = ctx.sql(&format!("SELECT * FROM \"{}\"", table_name)).await {
                     if let Ok(batches) = df.collect().await {
                         for batch in &batches {
                             use datafusion::arrow::util::display::ArrayFormatter;
@@ -765,7 +777,15 @@ impl SwanFlowEngine {
 
         // Default sequential mode: compile and execute
         Self::compile_and_execute_node(
-            node, workflow, node_idx, step_context, ctx, cache_dir, registry, tx, hook,
+            node,
+            workflow,
+            node_idx,
+            step_context,
+            ctx,
+            cache_dir,
+            registry,
+            tx,
+            hook,
         )
         .await
     }
@@ -800,10 +820,7 @@ impl SwanFlowEngine {
         for edge in &incoming_edges {
             let src_node = workflow.graph.node_weight(edge.source()).unwrap();
             let table_name = format!("node_{}", &src_node.id.to_string()[..8]);
-            if let Ok(df) = ctx
-                .sql(&format!("SELECT * FROM \"{}\"", table_name))
-                .await
-            {
+            if let Ok(df) = ctx.sql(&format!("SELECT * FROM \"{}\"", table_name)).await {
                 input_plans.push(df.into_optimized_plan()?);
             }
         }
@@ -849,14 +866,13 @@ impl SwanFlowEngine {
         let state = datafusion::execution::session_state::SessionStateBuilder::new_from_existing(
             ctx.state(),
         )
-        .with_query_planner(Arc::new(
-            crate::core::engine::SwanFlowQueryPlanner { physical_planner },
-        ))
+        .with_query_planner(Arc::new(crate::core::engine::SwanFlowQueryPlanner {
+            physical_planner,
+        }))
         .build();
 
         let physical_plan = state.create_physical_plan(plan).await?;
-        let batches =
-            datafusion::physical_plan::collect(physical_plan, ctx.task_ctx()).await?;
+        let batches = datafusion::physical_plan::collect(physical_plan, ctx.task_ctx()).await?;
 
         // 5. Materialize: register as table for downstream nodes
         if !batches.is_empty() {

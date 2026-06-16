@@ -104,10 +104,16 @@ impl SwanFlowConnection {
 
         let url = match self.db_type.to_lowercase().as_str() {
             "postgres" | "postgresql" => {
-                format!("postgres://{}:{}@{}:{}/{}", user, password, host, port, database)
+                format!(
+                    "postgres://{}:{}@{}:{}/{}",
+                    user, password, host, port, database
+                )
             }
             "mysql" | "mariadb" => {
-                format!("mysql://{}:{}@{}:{}/{}", user, password, host, port, database)
+                format!(
+                    "mysql://{}:{}@{}:{}/{}",
+                    user, password, host, port, database
+                )
             }
             "clickhouse" | "clickhouse_http" => {
                 let scheme = if self.ssl { "https" } else { "http" };
@@ -136,11 +142,12 @@ impl SwanFlowConnection {
                 format!("mongodb://{}:{}{}{}", host, port, db_part, auth_source)
             }
             "redis" => {
-                format!("redis://{}:{}@{}:{}/{}", user, password, host, port, database)
+                format!(
+                    "redis://{}:{}@{}:{}/{}",
+                    user, password, host, port, database
+                )
             }
-            "duckdb" => {
-                database.to_string()
-            }
+            "duckdb" => database.to_string(),
             "elasticsearch" => {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{}://{}:{}@{}:{}", scheme, user, password, host, port)
@@ -191,7 +198,11 @@ impl SwanFlowConnection {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
+            if path
+                .extension()
+                .map(|e| e == "yaml" || e == "yml")
+                .unwrap_or(false)
+            {
                 match Self::load_from_yaml(&path) {
                     Ok(cfg) => configs.push(cfg),
                     Err(e) => {
@@ -210,7 +221,10 @@ impl SwanFlowConnection {
     /// Load DBX profiles from `~/.dbx/config/profiles/` directory.
     pub fn load_dbx_profiles() -> Result<Vec<Self>> {
         let home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string());
-        let dbx_profiles = Path::new(&home).join(".dbx").join("config").join("profiles");
+        let dbx_profiles = Path::new(&home)
+            .join(".dbx")
+            .join("config")
+            .join("profiles");
         Self::load_dir(&dbx_profiles)
     }
 }
@@ -300,7 +314,10 @@ mod tests {
             read_only: false,
             extra: None,
         };
-        assert_eq!(cfg.build_url().unwrap(), "postgres://admin:secret@localhost:5432/mydb");
+        assert_eq!(
+            cfg.build_url().unwrap(),
+            "postgres://admin:secret@localhost:5432/mydb"
+        );
     }
 
     #[test]
@@ -343,7 +360,10 @@ mod tests {
             read_only: false,
             extra: None,
         };
-        assert_eq!(cfg.build_url().unwrap(), "http://default:@ch.example.com:8123");
+        assert_eq!(
+            cfg.build_url().unwrap(),
+            "http://default:@ch.example.com:8123"
+        );
     }
 
     #[test]

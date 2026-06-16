@@ -1,11 +1,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
+use serde_json::json;
+use std::sync::Arc;
 use swanflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::{NodeBehavior, NodeSpec, NodeState, PortSpec};
-use serde_json::json;
-use std::sync::Arc;
 use uuid::Uuid;
 
 struct DummyNode;

@@ -1,10 +1,10 @@
 use async_trait::async_trait;
+use serde_json::json;
+use std::sync::Arc;
 use swanflow::core::compiler::WorkflowCompiler;
 use swanflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::{NodeBehavior, NodeState};
-use serde_json::json;
-use std::sync::Arc;
 use uuid::Uuid;
 
 struct TestNode;
@@ -89,7 +89,7 @@ async fn test_metanode_expansion() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
     let ss = sub_workflow.add_node(NodeInstance {
         id: Uuid::new_v4(),
@@ -98,7 +98,7 @@ async fn test_metanode_expansion() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
     sub_workflow
         .add_edge(
@@ -120,7 +120,7 @@ async fn test_metanode_expansion() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
     let meta_idx = main_workflow.add_node(NodeInstance {
         id: Uuid::new_v4(),
@@ -129,7 +129,7 @@ async fn test_metanode_expansion() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: Some(Box::new(sub_workflow)),
-    ..Default::default()
+        ..Default::default()
     });
     main_workflow
         .add_edge(

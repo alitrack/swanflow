@@ -112,8 +112,18 @@ impl NodeBehavior for DuckDBExtensionNode {
             .ok_or_else(|| anyhow!("Extension name is required"))?;
 
         const ALLOWED_EXTENSIONS: &[&str] = &[
-            "httpfs", "spatial", "parquet", "json", "excel", "autocomplete", "shellfs", "fts",
-            "tpch", "tpcds", "icu", "inet",
+            "httpfs",
+            "spatial",
+            "parquet",
+            "json",
+            "excel",
+            "autocomplete",
+            "shellfs",
+            "fts",
+            "tpch",
+            "tpcds",
+            "icu",
+            "inet",
         ];
 
         if !ALLOWED_EXTENSIONS.contains(&ext) {

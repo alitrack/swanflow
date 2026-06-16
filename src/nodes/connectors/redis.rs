@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use crate::core::error::{CoreResult, SwanFlowError};
 use async_trait::async_trait;
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -23,10 +23,10 @@ pub struct RedisConnector {
     _config: ConnConfig,
 }
 
-async fn scan_keys(client: &redis::Client) -> Result<Vec<String>> {
+async fn scan_keys(client: &redis::Client) -> CoreResult<Vec<String>> {
     let mut con = client.get_async_connection()
         .await
-        .map_err(|e| anyhow!("Redis connection failed: {}", e))?;
+        .map_err(|e| SwanFlowError::unknown(format!("Redis connection failed: {}",  e)))?;
 
     let mut cursor = 0i64;
     let mut all_keys: Vec<String> = Vec::new();
@@ -37,7 +37,7 @@ async fn scan_keys(client: &redis::Client) -> Result<Vec<String>> {
             .arg(1000)
             .query_async(&mut con)
             .await
-            .map_err(|e| anyhow!("Redis SCAN failed: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Redis SCAN failed: {}",  e)))?;
         cursor = result.0;
         all_keys.extend(result.1);
         if cursor == 0 {
@@ -51,13 +51,13 @@ async fn scan_keys(client: &redis::Client) -> Result<Vec<String>> {
 
 #[async_trait]
 impl Connector for RedisConnector {
-    async fn connect(config: ConnConfig) -> Result<Self> {
+    async fn connect(config: ConnConfig) -> CoreResult<Self> {
         let client = redis::Client::open(config.url.as_str())
-            .map_err(|e| anyhow!("Invalid Redis URL: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Invalid Redis URL: {}",  e)))?;
         Ok(Self { client, _config: config })
     }
 
-    async fn list_tables(&self) -> Result<Vec<String>> {
+    async fn list_tables(&self) -> CoreResult<Vec<String>> {
         let keys = scan_keys(&self.client).await?;
 
         let mut prefixes: Vec<String> = Vec::new();
@@ -77,7 +77,7 @@ impl Connector for RedisConnector {
         Ok(prefixes)
     }
 
-    async fn get_schema(&self, _table: &str) -> Result<SchemaRef> {
+    async fn get_schema(&self, _table: &str) -> CoreResult<SchemaRef> {
         let schema = Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
             Field::new("value", DataType::Utf8, true),
@@ -90,7 +90,7 @@ impl Connector for RedisConnector {
         &self,
         _table: &str,
         _projection: &[usize],
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> CoreResult<SendableRecordBatchStream> {
         let keys = scan_keys(&self.client).await?;
 
         let schema = self.get_schema(_table).await?;

@@ -1,10 +1,10 @@
 use anyhow::Result;
+use serde_json::json;
+use std::sync::Arc;
 use swanflow::core::engine::SwanFlowEngine;
 use swanflow::core::graph::{NodeInstance, Workflow};
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeState;
-use serde_json::json;
-use std::sync::Arc;
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -54,7 +54,7 @@ async fn test_rag_query_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     // 2. Graph Retriever
@@ -66,7 +66,7 @@ async fn test_rag_query_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
     let _ = workflow.add_edge(
         entities_idx,
@@ -86,7 +86,7 @@ async fn test_rag_query_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
     let _ = workflow.add_edge(
         retriever_idx,
@@ -126,7 +126,7 @@ async fn test_research_loop_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     // 2. Research Loop
@@ -141,7 +141,7 @@ async fn test_research_loop_workflow() -> Result<()> {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
     let _ = workflow.add_edge(
         query_idx,

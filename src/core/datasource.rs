@@ -1834,9 +1834,9 @@ impl ExcelReportWritingStream {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConnConfig {
     pub url: String,
-    pub driver: String,        // "postgres", "mysql", "clickhouse", "mssql"
-    pub max_connections: u32,  // default 10
-    pub timeout_secs: u64,     // default 30
+    pub driver: String,       // "postgres", "mysql", "clickhouse", "mssql"
+    pub max_connections: u32, // default 10
+    pub timeout_secs: u64,    // default 30
 }
 
 impl Default for ConnConfig {
@@ -1850,26 +1850,28 @@ impl Default for ConnConfig {
     }
 }
 
+use crate::core::error::{CoreResult, SwanFlowError};
+
 /// Formal Connector trait — implement for each database backend.
 #[async_trait::async_trait]
 pub trait Connector: Send + Sync {
     /// Connect to the database using the given config.
-    async fn connect(config: ConnConfig) -> anyhow::Result<Self>
+    async fn connect(config: ConnConfig) -> CoreResult<Self>
     where
         Self: Sized;
 
     /// List all available table names.
-    async fn list_tables(&self) -> anyhow::Result<Vec<String>>;
+    async fn list_tables(&self) -> CoreResult<Vec<String>>;
 
     /// Get the Arrow schema for a given table.
-    async fn get_schema(&self, table: &str) -> anyhow::Result<SchemaRef>;
+    async fn get_schema(&self, table: &str) -> CoreResult<SchemaRef>;
 
     /// Scan a table with an optional column projection and return an Arrow record batch stream.
     async fn scan(
         &self,
         table: &str,
         projection: &[usize],
-    ) -> anyhow::Result<SendableRecordBatchStream>;
+    ) -> CoreResult<SendableRecordBatchStream>;
 
     /// Return the human-readable driver name (e.g. "postgres", "mysql", "clickhouse").
     fn name(&self) -> &'static str;

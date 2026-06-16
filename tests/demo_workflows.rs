@@ -1,9 +1,9 @@
+use serde_json::json;
+use std::sync::Arc;
 use swanflow::core::engine::SwanFlowEngine;
 use swanflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::{NodeEvent, NodeState};
-use serde_json::json;
-use std::sync::Arc;
 use uuid::Uuid;
 
 fn should_run_demo_workflows() -> bool {
@@ -82,7 +82,7 @@ david,4500,Sales",
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let n_sql = workflow.add_node(NodeInstance {
@@ -92,7 +92,7 @@ david,4500,Sales",
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let n_filter = workflow.add_node(NodeInstance {
@@ -102,7 +102,7 @@ david,4500,Sales",
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     workflow
@@ -149,7 +149,7 @@ async fn demo_reusable_metanode() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
     let sub_filter = cleaner_sub.add_node(NodeInstance {
         id: Uuid::new_v4(),
@@ -158,7 +158,7 @@ async fn demo_reusable_metanode() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
     let sub_out = cleaner_sub.add_node(NodeInstance {
         id: Uuid::new_v4(),
@@ -167,7 +167,7 @@ async fn demo_reusable_metanode() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
     cleaner_sub
         .add_edge(
@@ -208,7 +208,7 @@ async fn demo_reusable_metanode() {
         state: NodeState::Configured,
         materialize: true,
         sub_workflow: Some(Box::new(cleaner_sub)),
-    ..Default::default()
+        ..Default::default()
     });
     main_flow
         .add_edge(

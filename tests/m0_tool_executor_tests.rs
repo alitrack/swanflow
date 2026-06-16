@@ -1,6 +1,6 @@
+use serde_json::json;
 use swanflow::nodes::ai::tool_executor::ToolExecutorNode;
 use swanflow::nodes::registry::NodeRegistry;
-use serde_json::json;
 
 #[test]
 fn test_tool_executor_normalizes_success_payload() {

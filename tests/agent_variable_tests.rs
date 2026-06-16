@@ -1,10 +1,10 @@
 use dotenvy::dotenv;
+use serde_json::json;
+use std::sync::Arc;
 use swanflow::agent::AnalystAgent;
 use swanflow::core::engine::SwanFlowEngine;
 use swanflow::nodes::ai::providers::{LlmConfig, OpenAiProvider, ProviderKind};
 use swanflow::nodes::registry::NodeRegistry;
-use serde_json::json;
-use std::sync::Arc;
 
 #[tokio::test]
 async fn test_agent_with_variables() {

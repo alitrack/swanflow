@@ -3,8 +3,8 @@
 use crate::core::engine::SwanFlowEngine;
 use crate::core::graph::Workflow;
 use crate::mcp::{
-    self, ContentLengthTransport, JsonRpcRequest, JsonRpcResponse, McpResource, McpResourceContents,
-    McpTool,
+    self, ContentLengthTransport, JsonRpcRequest, JsonRpcResponse, McpResource,
+    McpResourceContents, McpTool,
 };
 use crate::nodes::registry::NodeRegistry;
 use serde_json::json;
@@ -89,11 +89,12 @@ impl McpServer {
             }
 
             "tools/call" => {
-                let name = request.params["name"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                let arguments = request.params.get("arguments").cloned().unwrap_or(json!({}));
+                let name = request.params["name"].as_str().unwrap_or("").to_string();
+                let arguments = request
+                    .params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(json!({}));
 
                 match self.call_tool(&name, arguments).await {
                     Ok(content) => mcp::success_response(id, json!({ "content": content })),
@@ -123,7 +124,10 @@ impl McpServer {
         vec![
             McpTool {
                 name: "run_workflow".to_string(),
-                description: Some("Execute a SwanFlow workflow from YAML/JSON and return a summary of results".to_string()),
+                description: Some(
+                    "Execute a SwanFlow workflow from YAML/JSON and return a summary of results"
+                        .to_string(),
+                ),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -137,7 +141,9 @@ impl McpServer {
             },
             McpTool {
                 name: "inspect_workflow".to_string(),
-                description: Some("Inspect a workflow's schemas and diagnostics without executing it".to_string()),
+                description: Some(
+                    "Inspect a workflow's schemas and diagnostics without executing it".to_string(),
+                ),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -151,7 +157,9 @@ impl McpServer {
             },
             McpTool {
                 name: "list_nodes".to_string(),
-                description: Some("List all registered node types with their specifications".to_string()),
+                description: Some(
+                    "List all registered node types with their specifications".to_string(),
+                ),
                 input_schema: json!({
                     "type": "object",
                     "properties": {}
@@ -159,7 +167,9 @@ impl McpServer {
             },
             McpTool {
                 name: "execute_sql".to_string(),
-                description: Some("Execute a SQL query against a configured data source".to_string()),
+                description: Some(
+                    "Execute a SQL query against a configured data source".to_string(),
+                ),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -179,7 +189,11 @@ impl McpServer {
         ]
     }
 
-    async fn call_tool(&self, name: &str, arguments: serde_json::Value) -> anyhow::Result<Vec<serde_json::Value>> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
         match name {
             "run_workflow" => {
                 let yaml_str = arguments["workflow_yaml"]
@@ -296,7 +310,9 @@ impl McpServer {
             McpResource {
                 uri: "swanflow://nodes".to_string(),
                 name: "Registered Nodes".to_string(),
-                description: Some("List of all registered node types in the workflow engine".to_string()),
+                description: Some(
+                    "List of all registered node types in the workflow engine".to_string(),
+                ),
                 mime_type: Some("application/json".to_string()),
             },
             McpResource {

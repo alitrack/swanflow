@@ -47,7 +47,6 @@ impl NodeRegistry {
             ContextFuserNode, EntityExtractorNode, GraphRetrieverNode, ResearchLoopMetaNode,
         };
         use crate::nodes::ai::mcp::McpInvokeNode;
-        use crate::nodes::mcp::McpToolNode;
         use crate::nodes::ai::privacy::{PiiDetectorNode, PiiMaskerNode, PolicyPrivacyGateNode};
         use crate::nodes::ai::providers::{LlmConfig, OpenAiProvider, ProviderKind};
         use crate::nodes::ai::retrieval::{
@@ -66,15 +65,16 @@ impl NodeRegistry {
             ExcelReportNode, ExcelSheetNamesNode, ExcelTemplateNode, ExcelWriteNode,
             GraphIndexWriterNode, HttpFetchNode, ParquetReadNode, UniversalReadNode,
         };
+        use crate::nodes::mcp::McpToolNode;
         use crate::nodes::script::boxed_python::BoxedPythonNode;
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
         use crate::nodes::sql::SqlNode;
-        use crate::nodes::wasm::WasmNode;
         use crate::nodes::transform::{
             AggregateNode, AiRouterNode, ConditionNode, FilterNode, ForEachNode, GraphMergerNode,
             ProfilerNode, ProjectNode, SemanticCleanerNode, TableSchemaValidatorNode,
             TableToVariableNode, VariableCreatorNode, WindowNode,
         };
+        use crate::nodes::wasm::WasmNode;
 
         self.register_node(Arc::new(SqlNode));
         self.register_node(Arc::new(CsvReadNode));

@@ -1,7 +1,7 @@
+use serde_json::json;
 use swanflow::nodes::ai::contracts::StructuredIoContractNode;
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeBehavior;
-use serde_json::json;
 
 #[test]
 fn test_structured_io_contract_rejects_missing_required_fields() {

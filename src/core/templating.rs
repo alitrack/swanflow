@@ -17,10 +17,7 @@ impl TemplateEngine {
         context.get(key).cloned()
     }
 
-    fn resolve_mustache_placeholder(
-        input: &str,
-        context: &HashMap<String, JsonValue>,
-    ) -> String {
+    fn resolve_mustache_placeholder(input: &str, context: &HashMap<String, JsonValue>) -> String {
         // Replace {{input}} and {{var_name}} with context values
         let mut output = input.to_string();
         for (key, value) in context {

@@ -1,8 +1,8 @@
+use std::sync::Arc;
 use swanflow::core::engine::SwanFlowEngine;
 use swanflow::core::graph::Workflow;
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeEvent;
-use std::sync::Arc;
 
 fn should_run_engine_integration_tests() -> bool {
     std::env::var("RUSTFLOW_RUN_ENGINE_INTEGRATION_TESTS")

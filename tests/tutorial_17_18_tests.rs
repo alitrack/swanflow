@@ -1,9 +1,9 @@
+use std::fs;
+use std::sync::Arc;
 use swanflow::core::engine::SwanFlowEngine;
 use swanflow::core::graph::Workflow;
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeEvent;
-use std::fs;
-use std::sync::Arc;
 
 #[tokio::test]
 async fn test_tutorial_17_db_connector() {

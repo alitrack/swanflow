@@ -31,9 +31,7 @@ pub async fn handle_request(request: AdapterRequest) -> Result<Vec<AdapterMessag
                             schema
                                 .fields()
                                 .iter()
-                                .map(|field| {
-                                    format!("{}:{:?}", field.name(), field.data_type())
-                                })
+                                .map(|field| format!("{}:{:?}", field.name(), field.data_type()))
                                 .collect()
                         })
                         .collect(),

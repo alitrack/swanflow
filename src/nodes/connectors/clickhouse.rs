@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use crate::core::error::{CoreResult, SwanFlowError};
 use async_trait::async_trait;
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -25,12 +25,12 @@ pub struct ClickHouseConnector {
 
 #[async_trait]
 impl Connector for ClickHouseConnector {
-    async fn connect(config: ConnConfig) -> Result<Self> {
+    async fn connect(config: ConnConfig) -> CoreResult<Self> {
         let timeout = std::time::Duration::from_secs(config.timeout_secs);
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
-            .map_err(|e| anyhow!("Failed to build HTTP client for ClickHouse: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to build HTTP client for ClickHouse: {}",  e)))?;
 
         // Validate connectivity by sending a ping
         let ping_url = format!("{}/?query=SELECT+1", config.url.trim_end_matches('/'));
@@ -38,13 +38,13 @@ impl Connector for ClickHouseConnector {
             .get(&ping_url)
             .send()
             .await
-            .map_err(|e| anyhow!("ClickHouse ping failed: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("ClickHouse ping failed: {}",  e)))?;
 
         if !resp.status().is_success() {
-            return Err(anyhow!(
+            return Err(SwanFlowError::unknown(format!(
                 "ClickHouse ping returned HTTP {}",
                 resp.status()
-            ));
+            )));
         }
 
         Ok(Self {
@@ -54,24 +54,24 @@ impl Connector for ClickHouseConnector {
         })
     }
 
-    async fn list_tables(&self) -> Result<Vec<String>> {
+    async fn list_tables(&self) -> CoreResult<Vec<String>> {
         let query_url = format!("{}/?query=SHOW+TABLES", self.url);
         let resp = self
             .client
             .get(&query_url)
             .send()
             .await
-            .map_err(|e| anyhow!("ClickHouse list tables failed: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("ClickHouse list tables failed: {}",  e)))?;
 
         let text = resp
             .text()
             .await
-            .map_err(|e| anyhow!("Failed to read ClickHouse response: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to read ClickHouse response: {}",  e)))?;
 
         Ok(text.lines().map(|l| l.trim().to_string()).collect())
     }
 
-    async fn get_schema(&self, table: &str) -> Result<SchemaRef> {
+    async fn get_schema(&self, table: &str) -> CoreResult<SchemaRef> {
         // URL-encode the query: DESCRIBE TABLE table_name
         let query = format!("DESCRIBE TABLE {}", table);
         let query_url = format!("{}/?query={}", self.url, urlencoding(&query));
@@ -81,12 +81,12 @@ impl Connector for ClickHouseConnector {
             .get(&query_url)
             .send()
             .await
-            .map_err(|e| anyhow!("ClickHouse DESCRIBE TABLE failed: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("ClickHouse DESCRIBE TABLE failed: {}",  e)))?;
 
         let text = resp
             .text()
             .await
-            .map_err(|e| anyhow!("Failed to read ClickHouse response: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to read ClickHouse response: {}",  e)))?;
 
         let fields: Vec<Field> = text
             .lines()
@@ -105,10 +105,10 @@ impl Connector for ClickHouseConnector {
             .collect();
 
         if fields.is_empty() {
-            return Err(anyhow!(
+            return Err(SwanFlowError::table_not_found(format!(
                 "Table '{}' not found or has no columns in ClickHouse",
                 table
-            ));
+            )));
         }
 
         Ok(Arc::new(Schema::new(fields)))
@@ -118,7 +118,7 @@ impl Connector for ClickHouseConnector {
         &self,
         table: &str,
         projection: &[usize],
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> CoreResult<SendableRecordBatchStream> {
         let schema = self.get_schema(table).await?;
 
         let projected_schema: SchemaRef = if projection.is_empty() {

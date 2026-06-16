@@ -191,12 +191,7 @@ impl AnalystAgent {
         let spec_list = self.registry.list_specs();
         let node_types: Vec<String> = spec_list
             .iter()
-            .map(|s| {
-                format!(
-                    "- {} ({}): {}",
-                    s.type_id, s.display_name, s.description
-                )
-            })
+            .map(|s| format!("- {} ({}): {}", s.type_id, s.display_name, s.description))
             .collect();
 
         format!(
@@ -245,10 +240,8 @@ OUTPUT FORMAT — respond with a JSON object:
             .unwrap_or(completion);
         // Try as an array of tool calls first (alternate format)
         if json_block.trim().starts_with('[') {
-            let calls: Vec<AgentToolCall> =
-                serde_json::from_str(json_block.trim()).with_context(|| {
-                    format!("failed to parse agent tool array: {}", completion)
-                })?;
+            let calls: Vec<AgentToolCall> = serde_json::from_str(json_block.trim())
+                .with_context(|| format!("failed to parse agent tool array: {}", completion))?;
             return Ok(AgentResponse {
                 thought: None,
                 tool_calls: calls,
@@ -275,23 +268,17 @@ OUTPUT FORMAT — respond with a JSON object:
                     self.generate_workflow_yaml(desc, workflow).await?;
                 }
                 "add_node" => {
-                    let args: AddNodeArguments =
-                        serde_json::from_value(call.arguments.clone())
-                            .context("invalid add_node arguments")?;
+                    let args: AddNodeArguments = serde_json::from_value(call.arguments.clone())
+                        .context("invalid add_node arguments")?;
                     self.add_node(&args.type_id, args.config, workflow)?;
                 }
                 "patch_node_config" => {
-                    let node_id = call.arguments["node_id"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
+                    let node_id = call.arguments["node_id"].as_str().unwrap_or("").to_string();
                     let config = call.arguments["config"].clone();
                     self.patch_node_config(&node_id, config, workflow)?;
                 }
                 "connect" => {
-                    let from = call.arguments["from_node_id"]
-                        .as_str()
-                        .unwrap_or("");
+                    let from = call.arguments["from_node_id"].as_str().unwrap_or("");
                     let to = call.arguments["to_node_id"].as_str().unwrap_or("");
                     self.connect(from, to, workflow)?;
                 }
@@ -343,12 +330,7 @@ Description: {}
             self.registry
                 .list_specs()
                 .iter()
-                .map(|s| {
-                    format!(
-                        "- {}: config_schema={}",
-                        s.type_id, s.config_schema
-                    )
-                })
+                .map(|s| { format!("- {}: config_schema={}", s.type_id, s.config_schema) })
                 .collect::<Vec<_>>()
                 .join("\n"),
             description
@@ -370,9 +352,7 @@ Description: {}
                 .strip_prefix("```yaml")
                 .or_else(|| raw.strip_prefix("```yml"))
                 .or_else(|| raw.strip_prefix("```"))
-                .map(|s| {
-                    s.strip_suffix("```").unwrap_or(s)
-                })
+                .map(|s| s.strip_suffix("```").unwrap_or(s))
                 .unwrap_or(raw)
                 .trim();
             serde_yaml::from_str(cleaned)
@@ -433,35 +413,22 @@ Description: {}
     }
 
     /// Add a new node to the workflow.
-    fn add_node(
-        &self,
-        type_id: &str,
-        config: JsonValue,
-        workflow: &mut Workflow,
-    ) -> Result<()> {
+    fn add_node(&self, type_id: &str, config: JsonValue, workflow: &mut Workflow) -> Result<()> {
         // Validate that the type exists in the registry
-        self.registry.get_node(type_id).with_context(|| {
-            format!("unknown node type requested by agent: {}", type_id)
-        })?;
+        self.registry
+            .get_node(type_id)
+            .with_context(|| format!("unknown node type requested by agent: {}", type_id))?;
 
         let mut node = NodeInstance::new(Uuid::new_v4(), type_id, config, NodeState::Configured);
         node.materialize = false;
         let idx = workflow.add_node(node);
         let node = &workflow.graph[idx];
-        println!(
-            "[Agent] Added node {} (type: {})",
-            node.id, node.type_id
-        );
+        println!("[Agent] Added node {} (type: {})", node.id, node.type_id);
         Ok(())
     }
 
     /// Connect two nodes by finding them and adding an edge.
-    fn connect(
-        &self,
-        from_node_id: &str,
-        to_node_id: &str,
-        workflow: &mut Workflow,
-    ) -> Result<()> {
+    fn connect(&self, from_node_id: &str, to_node_id: &str, workflow: &mut Workflow) -> Result<()> {
         let from_uuid = Uuid::parse_str(from_node_id).ok();
         let to_uuid = Uuid::parse_str(to_node_id).ok();
 
@@ -480,29 +447,31 @@ Description: {}
             }
         });
 
-        let from = from_idx.ok_or_else(|| {
-            anyhow::anyhow!("connect: source node '{}' not found", from_node_id)
-        })?;
-        let to = to_idx.ok_or_else(|| {
-            anyhow::anyhow!("connect: target node '{}' not found", to_node_id)
-        })?;
+        let from = from_idx
+            .ok_or_else(|| anyhow::anyhow!("connect: source node '{}' not found", from_node_id))?;
+        let to = to_idx
+            .ok_or_else(|| anyhow::anyhow!("connect: target node '{}' not found", to_node_id))?;
 
-        workflow.add_edge(from, to, EdgeInstance {
-            source_port: 0,
-            target_port: 0,
-        })?;
+        workflow.add_edge(
+            from,
+            to,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )?;
 
-        println!(
-            "[Agent] Connected {} → {}",
-            from_node_id, to_node_id
-        );
+        println!("[Agent] Connected {} → {}", from_node_id, to_node_id);
 
         Ok(())
     }
 
     // ── Legacy entry point (delegates to run_analysis) ─────────────────
 
-    #[deprecated(since = "0.2.0", note = "use run_analysis() which includes the verification loop")]
+    #[deprecated(
+        since = "0.2.0",
+        note = "use run_analysis() which includes the verification loop"
+    )]
     pub async fn run_analysis_legacy(&self, prompt: &str) -> Result<Workflow> {
         let completion = self.provider.complete(prompt).await?;
         let response = self.parse_response(&completion)?;

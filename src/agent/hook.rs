@@ -26,12 +26,13 @@ fn classify_error(error: &str) -> ErrorCategory {
     let lower = error.to_ascii_lowercase();
 
     // Column-related errors
-    if (lower.contains("column") && (lower.contains("not found")
-        || lower.contains("not exist")
-        || lower.contains("doesn't exist")
-        || lower.contains("cannot be found")
-        || lower.contains("missing")
-        || lower.contains("unknown column")))
+    if (lower.contains("column")
+        && (lower.contains("not found")
+            || lower.contains("not exist")
+            || lower.contains("doesn't exist")
+            || lower.contains("cannot be found")
+            || lower.contains("missing")
+            || lower.contains("unknown column")))
         || lower.contains("no column")
     {
         return ErrorCategory::ColumnNotFound;
@@ -48,10 +49,11 @@ fn classify_error(error: &str) -> ErrorCategory {
     }
 
     // Data source / connection errors
-    if (lower.contains("connection") && (lower.contains("refused")
-        || lower.contains("failed")
-        || lower.contains("timeout")
-        || lower.contains("reset")))
+    if (lower.contains("connection")
+        && (lower.contains("refused")
+            || lower.contains("failed")
+            || lower.contains("timeout")
+            || lower.contains("reset")))
         || lower.contains("data source")
         || lower.contains("datasource")
         || lower.contains("could not connect")

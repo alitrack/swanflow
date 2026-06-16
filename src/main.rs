@@ -173,10 +173,7 @@ async fn main() -> anyhow::Result<()> {
 
                 println!("📋 Available tools ({}):", tools.len());
                 for tool in &tools {
-                    let desc = tool
-                        .description
-                        .as_deref()
-                        .unwrap_or("(no description)");
+                    let desc = tool.description.as_deref().unwrap_or("(no description)");
                     println!("  - {}: {}", tool.name, desc);
                 }
             }
@@ -219,8 +216,13 @@ async fn main() -> anyhow::Result<()> {
                             String::new()
                         };
                         println!("  ├─ {} ({})", cfg.name, cfg.db_type);
-                        println!("  │  {}@{}{}/{}", cfg.user, cfg.host, port_str,
-                                 cfg.database.as_deref().unwrap_or("?"));
+                        println!(
+                            "  │  {}@{}{}/{}",
+                            cfg.user,
+                            cfg.host,
+                            port_str,
+                            cfg.database.as_deref().unwrap_or("?")
+                        );
                         let cc = cfg.to_conn_config();
                         if let Ok(cc) = cc {
                             println!("  │  URL: {}", cc.url);
@@ -237,7 +239,10 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     println!("Available connections:\n");
                     for cfg in &configs {
-                        println!("  {} ({}) — {}@{}", cfg.name, cfg.db_type, cfg.user, cfg.host);
+                        println!(
+                            "  {} ({}) — {}@{}",
+                            cfg.name, cfg.db_type, cfg.user, cfg.host
+                        );
                     }
                 }
             }
@@ -253,8 +258,10 @@ async fn main() -> anyhow::Result<()> {
                         println!("  User:     {}", c.user);
                         println!("  Database: {}", c.database.as_deref().unwrap_or("(none)"));
                         println!("  SSL:      {}", c.ssl);
-                        println!("  Timeout:  {}s connect / {}s query",
-                                 c.connect_timeout, c.query_timeout);
+                        println!(
+                            "  Timeout:  {}s connect / {}s query",
+                            c.connect_timeout, c.query_timeout
+                        );
                         println!("  Read-only: {}", c.read_only);
                     }
                     None => println!("Connection '{}' not found.", name),

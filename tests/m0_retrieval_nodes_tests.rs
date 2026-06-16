@@ -1,6 +1,6 @@
+use serde_json::json;
 use swanflow::nodes::ai::retrieval::{QueryPlanningNode, SemanticChunkerNode};
 use swanflow::nodes::registry::NodeRegistry;
-use serde_json::json;
 
 #[test]
 fn test_query_planning_splits_goal_into_ranked_subqueries() {

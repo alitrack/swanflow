@@ -4,11 +4,11 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use datafusion::error::DataFusionError;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 
 use crate::core::datasource::{ConnConfig, Connector};
+use crate::core::error::{CoreResult, SwanFlowError};
 
 /// A mock Connector that runs entirely in memory — no network, no disk.
 ///
@@ -34,7 +34,8 @@ impl MockConnector {
 
     /// Add a table with one or more record batches.
     pub fn with_table(mut self, name: &str, schema: SchemaRef, batches: Vec<RecordBatch>) -> Self {
-        self.tables.insert(name.to_string(), MockTable { schema, batches });
+        self.tables
+            .insert(name.to_string(), MockTable { schema, batches });
         self
     }
 
@@ -51,7 +52,10 @@ impl MockConnector {
         self
     }
 
-    fn project_batch(batch: &RecordBatch, projection: &[usize]) -> arrow::error::Result<RecordBatch> {
+    fn project_batch(
+        batch: &RecordBatch,
+        projection: &[usize],
+    ) -> arrow::error::Result<RecordBatch> {
         if projection.is_empty() {
             return Ok(batch.clone());
         }
@@ -67,33 +71,33 @@ impl MockConnector {
 
 #[async_trait]
 impl Connector for MockConnector {
-    async fn connect(_config: ConnConfig) -> anyhow::Result<Self>
+    async fn connect(_config: ConnConfig) -> CoreResult<Self>
     where
         Self: Sized,
     {
         Ok(Self::new("mock"))
     }
 
-    async fn list_tables(&self) -> anyhow::Result<Vec<String>> {
+    async fn list_tables(&self) -> CoreResult<Vec<String>> {
         Ok(self.tables.keys().cloned().collect())
     }
 
-    async fn get_schema(&self, table: &str) -> anyhow::Result<SchemaRef> {
+    async fn get_schema(&self, table: &str) -> CoreResult<SchemaRef> {
         self.tables
             .get(table)
             .map(|t| t.schema.clone())
-            .ok_or_else(|| anyhow::anyhow!("MockConnector: table '{table}' not found"))
+            .ok_or_else(|| SwanFlowError::table_not_found(format!("table '{table}' not found")))
     }
 
     async fn scan(
         &self,
         table: &str,
         projection: &[usize],
-    ) -> anyhow::Result<SendableRecordBatchStream> {
+    ) -> CoreResult<SendableRecordBatchStream> {
         let table_data = self
             .tables
             .get(table)
-            .ok_or_else(|| anyhow::anyhow!("MockConnector: table '{table}' not found"))?;
+            .ok_or_else(|| SwanFlowError::table_not_found(format!("table '{table}' not found")))?;
 
         // Compute projected schema
         let projected_schema: SchemaRef = if projection.is_empty() {
@@ -175,9 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_connector_multi_batch() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("x", DataType::Int32, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
 
         let batch1 = RecordBatch::try_new(
             schema.clone(),
@@ -185,11 +187,9 @@ mod tests {
         )
         .unwrap();
 
-        let batch2 = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int32Array::from(vec![4, 5]))],
-        )
-        .unwrap();
+        let batch2 =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![4, 5]))])
+                .unwrap();
 
         let connector = MockConnector::new("test").with_table("data", schema, vec![batch1, batch2]);
 

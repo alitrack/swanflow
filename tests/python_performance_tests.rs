@@ -1,8 +1,8 @@
+use serde_json::json;
+use std::sync::Arc;
 use swanflow::core::engine::SwanFlowEngine;
 use swanflow::core::graph::{NodeInstance, Workflow};
 use swanflow::nodes::registry::NodeRegistry;
-use serde_json::json;
-use std::sync::Arc;
 
 fn python_has_pyarrow() -> bool {
     std::process::Command::new("python3")
@@ -35,7 +35,7 @@ async fn test_python_zero_copy_execution() {
         state: swanflow::nodes::NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     // 2. Add Python Node that increments values

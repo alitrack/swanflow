@@ -1,8 +1,8 @@
+use serde_json::json;
 use swanflow::core::compiler::WorkflowCompiler;
 use swanflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeState;
-use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -16,7 +16,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let planner = workflow.add_node(NodeInstance {
@@ -26,7 +26,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let chunker = workflow.add_node(NodeInstance {
@@ -36,7 +36,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let writer = workflow.add_node(NodeInstance {
@@ -46,7 +46,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let retriever = workflow.add_node(NodeInstance {
@@ -56,7 +56,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let structured = workflow.add_node(NodeInstance {
@@ -66,7 +66,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let citation = workflow.add_node(NodeInstance {
@@ -76,7 +76,7 @@ async fn test_m0_rag_basic_pipeline_compiles() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     workflow

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use swanflow::core::datasource::S3Manager;
 use std::time::Duration;
+use swanflow::core::datasource::S3Manager;
 
 #[tokio::test]
 async fn test_s3_manager_presigned_logic() -> Result<()> {

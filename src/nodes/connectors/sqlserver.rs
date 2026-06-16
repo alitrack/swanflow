@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use crate::core::error::{CoreResult, SwanFlowError};
 use async_trait::async_trait;
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -52,18 +52,18 @@ impl SqlServerConnector {
 
         let (userinfo, rest) = without_scheme
             .split_once('@')
-            .ok_or_else(|| anyhow!("SQL Server URL missing '@': expected user:pass@host:port/db"))?;
+            .ok_or_else(|| SwanFlowError::unknown("SQL Server URL missing '@': expected user:pass@host:port/db"))?;
 
         let (username, password) = userinfo
             .split_once(':')
-            .ok_or_else(|| anyhow!("SQL Server URL missing ':' in user:password"))?;
+            .ok_or_else(|| SwanFlowError::unknown("SQL Server URL missing ':' in user:password"))?;
 
         let (host_part, database) = rest
             .split_once('/')
-            .ok_or_else(|| anyhow!("SQL Server URL missing database path"))?;
+            .ok_or_else(|| SwanFlowError::unknown("SQL Server URL missing database path"))?;
 
         let (server, port) = if let Some((h, p)) = host_part.split_once(':') {
-            let port: u16 = p.parse().map_err(|e| anyhow!("Invalid port: {}", e))?;
+            let port: u16 = p.parse().map_err(|e| SwanFlowError::unknown(format!("Invalid port: {}",  e)))?;
             (h.to_string(), port)
         } else {
             (host_part.to_string(), 1433)
@@ -100,7 +100,7 @@ impl SqlServerConnector {
         }
 
         if server.is_empty() || database.is_empty() {
-            return Err(anyhow!("ODBC-style URL must contain Server and Database"));
+            return Err(SwanFlowError::unknown("ODBC-style URL must contain Server and Database"));
         }
 
         Ok((server, port, database, username, password))
@@ -120,11 +120,11 @@ impl SqlServerConnector {
 
         let tcp = TcpStream::connect(format!("{}:{}", self.server, self.port))
             .await
-            .map_err(|e| anyhow!("TCP connection to SQL Server failed: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("TCP connection to SQL Server failed: {}",  e)))?;
 
         let client = Client::connect(config, tcp.compat())
             .await
-            .map_err(|e| anyhow!("SQL Server connection failed: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("SQL Server connection failed: {}",  e)))?;
 
         Ok(client)
     }
@@ -132,7 +132,7 @@ impl SqlServerConnector {
 
 #[async_trait]
 impl Connector for SqlServerConnector {
-    async fn connect(config: ConnConfig) -> Result<Self> {
+    async fn connect(config: ConnConfig) -> CoreResult<Self> {
         let _timeout = Duration::from_secs(config.timeout_secs);
         let (server, port, database, username, password) =
             Self::parse_url(&config.url)?;
@@ -153,7 +153,7 @@ impl Connector for SqlServerConnector {
         Ok(connector)
     }
 
-    async fn list_tables(&self) -> Result<Vec<String>> {
+    async fn list_tables(&self) -> CoreResult<Vec<String>> {
         let mut client = self.connect_client().await?;
 
         let stream = client
@@ -163,12 +163,12 @@ impl Connector for SqlServerConnector {
                  ORDER BY TABLE_NAME",
             )
             .await
-            .map_err(|e| anyhow!("Failed to list SQL Server tables: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to list SQL Server tables: {}",  e)))?;
 
         let results = stream
             .into_results()
             .await
-            .map_err(|e| anyhow!("Failed to read SQL Server table list: {}", e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to read SQL Server table list: {}",  e)))?;
 
         let mut tables = Vec::new();
         for row in results.iter().flat_map(|r| r.iter()) {
@@ -180,7 +180,7 @@ impl Connector for SqlServerConnector {
         Ok(tables)
     }
 
-    async fn get_schema(&self, table: &str) -> Result<SchemaRef> {
+    async fn get_schema(&self, table: &str) -> CoreResult<SchemaRef> {
         let mut client = self.connect_client().await?;
 
         let stream = client
@@ -192,22 +192,22 @@ impl Connector for SqlServerConnector {
                 table.replace('\'', "''")
             ))
             .await
-            .map_err(|e| anyhow!("Failed to get schema for table '{}': {}", table, e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to get schema for table '{}': {}",  table, e)))?;
 
         let results = stream
             .into_results()
             .await
-            .map_err(|e| anyhow!("Failed to read schema for table '{}': {}", table, e))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to read schema for table '{}': {}",  table, e)))?;
 
         let mut fields = Vec::new();
         for row in results.iter().flat_map(|r| r.iter()) {
             let name = row
                 .get::<&str, _>(0)
-                .ok_or_else(|| anyhow!("Missing column name"))?
+                .ok_or_else(|| SwanFlowError::unknown("Missing column name"))?
                 .to_string();
             let sql_type = row
                 .get::<&str, _>(1)
-                .ok_or_else(|| anyhow!("Missing data type for column '{}'", name))?
+                .ok_or_else(|| SwanFlowError::unknown(format!("Missing data type for column '{}'",  name)))?
                 .to_string();
             let nullable_str = row.get::<&str, _>(2).unwrap_or("YES");
             let nullable = nullable_str.eq_ignore_ascii_case("YES");
@@ -217,7 +217,7 @@ impl Connector for SqlServerConnector {
         }
 
         if fields.is_empty() {
-            return Err(anyhow!("Table '{}' not found in SQL Server", table));
+            return Err(SwanFlowError::unknown(format!("Table '{}' not found in SQL Server",  table)));
         }
 
         Ok(Arc::new(Schema::new(fields)))
@@ -227,7 +227,7 @@ impl Connector for SqlServerConnector {
         &self,
         table: &str,
         projection: &[usize],
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> CoreResult<SendableRecordBatchStream> {
         let schema = self.get_schema(table).await?;
 
         let projected_schema: SchemaRef = if projection.is_empty() {

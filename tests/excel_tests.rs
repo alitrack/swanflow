@@ -1,11 +1,11 @@
 use calamine::Reader;
 use rust_xlsxwriter::Workbook;
+use serde_json::json;
+use std::sync::Arc;
 use swanflow::core::engine::SwanFlowEngine;
 use swanflow::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeState;
-use serde_json::json;
-use std::sync::Arc;
 use uuid::Uuid;
 
 fn should_run_excel_integration_tests() -> bool {
@@ -50,7 +50,7 @@ async fn test_excel_read_preview() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     // 4. Infer Metadata (Preview)
@@ -111,7 +111,7 @@ async fn test_excel_template_filling() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let node_b_id = Uuid::new_v4();
@@ -127,7 +127,7 @@ async fn test_excel_template_filling() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     workflow
@@ -192,7 +192,7 @@ async fn test_excel_styling_and_table() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let node_b_id = Uuid::new_v4();
@@ -209,7 +209,7 @@ async fn test_excel_styling_and_table() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     workflow
@@ -267,7 +267,7 @@ async fn test_excel_report_and_metadata() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     let node_b_id = Uuid::new_v4();
@@ -288,7 +288,7 @@ async fn test_excel_report_and_metadata() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     workflow
@@ -321,7 +321,7 @@ async fn test_excel_report_and_metadata() {
         state: NodeState::Configured,
         materialize: false,
         sub_workflow: None,
-    ..Default::default()
+        ..Default::default()
     });
 
     // let metadata = engine.infer_metadata(&workflow_meta).await.unwrap();

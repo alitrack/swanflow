@@ -1,7 +1,7 @@
+use serde_json::json;
 use swanflow::nodes::ai::privacy::PiiDetectorNode;
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeBehavior;
-use serde_json::json;
 
 #[test]
 fn test_pii_detector_detects_common_sensitive_patterns() {
