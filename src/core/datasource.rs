@@ -109,6 +109,80 @@ impl DynamicArrayBuilder {
         }
     }
 
+    /// Append a null value to the builder.
+    pub fn append_null(&mut self) {
+        match self {
+            Self::Int64(b) => b.append_null(),
+            Self::Float64(b) => b.append_null(),
+            Self::Boolean(b) => b.append_null(),
+            Self::Timestamp(b) => b.append_null(),
+            Self::Utf8(b) => b.append_null(),
+        }
+    }
+
+    /// Append an Int64 value.
+    pub fn append_int64(&mut self, val: i64) {
+        if let Self::Int64(b) = self {
+            b.append_value(val);
+        }
+    }
+
+    /// Append a Float64 value.
+    pub fn append_float64(&mut self, val: f64) {
+        if let Self::Float64(b) = self {
+            b.append_value(val);
+        }
+    }
+
+    /// Append a boolean value.
+    pub fn append_bool(&mut self, val: bool) {
+        if let Self::Boolean(b) = self {
+            b.append_value(val);
+        }
+    }
+
+    /// Append a string value.
+    pub fn append_string(&mut self, val: &str) {
+        if let Self::Utf8(b) = self {
+            b.append_value(val);
+        }
+    }
+
+    /// Append a timestamp in nanoseconds.
+    pub fn append_timestamp_nanos(&mut self, nanos: i64) {
+        if let Self::Timestamp(b) = self {
+            b.append_value(nanos);
+        }
+    }
+
+    /// Append an optional Int64 value.
+    pub fn append_option_i64(&mut self, val: Option<i64>) {
+        if let Self::Int64(b) = self {
+            b.append_option(val);
+        }
+    }
+
+    /// Append an optional Float64 value.
+    pub fn append_option_f64(&mut self, val: Option<f64>) {
+        if let Self::Float64(b) = self {
+            b.append_option(val);
+        }
+    }
+
+    /// Append an optional boolean value.
+    pub fn append_option_bool(&mut self, val: Option<bool>) {
+        if let Self::Boolean(b) = self {
+            b.append_option(val);
+        }
+    }
+
+    /// Append an optional string value.
+    pub fn append_option_string(&mut self, val: Option<String>) {
+        if let Self::Utf8(b) = self {
+            b.append_option(val);
+        }
+    }
+
     pub fn finish(&mut self) -> ArrayRef {
         match self {
             Self::Int64(b) => Arc::new(b.finish()) as ArrayRef,
@@ -1748,6 +1822,55 @@ impl ExcelReportWritingStream {
 
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Connector Trait — formal interface for external database connectors
+// ---------------------------------------------------------------------------
+
+/// Configuration for connecting to an external database.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConnConfig {
+    pub url: String,
+    pub driver: String,        // "postgres", "mysql", "clickhouse", "mssql"
+    pub max_connections: u32,  // default 10
+    pub timeout_secs: u64,     // default 30
+}
+
+impl Default for ConnConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            driver: "postgres".to_string(),
+            max_connections: 10,
+            timeout_secs: 30,
+        }
+    }
+}
+
+/// Formal Connector trait — implement for each database backend.
+#[async_trait::async_trait]
+pub trait Connector: Send + Sync {
+    /// Connect to the database using the given config.
+    async fn connect(config: ConnConfig) -> anyhow::Result<Self>
+    where
+        Self: Sized;
+
+    /// List all available table names.
+    async fn list_tables(&self) -> anyhow::Result<Vec<String>>;
+
+    /// Get the Arrow schema for a given table.
+    async fn get_schema(&self, table: &str) -> anyhow::Result<SchemaRef>;
+
+    /// Scan a table with an optional column projection and return an Arrow record batch stream.
+    async fn scan(
+        &self,
+        table: &str,
+        projection: &[usize],
+    ) -> anyhow::Result<SendableRecordBatchStream>;
+
+    /// Return the human-readable driver name (e.g. "postgres", "mysql", "clickhouse").
+    fn name(&self) -> &'static str;
 }
 
 pub struct S3Manager {

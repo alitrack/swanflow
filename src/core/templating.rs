@@ -17,6 +17,25 @@ impl TemplateEngine {
         context.get(key).cloned()
     }
 
+    fn resolve_mustache_placeholder(
+        input: &str,
+        context: &HashMap<String, JsonValue>,
+    ) -> String {
+        // Replace {{input}} and {{var_name}} with context values
+        let mut output = input.to_string();
+        for (key, value) in context {
+            let placeholder = format!("{{{{{}}}}}", key);
+            let replacement = match value {
+                JsonValue::String(s) => s.clone(),
+                JsonValue::Number(n) => n.to_string(),
+                JsonValue::Bool(b) => b.to_string(),
+                _ => value.to_string(),
+            };
+            output = output.replace(&placeholder, &replacement);
+        }
+        output
+    }
+
     /// Replaces placeholders like ${context.key} in a string with values from the context.
     pub fn render_string(input: &str, context: &HashMap<String, JsonValue>) -> String {
         let mut output = input.to_string();
@@ -39,13 +58,15 @@ impl TemplateEngine {
     pub fn render_json(input: &JsonValue, context: &HashMap<String, JsonValue>) -> JsonValue {
         match input {
             JsonValue::String(s) => {
-                // Keep exact placeholder replacements typed (number/bool/object), while
-                // mixed strings still render as text.
+                // First try exact ${context.key} placeholder
                 if let Some(value) = Self::resolve_exact_context_placeholder(s, context) {
-                    value
-                } else {
-                    JsonValue::String(Self::render_string(s, context))
+                    return value;
                 }
+                // Also resolve {{mustache}} style placeholders
+                let rendered = Self::resolve_mustache_placeholder(s, context);
+                // Then resolve ${context.key} style within the string
+                let rendered = Self::render_string(&rendered, context);
+                JsonValue::String(rendered)
             }
             JsonValue::Array(arr) => {
                 JsonValue::Array(arr.iter().map(|v| Self::render_json(v, context)).collect())
@@ -58,6 +79,27 @@ impl TemplateEngine {
                 JsonValue::Object(new_map)
             }
             _ => input.clone(),
+        }
+    }
+
+    /// Resolve a single value against context, supporting {{input}} and {{var_name}} placeholders.
+    /// Returns None if the value is a string that is purely a placeholder reference,
+    /// and the actual context value is the desired output.
+    pub fn resolve_value(value: &JsonValue, context: &HashMap<String, JsonValue>) -> JsonValue {
+        match value {
+            JsonValue::String(s) => {
+                let trimmed = s.trim();
+                // Check if the entire string is a single {{placeholder}}
+                if trimmed.starts_with("{{") && trimmed.ends_with("}}") {
+                    let key = trimmed[2..trimmed.len() - 2].trim();
+                    if let Some(context_val) = context.get(key) {
+                        return context_val.clone();
+                    }
+                }
+                // Otherwise render any placeholders within the string
+                Self::render_json(value, context)
+            }
+            _ => Self::render_json(value, context),
         }
     }
 }
@@ -139,5 +181,46 @@ mod tests {
         assert_eq!(output["count"], 42);
         assert_eq!(output["active"], true);
         assert!(output["ratio"].is_number());
+    }
+
+    #[test]
+    fn test_mustache_placeholder_input() {
+        let mut ctx = HashMap::new();
+        ctx.insert("input".to_string(), json!("hello world"));
+
+        let input = "{{input}}";
+        let output = TemplateEngine::render_string(input, &ctx);
+        assert_eq!(output, "hello world");
+    }
+
+    #[test]
+    fn test_mustache_placeholder_custom_var() {
+        let mut ctx = HashMap::new();
+        ctx.insert("my_var".to_string(), json!("42"));
+
+        let input = "{{my_var}}";
+        let output = TemplateEngine::render_string(input, &ctx);
+        assert_eq!(output, "42");
+    }
+
+    #[test]
+    fn test_resolve_value_pure_placeholder() {
+        let mut ctx = HashMap::new();
+        ctx.insert("input".to_string(), json!({"key": "value"}));
+
+        let input = json!("{{input}}");
+        let resolved = TemplateEngine::resolve_value(&input, &ctx);
+        // A pure placeholder should return the context value directly (preserving type)
+        assert_eq!(resolved, json!({"key": "value"}));
+    }
+
+    #[test]
+    fn test_resolve_value_mixed_string() {
+        let mut ctx = HashMap::new();
+        ctx.insert("name".to_string(), json!("Alice"));
+
+        let input = json!("Hello, {{name}}!");
+        let resolved = TemplateEngine::resolve_value(&input, &ctx);
+        assert_eq!(resolved, json!("Hello, Alice!"));
     }
 }

@@ -14,6 +14,7 @@ pub mod ai;
 pub mod boundary;
 pub mod common;
 pub mod config;
+pub mod connectors;
 pub mod io;
 pub mod missing;
 pub mod registry;

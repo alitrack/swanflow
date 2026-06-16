@@ -31,8 +31,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+
 use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
 use crate::nodes::config as cfg;
+use crate::nodes::connectors::clickhouse::ClickHouseConnector;
+use crate::nodes::connectors::mysql::MySqlConnector;
+use crate::nodes::connectors::postgres::PostgresConnector;
+use crate::nodes::connectors::{ConnConfig, Connector};
 use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec};
 
 pub struct ExcelReadNode;
@@ -669,7 +674,8 @@ impl NodeBehavior for HttpFetchNode {
                 "type": "object",
                 "properties": {
                     "url": { "type": "string" },
-                    "method": { "type": "string", "default": "GET" }
+                    "method": { "type": "string", "default": "GET" },
+                    "timeout_secs": { "type": "number", "default": 30 }
                 },
                 "required": ["url"]
             }),
@@ -688,6 +694,7 @@ impl NodeBehavior for HttpFetchNode {
     ) -> Result<Vec<LogicalPlan>> {
         let url = cfg::required_string(config, "url")?;
         let _method = cfg::optional_string(config, "method").unwrap_or_else(|| "GET".to_string());
+        let _timeout_secs = cfg::optional_number(config, "timeout_secs").unwrap_or(30.0);
 
         Ok(vec![LogicalPlan::Extension(Extension {
             node: Arc::new(crate::core::datasource::DuckDBScanLogical {
@@ -1083,6 +1090,10 @@ impl NodeBehavior for UniversalReadNode {
         if is_dir {
             match format {
                 FileFormat::Parquet => {
+                    let path = std::path::Path::new(&path);
+                    if !path.exists() {
+                        return Err(anyhow!("Path does not exist: {}", path.display()));
+                    }
                     let abs_path = std::fs::canonicalize(&path)?;
                     let table_url = ListingTableUrl::parse(abs_path.to_str().unwrap())?;
 
@@ -1112,6 +1123,10 @@ impl NodeBehavior for UniversalReadNode {
                     Ok(vec![df.into_optimized_plan()?])
                 }
                 FileFormat::Json => {
+                    let path_ref = std::path::Path::new(&path);
+                    if !path_ref.exists() {
+                        return Err(anyhow!("Path does not exist: {}", path));
+                    }
                     let abs_path = std::fs::canonicalize(&path)?;
                     let query = if recursive {
                         format!(
@@ -1165,6 +1180,10 @@ impl NodeBehavior for UniversalReadNode {
                     Ok(vec![df.into_optimized_plan()?])
                 }
                 FileFormat::Json => {
+                    let path_ref = std::path::Path::new(&path);
+                    if !path_ref.exists() {
+                        return Err(anyhow!("Path does not exist: {}", path));
+                    }
                     let abs_path = std::fs::canonicalize(&path)?;
                     let query = format!(
                         "SELECT * FROM read_json_auto('{}')",
@@ -1203,6 +1222,9 @@ enum DbDriver {
     DuckDBPostgres,
     DuckDBSqlite,
     SqlxAny,
+    PostgresConnector,
+    MySqlConnector,
+    ClickHouseConnector,
 }
 
 impl DbConnectorNode {
@@ -1215,6 +1237,92 @@ impl DbConnectorNode {
             DbDriver::SqlxAny
         }
     }
+
+    async fn build_duckdb_plan(
+        expanded_url: &str,
+        query: &str,
+        driver: DbDriver,
+    ) -> Result<Vec<LogicalPlan>> {
+        let ext = if driver == DbDriver::DuckDBPostgres {
+            "postgres"
+        } else {
+            "sqlite"
+        };
+
+        let (path, attach_sql) = if driver == DbDriver::DuckDBPostgres {
+            (
+                ":memory:".to_string(),
+                Some(format!("ATTACH '{}' AS ext_db (TYPE postgres);", expanded_url)),
+            )
+        } else {
+            let db_path = expanded_url.trim_start_matches("sqlite://");
+            (
+                ":memory:".to_string(),
+                Some(format!("ATTACH '{}' AS ext_db (TYPE sqlite);", db_path)),
+            )
+        };
+
+        let batches = DuckDBHelper::query_arrow(&path, query, &[ext.to_string()], &attach_sql)
+            .await?;
+        if batches.is_empty() {
+            return Err(anyhow!("Query returned no data for schema inference"));
+        }
+        let schema = batches[0].schema();
+        let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
+
+        Ok(vec![LogicalPlan::Extension(
+            datafusion::logical_expr::Extension {
+                node: Arc::new(crate::core::datasource::DuckDBScanLogical {
+                    connection_path: path,
+                    extensions: vec![ext.to_string()],
+                    attach_sql,
+                    query: query.to_string(),
+                    schema: Arc::new(df_schema),
+                }),
+            },
+        )])
+    }
+
+    async fn build_sqlx_any_plan(
+        expanded_url: &str,
+        query: &str,
+    ) -> Result<Vec<LogicalPlan>> {
+        sqlx::any::install_default_drivers();
+        let normalized_url = if expanded_url.starts_with("sqlite3://") {
+            expanded_url.replace("sqlite3://", "sqlite://")
+        } else {
+            expanded_url.to_string()
+        };
+        let pool = sqlx::AnyPool::connect(&normalized_url)
+            .await
+            .map_err(|e| anyhow!("SQLx connection failed: {}", e))?;
+
+        let query_obj = sqlx::query(query);
+        let first_row = query_obj
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| anyhow!("SQLx query failed for schema inference: {}", e))?;
+
+        let mut fields = Vec::new();
+        for col in first_row.columns() {
+            let arrow_type = crate::core::datasource::sqlx_type_to_arrow(col.type_info());
+            fields.push(Field::new(col.name().to_string(), arrow_type, true));
+        }
+
+        let schema = Arc::new(Schema::new(fields));
+        let df_schema = datafusion::common::DFSchema::try_from(schema)?;
+
+        Ok(vec![LogicalPlan::Extension(
+            datafusion::logical_expr::Extension {
+                node: Arc::new(crate::core::datasource::SqlxScanLogical {
+                    url: normalized_url,
+                    query: query.to_string(),
+                    schema: Arc::new(df_schema),
+                    params: vec![],
+                }),
+            },
+        )])
+    }
 }
 
 #[async_trait]
@@ -1223,7 +1331,7 @@ impl NodeBehavior for DbConnectorNode {
         NodeSpec {
             type_id: "core.io.db_connector".to_string(),
             display_name: "Database Connector".to_string(),
-            description: "Connect to external databases using DuckDB scanners or SQLx.".to_string(),
+            description: "Connect to external databases (PostgreSQL, MySQL, ClickHouse, SQLite, etc.) using native connectors or DuckDB scanners.".to_string(),
             input_ports: vec![],
             output_ports: vec![PortSpec {
                 id: 0,
@@ -1234,16 +1342,29 @@ impl NodeBehavior for DbConnectorNode {
                 "type": "object",
                 "properties": {
                     "url": { "type": "string" },
-                    "query": { "type": "string" }
+                    "query": { "type": "string" },
+                    "table": { "type": "string", "description": "Table name (alternative to query)" },
+                    "driver": {
+                        "type": "string",
+                        "enum": ["auto", "postgres", "mysql", "clickhouse", "duckdb_postgres", "duckdb_sqlite", "sqlx_any"],
+                        "default": "auto"
+                    }
                 },
-                "required": ["url", "query"]
+                "oneOf": [
+                    { "required": ["url", "query"] },
+                    { "required": ["url", "table"] }
+                ]
             }),
         }
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
         cfg::required_string(config, "url")?;
-        cfg::required_string(config, "query")?;
+        if config.get("query").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty())
+            && config.get("table").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty())
+        {
+            return Err(anyhow!("Either 'query' or 'table' must be provided"));
+        }
         Ok(())
     }
 
@@ -1253,7 +1374,9 @@ impl NodeBehavior for DbConnectorNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let url = cfg::required_string(config, "url")?;
-        let query = cfg::required_string(config, "query")?;
+        let query = cfg::optional_string(config, "query");
+        let table = cfg::optional_string(config, "table");
+        let driver = cfg::optional_string(config, "driver").unwrap_or_else(|| "auto".to_string());
 
         // ENV expansion for security
         let expanded_url = if url.contains("${") {
@@ -1270,88 +1393,102 @@ impl NodeBehavior for DbConnectorNode {
             url.clone()
         };
 
-        let driver = Self::select_driver(&expanded_url);
+        // Determine the driver
+        let resolved_driver = if driver == "auto" {
+            Self::select_driver(&expanded_url)
+        } else {
+            match driver.as_str() {
+                "postgres" => DbDriver::PostgresConnector,
+                "mysql" => DbDriver::MySqlConnector,
+                "clickhouse" => DbDriver::ClickHouseConnector,
+                "duckdb_postgres" => DbDriver::DuckDBPostgres,
+                "duckdb_sqlite" => DbDriver::DuckDBSqlite,
+                "sqlx_any" => DbDriver::SqlxAny,
+                _ => DbDriver::SqlxAny,
+            }
+        };
 
-        match driver {
+        // Build the effective query
+        let effective_query = match (query, table) {
+            (Some(q), _) if !q.is_empty() => q,
+            (_, Some(t)) if !t.is_empty() => format!("SELECT * FROM {}", t),
+            _ => return Err(anyhow!("Either 'query' or 'table' must be provided")),
+        };
+
+        match resolved_driver {
             DbDriver::DuckDBPostgres | DbDriver::DuckDBSqlite => {
-                let ext = if driver == DbDriver::DuckDBPostgres {
-                    "postgres"
-                } else {
-                    "sqlite"
-                };
-
-                let (path, attach_sql) = if driver == DbDriver::DuckDBPostgres {
-                    (
-                        ":memory:",
-                        Some(format!(
-                            "ATTACH '{}' AS ext_db (TYPE postgres);",
-                            expanded_url
-                        )),
-                    )
-                } else {
-                    let db_path = expanded_url.trim_start_matches("sqlite://");
-                    (
-                        ":memory:",
-                        Some(format!("ATTACH '{}' AS ext_db (TYPE sqlite);", db_path)),
-                    )
-                };
-
-                // Use query_arrow to get the schema reliably without holding Connection
-                let batches =
-                    DuckDBHelper::query_arrow(path, &query, &[ext.to_string()], &attach_sql)
-                        .await?;
-                if batches.is_empty() {
-                    return Err(anyhow!("Query returned no data for schema inference"));
-                }
-                let schema = batches[0].schema();
-                let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
-
-                Ok(vec![LogicalPlan::Extension(
-                    datafusion::logical_expr::Extension {
-                        node: Arc::new(crate::core::datasource::DuckDBScanLogical {
-                            connection_path: path.to_string(),
-                            extensions: vec![ext.to_string()],
-                            attach_sql,
-                            query: query.clone(),
-                            schema: Arc::new(df_schema),
-                        }),
-                    },
-                )])
+                // Keep existing DuckDB path
+                Self::build_duckdb_plan(&expanded_url, &effective_query, resolved_driver).await
             }
             DbDriver::SqlxAny => {
-                // SQLx path: dynamic schema discovery
-                sqlx::any::install_default_drivers();
-                let normalized_url = if expanded_url.starts_with("sqlite3://") {
-                    expanded_url.replace("sqlite3://", "sqlite://")
-                } else {
-                    expanded_url.to_string()
+                // Keep existing SQLx Any path
+                Self::build_sqlx_any_plan(&expanded_url, &effective_query).await
+            }
+            DbDriver::PostgresConnector => {
+                // Use new PostgresConnector for schema discovery
+                let conn_config = ConnConfig {
+                    url: expanded_url.clone(),
+                    driver: "postgres".to_string(),
+                    max_connections: 10,
+                    timeout_secs: 30,
                 };
-                let pool = sqlx::AnyPool::connect(&normalized_url)
-                    .await
-                    .map_err(|e| anyhow!("SQLx connection failed: {}", e))?;
-
-                let query_obj = sqlx::query(&query);
-                let first_row = query_obj
-                    .fetch_one(&pool)
-                    .await
-                    .map_err(|e| anyhow!("SQLx query failed for schema inference: {}", e))?;
-
-                let mut fields = Vec::new();
-                for col in first_row.columns() {
-                    let arrow_type = crate::core::datasource::sqlx_type_to_arrow(col.type_info());
-                    fields.push(Field::new(col.name().to_string(), arrow_type, true));
-                }
-
-                let schema = Arc::new(Schema::new(fields));
-                let df_schema = datafusion::common::DFSchema::try_from(schema)?;
+                let connector = PostgresConnector::connect(conn_config).await?;
+                let schema = connector.get_schema(&effective_query.trim_start_matches("SELECT * FROM ")).await?;
+                let df_schema = Arc::new(datafusion::common::DFSchema::try_from(schema.clone())?);
 
                 Ok(vec![LogicalPlan::Extension(
                     datafusion::logical_expr::Extension {
                         node: Arc::new(crate::core::datasource::SqlxScanLogical {
-                            url: normalized_url,
-                            query: query.clone(),
-                            schema: Arc::new(df_schema),
-                            params: vec![], // TODO: Support parameters in DbConnectorNode if needed
+                            url: expanded_url,
+                            query: effective_query,
+                            schema: df_schema,
+                            params: vec![],
+                        }),
+                    },
+                )])
+            }
+            DbDriver::MySqlConnector => {
+                // Use new MySqlConnector for schema discovery
+                let conn_config = ConnConfig {
+                    url: expanded_url.clone(),
+                    driver: "mysql".to_string(),
+                    max_connections: 10,
+                    timeout_secs: 30,
+                };
+                let connector = MySqlConnector::connect(conn_config).await?;
+                let schema = connector.get_schema(&effective_query.trim_start_matches("SELECT * FROM ")).await?;
+                let df_schema = Arc::new(datafusion::common::DFSchema::try_from(schema.clone())?);
+
+                Ok(vec![LogicalPlan::Extension(
+                    datafusion::logical_expr::Extension {
+                        node: Arc::new(crate::core::datasource::SqlxScanLogical {
+                            url: expanded_url,
+                            query: effective_query,
+                            schema: df_schema,
+                            params: vec![],
+                        }),
+                    },
+                )])
+            }
+            DbDriver::ClickHouseConnector => {
+                // Use new ClickHouseConnector for schema discovery
+                let conn_config = ConnConfig {
+                    url: expanded_url.clone(),
+                    driver: "clickhouse".to_string(),
+                    max_connections: 10,
+                    timeout_secs: 30,
+                };
+                let connector = ClickHouseConnector::connect(conn_config).await?;
+                let schema = connector.get_schema(&effective_query.trim_start_matches("SELECT * FROM ")).await?;
+                let df_schema = Arc::new(datafusion::common::DFSchema::try_from(schema.clone())?);
+
+                Ok(vec![LogicalPlan::Extension(
+                    datafusion::logical_expr::Extension {
+                        node: Arc::new(crate::core::datasource::SqlxScanLogical {
+                            url: expanded_url,
+                            query: effective_query,
+                            schema: df_schema,
+                            params: vec![],
                         }),
                     },
                 )])

@@ -43,22 +43,18 @@ async fn test_topological_sort() {
     let mut registry = NodeRegistry::new();
     registry.register_node(Arc::new(TestNode));
 
-    let n1 = workflow.add_node(NodeInstance {
-        id: Uuid::new_v4(),
-        type_id: "test".into(),
-        config: json!({}),
-        state: NodeState::Configured,
-        materialize: true,
-        sub_workflow: None,
-    });
-    let n2 = workflow.add_node(NodeInstance {
-        id: Uuid::new_v4(),
-        type_id: "test".into(),
-        config: json!({}),
-        state: NodeState::Configured,
-        materialize: true,
-        sub_workflow: None,
-    });
+    let n1 = workflow.add_node(NodeInstance::with_materialize(
+        Uuid::new_v4(),
+        "test",
+        json!({}),
+        NodeState::Configured,
+    ));
+    let n2 = workflow.add_node(NodeInstance::with_materialize(
+        Uuid::new_v4(),
+        "test",
+        json!({}),
+        NodeState::Configured,
+    ));
 
     workflow
         .add_edge(

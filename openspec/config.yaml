@@ -1,20 +1,41 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  # SwanFlow — Rust-Native Data Science Engine
+  
+  Tech Stack:
+  - Engine: Apache DataFusion 52.1.0 + Arrow 57.3.0
+  - Python bridge: PyO3 0.26 / pyo3-arrow 0.14 (zero-copy FFI)
+  - Connectors: DuckDB 1.4.4 scanners, SQLx 0.8 (Postgres/MySQL/MSSQL)
+  - Reporting: rust_xlsxwriter
+  - Graph: petgraph + tokio
+  - AI: IntelligenceHook trait, Analyst Agent
+  
+  Core Innovation:
+  - Late-Binding SQL Recompiler: delay SQL parsing to physical-plan time
+  - Node-to-node references via "SELECT * FROM node_uuid" without explicit edges
+  - Zero-copy Python bridge via Arrow C Data Interface
+  
+  Key Differentiators vs dbt:
+  - Rust-native execution (not Python compilation)
+  - Custom node types (not just SQL models)
+  - Zero-copy Python integration via pyo3-arrow
+  - Built-in AI Agent (AnalystAgent + IntelligenceHook)
+  
+  Future Vision (from 00-research-report):
+  - Level 3 fusion: DAG + Ontology + Agent
+  - DAG defines execution topology
+  - Ontology provides semantic constraints
+  - Agent as intelligent execution unit
+  
+  Existing active OpenSpec changes:
+  - analyst-agent-v2: Hybrid reasoning loop + self-correction
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+rules:
+  proposal:
+    - Include "Why" section with problem statement
+    - Include "Capabilities" section listing new and modified capabilities
+    - Reference relevant research findings from 00-research-report.md where applicable
+  tasks:
+    - Break tasks into chunks that can be completed in 2-5 focused sessions
+    - Mark existing work with [x] when already done

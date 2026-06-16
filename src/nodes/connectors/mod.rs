@@ -1,0 +1,12 @@
+//! SwanFlow Connectors — formal database connectors implementing the Connector trait.
+//!
+//! Each connector provides `list_tables`, `get_schema`, and `scan` operations
+//! backed by Arrow record batches, enabling seamless integration with the
+//! DataFusion query engine.
+
+pub mod clickhouse;
+pub mod mysql;
+pub mod postgres;
+
+// Re-export the Connector trait and ConnConfig from core for convenience.
+pub use crate::core::datasource::{ConnConfig, Connector};

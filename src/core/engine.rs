@@ -422,6 +422,478 @@ impl SwanFlowEngine {
             diagnostics: compiler.diagnostics,
         })
     }
+
+    /// Execute a YAML workflow with step-mode awareness.
+    /// Orchestrates fan_out, collect, conditional, and loop modes.
+    pub async fn execute_yaml_workflow(
+        &self,
+        workflow: &Workflow,
+    ) -> Result<mpsc::UnboundedReceiver<NodeEvent>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let registry = self.registry.clone();
+        let cache_dir = self.cache_dir.clone();
+
+        // 1. Build a linear task list in topological order with mode annotations
+        let mut compiler = WorkflowCompiler::with_cache_dir(true, cache_dir.clone());
+        compiler.ctx = self.ctx.clone();
+
+        let ctx_shared = self.ctx.clone();
+        let hook_shared = self.hook.clone();
+        let registry_clone = registry.clone();
+        let workflow = workflow.clone();
+
+        tokio::spawn(async move {
+            // Collect topological order
+            let sorted_indices = match petgraph::algo::toposort(&workflow.graph, None) {
+                Ok(v) => v,
+                Err(_) => {
+                    let _ = tx.send(NodeEvent::Error {
+                        node_id: Uuid::nil(),
+                        message: serde_json::json!({
+                            "message": "Cycle detected in workflow",
+                            "class": "Planning"
+                        })
+                        .to_string(),
+                    });
+                    return;
+                }
+            };
+
+            // Build a node lookup: node_id -> NodeInstance
+            let node_map: HashMap<Uuid, &crate::core::graph::NodeInstance> = sorted_indices
+                .iter()
+                .filter_map(|idx| {
+                    let node = workflow.graph.node_weight(*idx)?;
+                    Some((node.id, node))
+                })
+                .collect();
+
+            // Store context variables ({{var_name}})
+            let mut step_context: std::collections::HashMap<String, serde_json::Value> =
+                workflow.context.clone();
+
+            for (_i, &node_idx) in sorted_indices.iter().enumerate() {
+                let node = match workflow.graph.node_weight(node_idx) {
+                    Some(n) => n.clone(),
+                    None => continue,
+                };
+
+                // Resolve and store variable context for this step
+                if let Some(output_var) = &node.output_var {
+                    step_context.insert(output_var.clone(), serde_json::Value::Null);
+                }
+
+                // Execute based on mode
+                let result = Self::execute_node_with_mode(
+                    &node,
+                    &node_map,
+                    &workflow,
+                    node_idx,
+                    &mut step_context,
+                    &ctx_shared,
+                    &cache_dir,
+                    &registry_clone,
+                    &tx,
+                    &hook_shared,
+                )
+                .await;
+
+                let _ = tx.send(NodeEvent::StateChanged {
+                    node_id: node.id,
+                    state: crate::nodes::NodeState::Executed,
+                });
+
+                // Handle error modes
+                if let Err(e) = result {
+                    let should_fail = match &node.error_mode {
+                        crate::core::graph::ErrorMode::Fail => true,
+                        crate::core::graph::ErrorMode::Skip => false,
+                        crate::core::graph::ErrorMode::Retry(max_retries) => {
+                            let mut retried = false;
+                            for attempt in 1..=*max_retries {
+                                println!(
+                                    "DEBUG: Retrying node {} (attempt {}/{})",
+                                    node.id, attempt, max_retries
+                                );
+                                let retry_result = Self::execute_node_with_mode(
+                                    &node,
+                                    &node_map,
+                                    &workflow,
+                                    node_idx,
+                                    &mut step_context,
+                                    &ctx_shared,
+                                    &cache_dir,
+                                    &registry_clone,
+                                    &tx,
+                                    &hook_shared,
+                                )
+                                .await;
+                                if retry_result.is_ok() {
+                                    retried = true;
+                                    break;
+                                }
+                            }
+                            !retried
+                        }
+                    };
+                    if should_fail {
+                        let _ = tx.send(NodeEvent::Error {
+                            node_id: node.id,
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
+
+            sync_metadata_to_context(&ctx_shared, &cache_dir).await;
+            drop(tx);
+        });
+
+        Ok(rx)
+    }
+
+    /// Execute a single node, respecting its mode (fan_out, collect, conditional, loop).
+    async fn execute_node_with_mode(
+        node: &crate::core::graph::NodeInstance,
+        _node_map: &std::collections::HashMap<Uuid, &crate::core::graph::NodeInstance>,
+        workflow: &Workflow,
+        node_idx: petgraph::stable_graph::NodeIndex,
+        step_context: &mut std::collections::HashMap<String, serde_json::Value>,
+        ctx: &Arc<SessionContext>,
+        cache_dir: &str,
+        registry: &Arc<NodeRegistry>,
+        tx: &mpsc::UnboundedSender<NodeEvent>,
+        hook: &Option<Arc<dyn IntelligenceHook>>,
+    ) -> Result<String> {
+        use petgraph::visit::EdgeRef;
+        use petgraph::Direction;
+        if node.mode == crate::core::graph::StepMode::Conditional {
+            // Find previous step output
+            let mut prev_output = String::new();
+            for edge in workflow
+                .graph
+                .edges_directed(node_idx, Direction::Incoming)
+            {
+                let src_node = workflow.graph.node_weight(edge.source()).unwrap();
+                let table_name = format!("node_{}", &src_node.id.to_string()[..8]);
+                if let Ok(df) = ctx.sql(&format!("SELECT * FROM \"{}\" LIMIT 1", table_name)).await
+                {
+                            if let Ok(batches) = df.collect().await {
+                        for batch in &batches {
+                            use datafusion::arrow::util::display::ArrayFormatter;
+                            use datafusion::arrow::util::display::FormatOptions;
+                            let opts = FormatOptions::default();
+                            for col_idx in 0..batch.num_columns() {
+                                let col = batch.column(col_idx);
+                                if let Ok(fmt) = ArrayFormatter::try_new(col, &opts) {
+                                    for row in 0..batch.num_rows() {
+                                        prev_output.push_str(&format!("{}", fmt.value(row)));
+                                        prev_output.push('\n');
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check condition
+            let condition_met = if let Some(cond) = &node.condition {
+                prev_output.contains(cond)
+            } else if let Some(when_expr) = &node.when {
+                // Simple when expression: check if {{input}} contains the when value
+                let input_val = step_context.get("input").and_then(|v| v.as_str()).unwrap_or("");
+                input_val.contains(when_expr)
+            } else {
+                true
+            };
+
+            if !condition_met {
+                println!(
+                    "DEBUG: Conditional node {} skipped (condition not met)",
+                    node.id
+                );
+                return Ok(String::new());
+            }
+        }
+
+        // Handle loop mode
+        if node.mode == crate::core::graph::StepMode::Loop {
+            let until = node.until.clone().unwrap_or_default();
+            let max_iter = node.max_iterations.max(1);
+
+            for iteration in 0..max_iter {
+                println!(
+                    "DEBUG: Loop node {} iteration {}/{}",
+                    node.id,
+                    iteration + 1,
+                    max_iter
+                );
+
+                // Update context with iteration count
+                step_context.insert(
+                    "iteration".to_string(),
+                    serde_json::json!(iteration + 1),
+                );
+
+                let output = Self::compile_and_execute_node(
+                    node, workflow, node_idx, step_context, ctx, cache_dir, registry, tx, hook,
+                )
+                .await?;
+
+                // Check if loop should stop
+                if !until.is_empty() && output.contains(&until) {
+                    println!(
+                        "DEBUG: Loop node {} stopping at iteration {}: found '{}'",
+                        node.id,
+                        iteration + 1,
+                        until
+                    );
+                    break;
+                }
+            }
+            return Ok(format!("Loop completed ({} iterations)", max_iter));
+        }
+
+        // Handle fan_out mode: find children and execute them in parallel
+        if node.mode == crate::core::graph::StepMode::FanOut {
+            let children: Vec<_> = workflow
+                .graph
+                .edges_directed(node_idx, Direction::Outgoing)
+                .map(|edge| {
+                    let child_node = workflow.graph.node_weight(edge.target()).unwrap();
+                    child_node.clone()
+                })
+                .collect();
+
+            if children.is_empty() {
+                // No fan-out children, just execute this node normally
+                return Self::compile_and_execute_node(
+                    node, workflow, node_idx, step_context, ctx, cache_dir, registry, tx, hook,
+                )
+                .await;
+            }
+
+            // Execute children in parallel
+            let mut handles = Vec::new();
+            for child in &children {
+                let child_ctx = ctx.clone();
+                let child_cache = cache_dir.to_string();
+                let child_registry = registry.clone();
+                let child_tx = tx.clone();
+                let child_hook = hook.clone();
+                let child_node = child.clone();
+                let child_workflow = workflow.clone();
+                let child_idx = workflow
+                    .graph
+                    .node_indices()
+                    .find(|i| workflow.graph[*i].id == child.id)
+                    .unwrap_or(node_idx);
+                let mut child_step_context = step_context.clone();
+
+                handles.push(tokio::spawn(async move {
+                    Self::compile_and_execute_node(
+                        &child_node,
+                        &child_workflow,
+                        child_idx,
+                        &mut child_step_context,
+                        &child_ctx,
+                        &child_cache,
+                        &child_registry,
+                        &child_tx,
+                        &child_hook,
+                    )
+                    .await
+                }));
+            }
+
+            let mut outputs = Vec::new();
+            for handle in handles {
+                match handle.await {
+                    Ok(Ok(output)) => outputs.push(output),
+                    Ok(Err(e)) => outputs.push(format!("Error: {}", e)),
+                    Err(e) => outputs.push(format!("JoinError: {}", e)),
+                }
+            }
+
+            // Collect mode: if there's a subsequent collect node, it will be processed separately
+            // For now, just return joined outputs
+            return Ok(outputs.join("\n---\n"));
+        }
+
+        // Handle collect mode: gather outputs from fan-out predecessors
+        if node.mode == crate::core::graph::StepMode::Collect {
+            let predecessors: Vec<_> = workflow
+                .graph
+                .edges_directed(node_idx, Direction::Incoming)
+                .map(|edge| {
+                    let src_node = workflow.graph.node_weight(edge.source()).unwrap();
+                    src_node.clone()
+                })
+                .collect();
+
+            let mut collected = Vec::new();
+            for pred in &predecessors {
+                let table_name = format!("node_{}", &pred.id.to_string()[..8]);
+                if let Ok(df) = ctx
+                    .sql(&format!("SELECT * FROM \"{}\"", table_name))
+                    .await
+                {
+                    if let Ok(batches) = df.collect().await {
+                        for batch in &batches {
+                            use datafusion::arrow::util::display::ArrayFormatter;
+                            use datafusion::arrow::util::display::FormatOptions;
+                            let opts = FormatOptions::default();
+                            for col_idx in 0..batch.num_columns() {
+                                let col = batch.column(col_idx);
+                                if let Ok(fmt) = ArrayFormatter::try_new(col, &opts) {
+                                    for row in 0..batch.num_rows() {
+                                        collected.push(fmt.value(row).to_string());
+                                    }
+                                } else {
+                                    collected.push(format!("{:?}", col));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let joined = collected.join("\n---\n");
+            step_context.insert("input".to_string(), serde_json::json!(joined));
+            return Ok(joined);
+        }
+
+        // Default sequential mode: compile and execute
+        Self::compile_and_execute_node(
+            node, workflow, node_idx, step_context, ctx, cache_dir, registry, tx, hook,
+        )
+        .await
+    }
+
+    /// Compile and execute a single node, returning its text output.
+    async fn compile_and_execute_node(
+        node: &crate::core::graph::NodeInstance,
+        workflow: &Workflow,
+        node_idx: petgraph::stable_graph::NodeIndex,
+        step_context: &mut std::collections::HashMap<String, serde_json::Value>,
+        ctx: &Arc<SessionContext>,
+        cache_dir: &str,
+        registry: &Arc<NodeRegistry>,
+        _tx: &mpsc::UnboundedSender<NodeEvent>,
+        _hook: &Option<Arc<dyn IntelligenceHook>>,
+    ) -> Result<String> {
+        use crate::core::templating::TemplateEngine;
+        use petgraph::visit::EdgeRef;
+        use petgraph::Direction;
+
+        // 1. Render config with template engine (supports {{input}}, {{var_name}})
+        let rendered_config = TemplateEngine::render_json(&node.config, step_context);
+
+        // 2. Collect input plans from predecessors
+        let mut input_plans = Vec::new();
+        let mut incoming_edges: Vec<_> = workflow
+            .graph
+            .edges_directed(node_idx, Direction::Incoming)
+            .collect();
+        incoming_edges.sort_by_key(|e| e.weight().target_port);
+
+        for edge in &incoming_edges {
+            let src_node = workflow.graph.node_weight(edge.source()).unwrap();
+            let table_name = format!("node_{}", &src_node.id.to_string()[..8]);
+            if let Ok(df) = ctx
+                .sql(&format!("SELECT * FROM \"{}\"", table_name))
+                .await
+            {
+                input_plans.push(df.into_optimized_plan()?);
+            }
+        }
+
+        // 3. Compile the node
+        let spec = match registry.get_node(&node.type_id) {
+            Ok(spec) => spec,
+            Err(e) => {
+                return Err(datafusion::error::DataFusionError::Plan(format!(
+                    "Unknown node type '{}': {}",
+                    node.type_id, e
+                )));
+            }
+        };
+
+        let compiled_plans = spec
+            .propose_plan(input_plans, &rendered_config)
+            .await
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Plan(format!(
+                    "Plan proposal failed for {}: {}",
+                    node.id, e
+                ))
+            })?;
+
+        // 4. Execute the plan
+        if compiled_plans.is_empty() {
+            return Ok(String::new());
+        }
+
+        let plan = &compiled_plans[0];
+        let planner = crate::core::engine::SwanFlowPlanner {
+            event_tx: mpsc::unbounded_channel().0,
+            ctx: ctx.clone(),
+            cache_dir: cache_dir.to_string(),
+        };
+        let physical_planner = Arc::new(
+            datafusion::physical_planner::DefaultPhysicalPlanner::with_extension_planners(vec![
+                Arc::new(planner),
+            ]),
+        );
+
+        let state = datafusion::execution::session_state::SessionStateBuilder::new_from_existing(
+            ctx.state(),
+        )
+        .with_query_planner(Arc::new(
+            crate::core::engine::SwanFlowQueryPlanner { physical_planner },
+        ))
+        .build();
+
+        let physical_plan = state.create_physical_plan(plan).await?;
+        let batches =
+            datafusion::physical_plan::collect(physical_plan, ctx.task_ctx()).await?;
+
+        // 5. Materialize: register as table for downstream nodes
+        if !batches.is_empty() {
+            let table_name = format!("node_{}", &node.id.to_string()[..8]);
+            if let Ok(df) = ctx.read_batches(batches.clone()) {
+                let _ = ctx.register_table(&table_name, df.into_view());
+            }
+        }
+
+        // 6. Convert batches to text output for context
+        let mut text_output = String::new();
+        for batch in &batches {
+            use datafusion::arrow::util::display::ArrayFormatter;
+            use datafusion::arrow::util::display::FormatOptions;
+            let opts = FormatOptions::default();
+            for col_idx in 0..batch.num_columns() {
+                let col = batch.column(col_idx);
+                if let Ok(fmt) = ArrayFormatter::try_new(col, &opts) {
+                    for row in 0..batch.num_rows() {
+                        text_output.push_str(&format!("{}", fmt.value(row)));
+                        text_output.push('\n');
+                    }
+                } else {
+                    text_output.push_str(&format!("{:?}\n", col));
+                }
+            }
+        }
+
+        // 7. Store output in step context for {{input}} and {{output_var}} resolution
+        step_context.insert("input".to_string(), serde_json::json!(text_output));
+
+        if let Some(var_name) = &node.output_var {
+            step_context.insert(var_name.clone(), serde_json::json!(text_output));
+        }
+
+        Ok(text_output)
+    }
 }
 
 #[derive(Clone)]

@@ -48,6 +48,9 @@ impl NodeBehavior for FilterNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            anyhow::bail!("FilterNode requires at least one input");
+        }
         let expr_str = cfg::required_string(config, "expr")?;
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
@@ -99,6 +102,9 @@ impl NodeBehavior for ProjectNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            anyhow::bail!("ProjectNode requires at least one input");
+        }
         let select_cols = cfg::required_string_array(config, "exprs")?;
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
@@ -138,7 +144,12 @@ impl NodeBehavior for AggregateNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> {
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        let group_by = cfg::optional_string_array(config, "group_by")?;
+        let aggs = cfg::optional_string_array(config, "aggs")?;
+        if group_by.is_empty() && aggs.is_empty() {
+            anyhow::bail!("AggregateNode requires at least one of 'group_by' or 'aggs' to be non-empty");
+        }
         Ok(())
     }
 
@@ -147,6 +158,9 @@ impl NodeBehavior for AggregateNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            anyhow::bail!("AggregateNode requires at least one input");
+        }
         let group_by = cfg::optional_string_array(config, "group_by")?;
         let aggs = cfg::optional_string_array(config, "aggs")?;
 
@@ -210,6 +224,9 @@ impl NodeBehavior for WindowNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            anyhow::bail!("WindowNode requires at least one input");
+        }
         let exprs = cfg::required_string_array(config, "window_exprs")?;
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
@@ -255,16 +272,37 @@ impl NodeBehavior for ConditionNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> {
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        cfg::required_string(config, "expr")?;
         Ok(())
     }
 
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        Ok(vec![inputs[0].clone(), inputs[0].clone()])
+        if inputs.is_empty() {
+            anyhow::bail!("ConditionNode requires at least one input");
+        }
+        let expr_str = cfg::required_string(config, "expr")?;
+
+        let ctx = SessionContext::new();
+        let df = DataFrame::new(ctx.state(), inputs[0].clone());
+        ctx.register_table("cond_input", df.into_view())?;
+
+        // True branch: rows matching the condition expression
+        let true_sql = format!("SELECT * FROM cond_input WHERE {}", expr_str);
+        let true_df = ctx.sql(&true_sql).await?;
+
+        // False branch: rows that do NOT match the condition
+        let false_sql = format!("SELECT * FROM cond_input WHERE NOT ({})", expr_str);
+        let false_df = ctx.sql(&false_sql).await?;
+
+        Ok(vec![
+            true_df.into_optimized_plan()?,
+            false_df.into_optimized_plan()?,
+        ])
     }
 }
 
@@ -287,7 +325,15 @@ impl NodeBehavior for ForEachNode {
                 name: "output".into(),
                 description: "Processed items".into(),
             }],
-            config_schema: serde_json::json!({}),
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "partition_column": {
+                        "type": "string",
+                        "description": "Column to partition/group items by for iteration. If set, data is ordered by this column before processing."
+                    }
+                }
+            }),
         }
     }
 
@@ -298,9 +344,26 @@ impl NodeBehavior for ForEachNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        Ok(inputs)
+        if inputs.is_empty() {
+            anyhow::bail!("ForEachNode requires at least one input");
+        }
+        let partition_col = cfg::optional_string(config, "partition_column");
+
+        let plan = if let Some(ref col) = partition_col {
+            let ctx = SessionContext::new();
+            let df = DataFrame::new(ctx.state(), inputs[0].clone());
+            ctx.register_table("foreach_input", df.into_view())?;
+            // Order by the partition column so rows are grouped together
+            let sql = format!("SELECT * FROM foreach_input ORDER BY \"{}\"", col);
+            ctx.sql(&sql).await?.into_optimized_plan()?
+        } else {
+            // No partition column: pass through as-is
+            inputs[0].clone()
+        };
+
+        Ok(vec![plan])
     }
 }
 
@@ -336,6 +399,9 @@ impl NodeBehavior for ProfilerNode {
         inputs: Vec<LogicalPlan>,
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            anyhow::bail!("ProfilerNode requires at least one input");
+        }
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         let schema = df.schema();
@@ -375,7 +441,11 @@ impl NodeBehavior for VariableCreatorNode {
             display_name: "Variable Creator".to_string(),
             description: "Create workflow variables from configuration.".to_string(),
             input_ports: vec![],
-            output_ports: vec![],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "variables".into(),
+                description: "Single-row DataFrame with variable values".into(),
+            }],
             config_schema: serde_json::json!({
                 "type": "object",
                 "additionalProperties": { "type": "string" }
@@ -383,16 +453,39 @@ impl NodeBehavior for VariableCreatorNode {
         }
     }
 
-    fn validate(&self, _config: &JsonValue) -> Result<()> {
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        if config.as_object().map_or(0, |m| m.len()) == 0 {
+            anyhow::bail!("VariableCreatorNode requires at least one key/value pair in config");
+        }
         Ok(())
     }
 
     async fn propose_plan(
         &self,
         _inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        Ok(vec![])
+        let obj = config.as_object()
+            .ok_or_else(|| anyhow!("VariableCreatorNode config must be a JSON object"))?;
+
+        if obj.is_empty() {
+            anyhow::bail!("VariableCreatorNode requires at least one variable definition");
+        }
+
+        // Build a SQL SELECT with literal values for each key/value pair
+        let mut select_parts = Vec::new();
+        for (key, value) in obj {
+            let val_str = value.as_str()
+                .ok_or_else(|| anyhow!("Variable '{}' must be a string", key))?;
+            // Escape single quotes in the value by doubling them
+            let escaped = val_str.replace('\'', "''");
+            select_parts.push(format!("'{}' as \"{}\"", escaped, key));
+        }
+
+        let ctx = SessionContext::new();
+        let sql = format!("SELECT {}", select_parts.join(", "));
+        let df = ctx.sql(&sql).await?;
+        Ok(vec![df.into_optimized_plan()?])
     }
 }
 
@@ -410,7 +503,11 @@ impl NodeBehavior for TableToVariableNode {
                 name: "input".into(),
                 description: "Single-row table".into(),
             }],
-            output_ports: vec![],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "variables".into(),
+                description: "Single-row DataFrame with column names as variable keys".into(),
+            }],
             config_schema: serde_json::json!({}),
         }
     }
@@ -424,7 +521,15 @@ impl NodeBehavior for TableToVariableNode {
         inputs: Vec<LogicalPlan>,
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        Ok(inputs)
+        if inputs.is_empty() {
+            anyhow::bail!("TableToVariableNode requires at least one input");
+        }
+        let ctx = SessionContext::new();
+        let df = DataFrame::new(ctx.state(), inputs[0].clone());
+        ctx.register_table("ttv_input", df.into_view())?;
+        // Select the first row to convert columns into variable values
+        let output = ctx.sql("SELECT * FROM ttv_input LIMIT 1").await?;
+        Ok(vec![output.into_optimized_plan()?])
     }
 }
 
@@ -485,6 +590,9 @@ impl NodeBehavior for GraphMergerNode {
         inputs: Vec<LogicalPlan>,
         _config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        if inputs.len() < 4 {
+            anyhow::bail!("GraphMergerNode requires at least 4 inputs (nodes_a, edges_a, nodes_b, edges_b)");
+        }
         let ctx = SessionContext::new();
 
         let nodes_a = inputs[0].clone();
@@ -555,6 +663,9 @@ impl NodeBehavior for TableSchemaValidatorNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            anyhow::bail!("TableSchemaValidatorNode requires at least one input");
+        }
         use crate::nodes::GraphSchemas;
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
@@ -692,6 +803,9 @@ impl NodeBehavior for SemanticCleanerNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            anyhow::bail!("SemanticCleanerNode requires at least one input");
+        }
         let column = cfg::required_string(config, "column")?;
         let rules = config["rules"].as_object();
 
@@ -774,6 +888,9 @@ impl NodeBehavior for AiRouterNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            anyhow::bail!("AiRouterNode requires at least one input");
+        }
         let selected = cfg::optional_number(config, "selected_branch").unwrap_or(0.0) as usize;
 
         use datafusion::logical_expr::EmptyRelation;
