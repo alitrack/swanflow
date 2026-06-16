@@ -47,6 +47,7 @@ impl NodeRegistry {
             ContextFuserNode, EntityExtractorNode, GraphRetrieverNode, ResearchLoopMetaNode,
         };
         use crate::nodes::ai::mcp::McpInvokeNode;
+        use crate::nodes::mcp::McpToolNode;
         use crate::nodes::ai::privacy::{PiiDetectorNode, PiiMaskerNode, PolicyPrivacyGateNode};
         use crate::nodes::ai::providers::{LlmConfig, OpenAiProvider, ProviderKind};
         use crate::nodes::ai::retrieval::{
@@ -68,6 +69,7 @@ impl NodeRegistry {
         use crate::nodes::script::boxed_python::BoxedPythonNode;
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
         use crate::nodes::sql::SqlNode;
+        use crate::nodes::wasm::WasmNode;
         use crate::nodes::transform::{
             AggregateNode, AiRouterNode, ConditionNode, FilterNode, ForEachNode, GraphMergerNode,
             ProfilerNode, ProjectNode, SemanticCleanerNode, TableSchemaValidatorNode,
@@ -108,9 +110,11 @@ impl NodeRegistry {
         self.register_node(Arc::new(BoxedPythonNode));
         // Note: PythonUdfNode is registered but currently returns empty plan (stub implementation)
         self.register_node(Arc::new(PythonUdfNode));
+        self.register_node(Arc::new(WasmNode));
         self.register_node(Arc::new(GraphRetrieverNode));
         self.register_node(Arc::new(ContextFuserNode));
         self.register_node(Arc::new(McpInvokeNode));
+        self.register_node(Arc::new(McpToolNode));
         self.register_node(Arc::new(StructuredIoContractNode));
         self.register_node(Arc::new(CitationTrackerNode));
         self.register_node(Arc::new(EmbeddingGeneratorNode));

@@ -22,6 +22,7 @@ pub mod registry;
 pub mod script;
 pub mod sql;
 pub mod transform;
+pub mod wasm;
 
 /// Port identification and description.
 #[derive(Debug, Clone, Serialize, Deserialize)]

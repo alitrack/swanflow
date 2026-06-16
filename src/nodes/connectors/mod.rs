@@ -5,8 +5,10 @@
 //! DataFusion query engine.
 
 pub mod clickhouse;
+pub mod mongodb;
 pub mod mysql;
 pub mod postgres;
+pub mod sqlserver;
 
 // Re-export the Connector trait and ConnConfig from core for convenience.
 pub use crate::core::datasource::{ConnConfig, Connector};
