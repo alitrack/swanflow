@@ -47,6 +47,7 @@ struct AddNodeArguments {
 /// Tools the AI Agent can invoke during Plan→Verify→Fix→Execute cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AgentTool {
     /// Macro-planning: generate a complete YAML workflow from natural language.
     GenerateWorkflowYaml { description: String },

@@ -14,6 +14,7 @@ pub struct AdapterFlowRevision {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AdapterRequest {
     Inspect {
         request_id: String,
@@ -43,6 +44,7 @@ pub struct AdapterSchemaSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub enum CancellationStatus {
     #[serde(rename = "accepted")]
     Accepted,
@@ -54,6 +56,7 @@ pub enum CancellationStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AdapterExecutionEvent {
     NodeStateChanged {
         node_id: String,
@@ -104,6 +107,7 @@ impl AdapterExecutionEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AdapterMessage {
     InspectResult {
         request_id: String,

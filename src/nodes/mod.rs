@@ -45,6 +45,7 @@ pub struct NodeSpec {
 
 /// Execution state of a node (The "Traffic Lights").
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub enum NodeState {
     Unconfigured,
     Configured,
@@ -59,6 +60,7 @@ pub enum NodeState {
 /// - `ReadWrite`: may read from or write to external systems
 /// - `WriteOnly`: sends data out (e.g. email, webhook), no output port
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub enum NodeCapability {
     ReadOnly,
     ReadWrite,
@@ -67,6 +69,7 @@ pub enum NodeCapability {
 
 /// Event emitted by a node during its lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum NodeEvent {
     StateChanged {
         node_id: Uuid,
@@ -90,6 +93,7 @@ pub enum NodeEvent {
 /// Error classes used for deterministic routing and policy decisions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum NodeErrorClass {
     Validation,
     Migration,

@@ -1,0 +1,14 @@
+# SwanFlow clippy configuration
+# See https://doc.rust-lang.org/clippy/ for available lints
+
+# === Banned patterns (compile error) ===
+disallowed-methods = [
+  { path = "std::dbg", reason = "remove before commit — use tracing::debug!" },
+]
+
+# === Violation = warning (not deny, to allow gradual adoption) ===
+# Only applies when -D warnings is set, which we do in CI
+
+# === Configuration ===
+too-many-arguments-threshold = 10
+cognitive-complexity-threshold = 30

@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 /// Execution mode for a workflow node/step.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub enum StepMode {
     #[serde(rename = "sequential")]
     Sequential,
@@ -29,6 +30,7 @@ impl Default for StepMode {
 
 /// Error handling mode for a workflow node/step.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub enum ErrorMode {
     #[serde(rename = "fail")]
     Fail,

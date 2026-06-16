@@ -53,6 +53,7 @@ pub fn sqlx_type_to_arrow(ti: &AnyTypeInfo) -> DataType {
     }
 }
 
+#[non_exhaustive]
 pub enum DynamicArrayBuilder {
     Int64(Int64Builder),
     Float64(Float64Builder),
@@ -609,6 +610,7 @@ impl UserDefinedLogicalNodeCore for ExcelTemplateSinkLogical {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
+#[non_exhaustive]
 pub enum ExcelScanMode {
     Validated,
     Rejects,
