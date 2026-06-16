@@ -34,14 +34,14 @@ impl Connector for MongoDbConnector {
         // The MongoDB connection URL is like: mongodb://user:pass@host:27017/db
         let mut client_options = ClientOptions::parse(&config.url)
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to parse MongoDB URL: {}",  e)))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to parse MongoDB URL: {}", e)))?;
 
         client_options.app_name = Some("rustflow".to_string());
-        client_options.connect_timeout =
-            Some(std::time::Duration::from_secs(config.timeout_secs));
+        client_options.connect_timeout = Some(std::time::Duration::from_secs(config.timeout_secs));
 
-        let client = Client::with_options(client_options)
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to create MongoDB client: {}",  e)))?;
+        let client = Client::with_options(client_options).map_err(|e| {
+            SwanFlowError::unknown(format!("Failed to create MongoDB client: {}", e))
+        })?;
 
         // Extract database name from URL
         let db_name = extract_db_name(&config.url)?;
@@ -51,7 +51,7 @@ impl Connector for MongoDbConnector {
         database
             .run_command(bson::doc! { "ping": 1 })
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("MongoDB ping failed: {}",  e)))?;
+            .map_err(|e| SwanFlowError::unknown(format!("MongoDB ping failed: {}", e)))?;
 
         Ok(Self {
             client,
@@ -62,11 +62,9 @@ impl Connector for MongoDbConnector {
     }
 
     async fn list_tables(&self) -> CoreResult<Vec<String>> {
-        let mut collections = self
-            .database
-            .list_collection_names()
-            .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to list MongoDB collections: {}",  e)))?;
+        let mut collections = self.database.list_collection_names().await.map_err(|e| {
+            SwanFlowError::unknown(format!("Failed to list MongoDB collections: {}", e))
+        })?;
 
         collections.sort();
         Ok(collections)
@@ -80,7 +78,9 @@ impl Connector for MongoDbConnector {
             .find(bson::doc! {})
             .limit(100)
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to query collection '{}': {}",  table, e)))?;
+            .map_err(|e| {
+                SwanFlowError::unknown(format!("Failed to query collection '{}': {}", table, e))
+            })?;
 
         let mut fields: std::collections::BTreeMap<String, FieldInfo> =
             std::collections::BTreeMap::new();
@@ -88,7 +88,7 @@ impl Connector for MongoDbConnector {
 
         while let Some(doc_result) = cursor.next().await {
             let doc = doc_result.map_err(|e| {
-                SwanFlowError::unknown(format!("Failed to read document from '{}': {}",  table, e))
+                SwanFlowError::unknown(format!("Failed to read document from '{}': {}", table, e))
             })?;
             doc_count += 1;
             for (key, value) in &doc {
@@ -242,16 +242,20 @@ struct FieldInfo {
 /// Determine the BSON type of a BSON value.
 fn bson_value_to_type(value: &Bson) -> BsonType {
     match value {
-        Bson::Null | Bson::RegularExpression(_) | Bson::JavaScriptCode(_)
-        | Bson::Symbol(_) | Bson::JavaScriptCodeWithScope(_) | Bson::Undefined
-        | Bson::MinKey | Bson::MaxKey | Bson::DbPointer(_) => BsonType::Null,
+        Bson::Null
+        | Bson::RegularExpression(_)
+        | Bson::JavaScriptCode(_)
+        | Bson::Symbol(_)
+        | Bson::JavaScriptCodeWithScope(_)
+        | Bson::Undefined
+        | Bson::MinKey
+        | Bson::MaxKey
+        | Bson::DbPointer(_) => BsonType::Null,
         Bson::Boolean(_) => BsonType::Boolean,
         Bson::Int32(_) => BsonType::Int32,
         Bson::Int64(_) => BsonType::Int64,
         Bson::Double(_) | Bson::Decimal128(_) => BsonType::Float64,
-        Bson::String(_) | Bson::ObjectId(_) | Bson::Binary(_) => {
-            BsonType::String
-        }
+        Bson::String(_) | Bson::ObjectId(_) | Bson::Binary(_) => BsonType::String,
         Bson::DateTime(_) | Bson::Timestamp(_) => BsonType::Date,
         Bson::Array(_) => BsonType::Array,
         Bson::Document(_) => BsonType::Document,
@@ -266,8 +270,9 @@ fn merge_types(a: &BsonType, b: &BsonType) -> BsonType {
             // Null merges into any other type
             (BsonType::Null, other) | (other, BsonType::Null) => other.clone(),
             // Numeric promotions
-            (BsonType::Int32, BsonType::Int64)
-            | (BsonType::Int64, BsonType::Int32) => BsonType::Int64,
+            (BsonType::Int32, BsonType::Int64) | (BsonType::Int64, BsonType::Int32) => {
+                BsonType::Int64
+            }
             (BsonType::Int32, BsonType::Float64)
             | (BsonType::Float64, BsonType::Int32)
             | (BsonType::Int64, BsonType::Float64)
@@ -337,16 +342,15 @@ fn docs_to_batch(
                             i32_cols[col_idx][row_idx] = bson_val.as_i32();
                         }
                         DataType::Int64 => {
-                            i64_cols[col_idx][row_idx] =
-                                bson_val.as_i64().or_else(|| bson_val.as_i32().map(|v| v as i64));
+                            i64_cols[col_idx][row_idx] = bson_val
+                                .as_i64()
+                                .or_else(|| bson_val.as_i32().map(|v| v as i64));
                         }
                         DataType::Float64 => {
-                            f64_cols[col_idx][row_idx] =
-                                bson_val.as_f64().or_else(|| {
-                                    bson_val.as_i32().map(|v| v as f64)
-                                }).or_else(|| {
-                                    bson_val.as_i64().map(|v| v as f64)
-                                });
+                            f64_cols[col_idx][row_idx] = bson_val
+                                .as_f64()
+                                .or_else(|| bson_val.as_i32().map(|v| v as f64))
+                                .or_else(|| bson_val.as_i64().map(|v| v as f64));
                         }
                         DataType::Timestamp(_, _) => {
                             ts_cols[col_idx][row_idx] = bson_val
@@ -377,15 +381,9 @@ fn docs_to_batch(
                     .map(|v| v.map(|x| x as i64))
                     .collect::<Vec<_>>(),
             )),
-            DataType::Int64 => Arc::new(Int64Array::from(
-                i64_cols[col_idx].clone(),
-            )),
-            DataType::Float64 => Arc::new(Float64Array::from(
-                f64_cols[col_idx].clone(),
-            )),
-            DataType::Timestamp(_, _) => Arc::new(Int64Array::from(
-                ts_cols[col_idx].clone(),
-            )),
+            DataType::Int64 => Arc::new(Int64Array::from(i64_cols[col_idx].clone())),
+            DataType::Float64 => Arc::new(Float64Array::from(f64_cols[col_idx].clone())),
+            DataType::Timestamp(_, _) => Arc::new(Int64Array::from(ts_cols[col_idx].clone())),
             _ => Arc::new(StringArray::from(
                 str_cols[col_idx]
                     .iter()
@@ -439,7 +437,9 @@ fn extract_db_name(url: &str) -> Result<String> {
     let rest = url
         .strip_prefix("mongodb://")
         .or_else(|| url.strip_prefix("mongodb+srv://"))
-        .ok_or_else(|| SwanFlowError::unknown("Invalid MongoDB URL: missing 'mongodb://' prefix"))?;
+        .ok_or_else(|| {
+            SwanFlowError::unknown("Invalid MongoDB URL: missing 'mongodb://' prefix")
+        })?;
 
     // Split off query string
     let without_query = rest.split('?').next().unwrap_or(rest);

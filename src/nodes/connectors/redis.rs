@@ -24,9 +24,10 @@ pub struct RedisConnector {
 }
 
 async fn scan_keys(client: &redis::Client) -> CoreResult<Vec<String>> {
-    let mut con = client.get_async_connection()
+    let mut con = client
+        .get_async_connection()
         .await
-        .map_err(|e| SwanFlowError::unknown(format!("Redis connection failed: {}",  e)))?;
+        .map_err(|e| SwanFlowError::unknown(format!("Redis connection failed: {}", e)))?;
 
     let mut cursor = 0i64;
     let mut all_keys: Vec<String> = Vec::new();
@@ -37,7 +38,7 @@ async fn scan_keys(client: &redis::Client) -> CoreResult<Vec<String>> {
             .arg(1000)
             .query_async(&mut con)
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("Redis SCAN failed: {}",  e)))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Redis SCAN failed: {}", e)))?;
         cursor = result.0;
         all_keys.extend(result.1);
         if cursor == 0 {
@@ -53,8 +54,11 @@ async fn scan_keys(client: &redis::Client) -> CoreResult<Vec<String>> {
 impl Connector for RedisConnector {
     async fn connect(config: ConnConfig) -> CoreResult<Self> {
         let client = redis::Client::open(config.url.as_str())
-            .map_err(|e| SwanFlowError::unknown(format!("Invalid Redis URL: {}",  e)))?;
-        Ok(Self { client, _config: config })
+            .map_err(|e| SwanFlowError::unknown(format!("Invalid Redis URL: {}", e)))?;
+        Ok(Self {
+            client,
+            _config: config,
+        })
     }
 
     async fn list_tables(&self) -> CoreResult<Vec<String>> {
@@ -120,10 +124,12 @@ impl Connector for RedisConnector {
                     let _ = tx.send(Ok(batch)).await;
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(
-                        datafusion::error::DataFusionError::ArrowError(Box::new(e), None),
-                    ))
-                    .await;
+                    let _ = tx
+                        .send(Err(datafusion::error::DataFusionError::ArrowError(
+                            Box::new(e),
+                            None,
+                        )))
+                        .await;
                 }
             }
 

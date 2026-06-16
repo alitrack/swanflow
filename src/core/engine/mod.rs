@@ -912,9 +912,9 @@ impl SwanFlowEngine {
     }
 }
 
-pub mod planner;
 pub mod metadata;
+pub mod planner;
 
+pub use metadata::WorkflowMetadata;
 pub use planner::SwanFlowPlanner;
 pub use planner::SwanFlowQueryPlanner;
-pub use metadata::WorkflowMetadata;

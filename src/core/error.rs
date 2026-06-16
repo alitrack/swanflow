@@ -101,10 +101,7 @@ impl SwanFlowError {
         }
     }
 
-    pub fn with_source(
-        mut self,
-        source: impl std::error::Error + Send + Sync + 'static,
-    ) -> Self {
+    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
         self.source = Some(Box::new(source));
         self
     }
@@ -181,15 +178,23 @@ impl From<std::io::Error> for SwanFlowError {
 
 impl From<serde_json::Error> for SwanFlowError {
     fn from(e: serde_json::Error) -> Self {
-        SwanFlowError::new(ErrorCategory::Permanent, ErrorCode::SerdeError, e.to_string())
-            .with_source(e)
+        SwanFlowError::new(
+            ErrorCategory::Permanent,
+            ErrorCode::SerdeError,
+            e.to_string(),
+        )
+        .with_source(e)
     }
 }
 
 impl From<datafusion::arrow::error::ArrowError> for SwanFlowError {
     fn from(e: datafusion::arrow::error::ArrowError) -> Self {
-        SwanFlowError::new(ErrorCategory::Permanent, ErrorCode::DataFusionError, e.to_string())
-            .with_source(e)
+        SwanFlowError::new(
+            ErrorCategory::Permanent,
+            ErrorCode::DataFusionError,
+            e.to_string(),
+        )
+        .with_source(e)
     }
 }
 

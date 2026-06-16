@@ -39,7 +39,6 @@ use crate::nodes::connectors::postgres::PostgresConnector;
 use crate::nodes::connectors::{ConnConfig, Connector};
 use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec};
 
-
 pub struct ExcelReadNode;
 
 impl ExcelReadNode {

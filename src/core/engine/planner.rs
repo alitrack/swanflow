@@ -9,7 +9,6 @@ use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
-use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
@@ -19,7 +18,9 @@ use crate::core::datasource::{
     SqlxScanExec, SqlxScanLogical,
 };
 use crate::core::engine::sync_metadata_to_context;
-use crate::core::observer::{MaterializerExec, MaterializerLogical, StateProbeExec, StateProbeLogical};
+use crate::core::observer::{
+    MaterializerExec, MaterializerLogical, StateProbeExec, StateProbeLogical,
+};
 use crate::nodes::missing::{MissingNodeExec, MissingNodeLogical};
 use crate::nodes::script::python::{PythonExec, PythonLogical};
 use crate::nodes::sql::SqlProxyLogical;

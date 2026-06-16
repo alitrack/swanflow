@@ -24,15 +24,18 @@ impl Connector for MySqlConnector {
     async fn connect(config: ConnConfig) -> CoreResult<Self> {
         let pool = sqlx::MySqlPool::connect(&config.url)
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("MySQL connection failed: {}",  e)))?;
-        Ok(Self { pool, _config: config })
+            .map_err(|e| SwanFlowError::unknown(format!("MySQL connection failed: {}", e)))?;
+        Ok(Self {
+            pool,
+            _config: config,
+        })
     }
 
     async fn list_tables(&self) -> CoreResult<Vec<String>> {
         let rows = sqlx::query_as::<_, (String,)>("SHOW TABLES")
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to list MySQL tables: {}",  e)))?;
+            .map_err(|e| SwanFlowError::unknown(format!("Failed to list MySQL tables: {}", e)))?;
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
@@ -45,11 +48,19 @@ impl Connector for MySqlConnector {
         )
         .bind(table)
         .fetch_all(&self.pool)
-            .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to get schema for MySQL table '{}': {}",  table, e)))?;
+        .await
+        .map_err(|e| {
+            SwanFlowError::unknown(format!(
+                "Failed to get schema for MySQL table '{}': {}",
+                table, e
+            ))
+        })?;
 
         if rows.is_empty() {
-            return Err(SwanFlowError::unknown(format!("Table '{}' not found in MySQL",  table)));
+            return Err(SwanFlowError::unknown(format!(
+                "Table '{}' not found in MySQL",
+                table
+            )));
         }
 
         let fields: Vec<Field> = rows
@@ -80,7 +91,11 @@ impl Connector for MySqlConnector {
             Arc::new(Schema::new(fields))
         };
 
-        let col_names: Vec<String> = projected_schema.fields().iter().map(|f| f.name().to_string()).collect();
+        let col_names: Vec<String> = projected_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect();
         let select_cols = col_names.join(", ");
         let query = format!("SELECT {} FROM `{}`", select_cols, table);
 
@@ -91,12 +106,15 @@ impl Connector for MySqlConnector {
         let tx = builder.tx();
 
         builder.spawn(async move {
-            let rows = sqlx::query(&query).fetch_all(&pool).await.map_err(|e| {
-                datafusion::error::DataFusionError::External(Box::new(e))
-            })?;
+            let rows = sqlx::query(&query)
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
             if rows.is_empty() {
-                let _ = tx.send(Ok(RecordBatch::new_empty(proj_schema.clone()))).await;
+                let _ = tx
+                    .send(Ok(RecordBatch::new_empty(proj_schema.clone())))
+                    .await;
                 return Ok(());
             }
 
@@ -115,8 +133,9 @@ impl Connector for MySqlConnector {
                 }
 
                 let columns: Vec<ArrayRef> = builders.iter_mut().map(|b| b.finish()).collect();
-                let batch = RecordBatch::try_new(proj_schema.clone(), columns)
-                    .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+                let batch = RecordBatch::try_new(proj_schema.clone(), columns).map_err(|e| {
+                    datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                })?;
                 let _ = tx.send(Ok(batch)).await;
             }
 
@@ -141,21 +160,24 @@ fn mysql_type_to_arrow(mysql_type: &str) -> DataType {
         "FLOAT" => DataType::Float32,
         "DOUBLE" | "DECIMAL" | "DEC" | "NUMERIC" => DataType::Float64,
         "DATE" => DataType::Date32,
-        "TIMESTAMP" | "DATETIME" => DataType::Timestamp(
-            datafusion::arrow::datatypes::TimeUnit::Nanosecond,
-            None,
-        ),
+        "TIMESTAMP" | "DATETIME" => {
+            DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Nanosecond, None)
+        }
         "TIME" => DataType::Utf8,
         "YEAR" => DataType::Int32,
-        "CHAR" | "VARCHAR" | "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT"
-        | "ENUM" | "SET" | "JSON" => DataType::Utf8,
+        "CHAR" | "VARCHAR" | "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" | "ENUM" | "SET"
+        | "JSON" => DataType::Utf8,
         "BINARY" | "VARBINARY" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" => DataType::Utf8,
         _ => DataType::Utf8,
     }
 }
 
 /// Append a value from a MySQL row to a DynamicArrayBuilder.
-fn append_mysql_value(builder: &mut DynamicArrayBuilder, row: &sqlx::mysql::MySqlRow, col_idx: usize) {
+fn append_mysql_value(
+    builder: &mut DynamicArrayBuilder,
+    row: &sqlx::mysql::MySqlRow,
+    col_idx: usize,
+) {
     match builder {
         DynamicArrayBuilder::Int64(b) => {
             let val: Option<i64> = row.try_get(col_idx).ok().flatten();

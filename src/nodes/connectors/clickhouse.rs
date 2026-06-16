@@ -30,7 +30,9 @@ impl Connector for ClickHouseConnector {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to build HTTP client for ClickHouse: {}",  e)))?;
+            .map_err(|e| {
+                SwanFlowError::unknown(format!("Failed to build HTTP client for ClickHouse: {}", e))
+            })?;
 
         // Validate connectivity by sending a ping
         let ping_url = format!("{}/?query=SELECT+1", config.url.trim_end_matches('/'));
@@ -38,7 +40,7 @@ impl Connector for ClickHouseConnector {
             .get(&ping_url)
             .send()
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("ClickHouse ping failed: {}",  e)))?;
+            .map_err(|e| SwanFlowError::unknown(format!("ClickHouse ping failed: {}", e)))?;
 
         if !resp.status().is_success() {
             return Err(SwanFlowError::unknown(format!(
@@ -56,17 +58,14 @@ impl Connector for ClickHouseConnector {
 
     async fn list_tables(&self) -> CoreResult<Vec<String>> {
         let query_url = format!("{}/?query=SHOW+TABLES", self.url);
-        let resp = self
-            .client
-            .get(&query_url)
-            .send()
-            .await
-            .map_err(|e| SwanFlowError::unknown(format!("ClickHouse list tables failed: {}",  e)))?;
+        let resp =
+            self.client.get(&query_url).send().await.map_err(|e| {
+                SwanFlowError::unknown(format!("ClickHouse list tables failed: {}", e))
+            })?;
 
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to read ClickHouse response: {}",  e)))?;
+        let text = resp.text().await.map_err(|e| {
+            SwanFlowError::unknown(format!("Failed to read ClickHouse response: {}", e))
+        })?;
 
         Ok(text.lines().map(|l| l.trim().to_string()).collect())
     }
@@ -76,17 +75,13 @@ impl Connector for ClickHouseConnector {
         let query = format!("DESCRIBE TABLE {}", table);
         let query_url = format!("{}/?query={}", self.url, urlencoding(&query));
 
-        let resp = self
-            .client
-            .get(&query_url)
-            .send()
-            .await
-            .map_err(|e| SwanFlowError::unknown(format!("ClickHouse DESCRIBE TABLE failed: {}",  e)))?;
+        let resp = self.client.get(&query_url).send().await.map_err(|e| {
+            SwanFlowError::unknown(format!("ClickHouse DESCRIBE TABLE failed: {}", e))
+        })?;
 
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to read ClickHouse response: {}",  e)))?;
+        let text = resp.text().await.map_err(|e| {
+            SwanFlowError::unknown(format!("Failed to read ClickHouse response: {}", e))
+        })?;
 
         let fields: Vec<Field> = text
             .lines()
@@ -131,7 +126,11 @@ impl Connector for ClickHouseConnector {
             Arc::new(Schema::new(fields))
         };
 
-        let col_names: Vec<String> = projected_schema.fields().iter().map(|f| f.name().to_string()).collect();
+        let col_names: Vec<String> = projected_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect();
         let select_cols = col_names
             .iter()
             .map(|c| format!("`{}`", c))
@@ -152,9 +151,10 @@ impl Connector for ClickHouseConnector {
             let arrow_url = format!("{}/?query={}&format=Arrow", ch_url, urlencoding(&query));
             match client.get(&arrow_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
-                    let bytes = resp.bytes().await.map_err(|e| {
-                        datafusion::error::DataFusionError::External(Box::new(e))
-                    })?;
+                    let bytes = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
                     if !bytes.is_empty() {
                         let reader = StreamReader::try_new(bytes.as_ref(), None).map_err(|e| {
@@ -184,18 +184,27 @@ impl Connector for ClickHouseConnector {
             }
 
             // Fallback: TSV format and convert manually
-            let tsv_url = format!("{}/?query={}&format=TSVWithNames", ch_url, urlencoding(&query));
-            let resp = client.get(&tsv_url).send().await.map_err(|e| {
-                datafusion::error::DataFusionError::External(Box::new(e))
-            })?;
+            let tsv_url = format!(
+                "{}/?query={}&format=TSVWithNames",
+                ch_url,
+                urlencoding(&query)
+            );
+            let resp = client
+                .get(&tsv_url)
+                .send()
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
-            let text = resp.text().await.map_err(|e| {
-                datafusion::error::DataFusionError::External(Box::new(e))
-            })?;
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
             let lines: Vec<&str> = text.lines().collect();
             if lines.len() < 2 {
-                let _ = tx.send(Ok(RecordBatch::new_empty(proj_schema.clone()))).await;
+                let _ = tx
+                    .send(Ok(RecordBatch::new_empty(proj_schema.clone())))
+                    .await;
                 return Ok(());
             }
 
@@ -222,8 +231,9 @@ impl Connector for ClickHouseConnector {
                 }
 
                 let columns: Vec<ArrayRef> = builders.iter_mut().map(|b| b.finish()).collect();
-                let batch = RecordBatch::try_new(proj_schema.clone(), columns)
-                    .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+                let batch = RecordBatch::try_new(proj_schema.clone(), columns).map_err(|e| {
+                    datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                })?;
                 let _ = tx.send(Ok(batch)).await;
             }
 
@@ -345,10 +355,7 @@ fn split_tsv(line: &str) -> Vec<&str> {
 }
 
 /// Append a TSV string value to a DynamicArrayBuilder.
-fn append_tsv_value(
-    builder: &mut DynamicArrayBuilder,
-    value: &str,
-) {
+fn append_tsv_value(builder: &mut DynamicArrayBuilder, value: &str) {
     match builder {
         DynamicArrayBuilder::Int64(b) => {
             if value.is_empty() || value == "\\N" {
@@ -378,8 +385,7 @@ fn append_tsv_value(
         DynamicArrayBuilder::Timestamp(b) => {
             if value.is_empty() || value == "\\N" {
                 b.append_null();
-            } else if let Ok(dt) =
-                chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
             {
                 b.append_value(dt.and_utc().timestamp_nanos_opt().unwrap_or(0));
             } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {

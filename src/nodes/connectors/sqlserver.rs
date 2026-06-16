@@ -50,9 +50,9 @@ impl SqlServerConnector {
             .or_else(|| url.strip_prefix("sqlserver://"))
             .unwrap_or(url);
 
-        let (userinfo, rest) = without_scheme
-            .split_once('@')
-            .ok_or_else(|| SwanFlowError::unknown("SQL Server URL missing '@': expected user:pass@host:port/db"))?;
+        let (userinfo, rest) = without_scheme.split_once('@').ok_or_else(|| {
+            SwanFlowError::unknown("SQL Server URL missing '@': expected user:pass@host:port/db")
+        })?;
 
         let (username, password) = userinfo
             .split_once(':')
@@ -63,13 +63,21 @@ impl SqlServerConnector {
             .ok_or_else(|| SwanFlowError::unknown("SQL Server URL missing database path"))?;
 
         let (server, port) = if let Some((h, p)) = host_part.split_once(':') {
-            let port: u16 = p.parse().map_err(|e| SwanFlowError::unknown(format!("Invalid port: {}",  e)))?;
+            let port: u16 = p
+                .parse()
+                .map_err(|e| SwanFlowError::unknown(format!("Invalid port: {}", e)))?;
             (h.to_string(), port)
         } else {
             (host_part.to_string(), 1433)
         };
 
-        Ok((server, port, database.to_string(), username.to_string(), password.to_string()))
+        Ok((
+            server,
+            port,
+            database.to_string(),
+            username.to_string(),
+            password.to_string(),
+        ))
     }
 
     fn parse_odbc_url(url: &str) -> Result<(String, u16, String, String, String)> {
@@ -100,7 +108,9 @@ impl SqlServerConnector {
         }
 
         if server.is_empty() || database.is_empty() {
-            return Err(SwanFlowError::unknown("ODBC-style URL must contain Server and Database"));
+            return Err(SwanFlowError::unknown(
+                "ODBC-style URL must contain Server and Database",
+            ));
         }
 
         Ok((server, port, database, username, password))
@@ -112,19 +122,18 @@ impl SqlServerConnector {
         config.host(&self.server);
         config.port(self.port);
         config.database(&self.database);
-        config.authentication(AuthMethod::sql_server(
-            &self.username,
-            &self.password,
-        ));
+        config.authentication(AuthMethod::sql_server(&self.username, &self.password));
         config.trust_cert();
 
         let tcp = TcpStream::connect(format!("{}:{}", self.server, self.port))
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("TCP connection to SQL Server failed: {}",  e)))?;
+            .map_err(|e| {
+                SwanFlowError::unknown(format!("TCP connection to SQL Server failed: {}", e))
+            })?;
 
         let client = Client::connect(config, tcp.compat())
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("SQL Server connection failed: {}",  e)))?;
+            .map_err(|e| SwanFlowError::unknown(format!("SQL Server connection failed: {}", e)))?;
 
         Ok(client)
     }
@@ -134,8 +143,7 @@ impl SqlServerConnector {
 impl Connector for SqlServerConnector {
     async fn connect(config: ConnConfig) -> CoreResult<Self> {
         let _timeout = Duration::from_secs(config.timeout_secs);
-        let (server, port, database, username, password) =
-            Self::parse_url(&config.url)?;
+        let (server, port, database, username, password) = Self::parse_url(&config.url)?;
 
         let connector = Self {
             _config: config,
@@ -163,12 +171,13 @@ impl Connector for SqlServerConnector {
                  ORDER BY TABLE_NAME",
             )
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to list SQL Server tables: {}",  e)))?;
+            .map_err(|e| {
+                SwanFlowError::unknown(format!("Failed to list SQL Server tables: {}", e))
+            })?;
 
-        let results = stream
-            .into_results()
-            .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to read SQL Server table list: {}",  e)))?;
+        let results = stream.into_results().await.map_err(|e| {
+            SwanFlowError::unknown(format!("Failed to read SQL Server table list: {}", e))
+        })?;
 
         let mut tables = Vec::new();
         for row in results.iter().flat_map(|r| r.iter()) {
@@ -192,12 +201,16 @@ impl Connector for SqlServerConnector {
                 table.replace('\'', "''")
             ))
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to get schema for table '{}': {}",  table, e)))?;
+            .map_err(|e| {
+                SwanFlowError::unknown(format!("Failed to get schema for table '{}': {}", table, e))
+            })?;
 
-        let results = stream
-            .into_results()
-            .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to read schema for table '{}': {}",  table, e)))?;
+        let results = stream.into_results().await.map_err(|e| {
+            SwanFlowError::unknown(format!(
+                "Failed to read schema for table '{}': {}",
+                table, e
+            ))
+        })?;
 
         let mut fields = Vec::new();
         for row in results.iter().flat_map(|r| r.iter()) {
@@ -207,7 +220,9 @@ impl Connector for SqlServerConnector {
                 .to_string();
             let sql_type = row
                 .get::<&str, _>(1)
-                .ok_or_else(|| SwanFlowError::unknown(format!("Missing data type for column '{}'",  name)))?
+                .ok_or_else(|| {
+                    SwanFlowError::unknown(format!("Missing data type for column '{}'", name))
+                })?
                 .to_string();
             let nullable_str = row.get::<&str, _>(2).unwrap_or("YES");
             let nullable = nullable_str.eq_ignore_ascii_case("YES");
@@ -217,7 +232,10 @@ impl Connector for SqlServerConnector {
         }
 
         if fields.is_empty() {
-            return Err(SwanFlowError::unknown(format!("Table '{}' not found in SQL Server",  table)));
+            return Err(SwanFlowError::unknown(format!(
+                "Table '{}' not found in SQL Server",
+                table
+            )));
         }
 
         Ok(Arc::new(Schema::new(fields)))
@@ -311,11 +329,10 @@ impl Connector for SqlServerConnector {
                     }
                 }
 
-                let columns: Vec<ArrayRef> =
-                    builders.iter_mut().map(|b| b.finish()).collect();
-                let batch = RecordBatch::try_new(proj_schema.clone(), columns).map_err(
-                    |e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None),
-                )?;
+                let columns: Vec<ArrayRef> = builders.iter_mut().map(|b| b.finish()).collect();
+                let batch = RecordBatch::try_new(proj_schema.clone(), columns).map_err(|e| {
+                    datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                })?;
                 let _ = tx.send(Ok(batch)).await;
             }
 
@@ -340,9 +357,7 @@ fn sqlserver_type_to_arrow(sql_type: &str) -> DataType {
         "INT" | "INTEGER" => DataType::Int32,
         "BIGINT" => DataType::Int64,
         "REAL" => DataType::Float32,
-        "FLOAT" | "DOUBLE" | "DECIMAL" | "NUMERIC" | "MONEY" | "SMALLMONEY" => {
-            DataType::Float64
-        }
+        "FLOAT" | "DOUBLE" | "DECIMAL" | "NUMERIC" | "MONEY" | "SMALLMONEY" => DataType::Float64,
         "DATE" => DataType::Date32,
         "DATETIME" | "DATETIME2" | "SMALLDATETIME" | "TIMESTAMP" => {
             DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Nanosecond, None)
@@ -367,11 +382,7 @@ fn sqlserver_type_to_arrow(sql_type: &str) -> DataType {
 }
 
 /// Append a value from a tiberius Row to a DynamicArrayBuilder by column index.
-fn append_sqlserver_value(
-    builder: &mut DynamicArrayBuilder,
-    row: &tiberius::Row,
-    col_idx: usize,
-) {
+fn append_sqlserver_value(builder: &mut DynamicArrayBuilder, row: &tiberius::Row, col_idx: usize) {
     match builder {
         DynamicArrayBuilder::Int64(b) => {
             if let Some(val) = row.get::<i64, _>(col_idx) {

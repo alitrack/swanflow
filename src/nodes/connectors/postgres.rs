@@ -25,8 +25,11 @@ impl Connector for PostgresConnector {
     async fn connect(config: ConnConfig) -> CoreResult<Self> {
         let pool = sqlx::PgPool::connect(&config.url)
             .await
-            .map_err(|e| SwanFlowError::unknown(format!("PostgreSQL connection failed: {}",  e)))?;
-        Ok(Self { pool, _config: config })
+            .map_err(|e| SwanFlowError::unknown(format!("PostgreSQL connection failed: {}", e)))?;
+        Ok(Self {
+            pool,
+            _config: config,
+        })
     }
 
     async fn list_tables(&self) -> CoreResult<Vec<String>> {
@@ -36,8 +39,8 @@ impl Connector for PostgresConnector {
              ORDER BY tablename",
         )
         .fetch_all(&self.pool)
-            .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to list PostgreSQL tables: {}",  e)))?;
+        .await
+        .map_err(|e| SwanFlowError::unknown(format!("Failed to list PostgreSQL tables: {}", e)))?;
 
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
@@ -51,11 +54,16 @@ impl Connector for PostgresConnector {
         )
         .bind(table)
         .fetch_all(&self.pool)
-            .await
-            .map_err(|e| SwanFlowError::unknown(format!("Failed to get schema for table '{}': {}",  table, e)))?;
+        .await
+        .map_err(|e| {
+            SwanFlowError::unknown(format!("Failed to get schema for table '{}': {}", table, e))
+        })?;
 
         if rows.is_empty() {
-            return Err(SwanFlowError::unknown(format!("Table '{}' not found in PostgreSQL",  table)));
+            return Err(SwanFlowError::unknown(format!(
+                "Table '{}' not found in PostgreSQL",
+                table
+            )));
         }
 
         let fields: Vec<Field> = rows
@@ -87,7 +95,11 @@ impl Connector for PostgresConnector {
             Arc::new(Schema::new(fields))
         };
 
-        let col_names: Vec<String> = projected_schema.fields().iter().map(|f| f.name().to_string()).collect();
+        let col_names: Vec<String> = projected_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect();
         let select_cols = col_names.join(", ");
         // Use quoted identifiers to handle reserved words
         let query = format!(
@@ -107,12 +119,15 @@ impl Connector for PostgresConnector {
         let tx = builder.tx();
 
         builder.spawn(async move {
-            let rows = sqlx::query(&query).fetch_all(&pool).await.map_err(|e| {
-                datafusion::error::DataFusionError::External(Box::new(e))
-            })?;
+            let rows = sqlx::query(&query)
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
             if rows.is_empty() {
-                let _ = tx.send(Ok(RecordBatch::new_empty(proj_schema.clone()))).await;
+                let _ = tx
+                    .send(Ok(RecordBatch::new_empty(proj_schema.clone())))
+                    .await;
                 return Ok(());
             }
 
@@ -132,8 +147,9 @@ impl Connector for PostgresConnector {
                 }
 
                 let columns: Vec<ArrayRef> = builders.iter_mut().map(|b| b.finish()).collect();
-                let batch = RecordBatch::try_new(proj_schema.clone(), columns)
-                    .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+                let batch = RecordBatch::try_new(proj_schema.clone(), columns).map_err(|e| {
+                    datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                })?;
                 let _ = tx.send(Ok(batch)).await;
             }
 
