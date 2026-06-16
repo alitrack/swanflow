@@ -1,8 +1,10 @@
 use clap::{Parser, Subcommand};
-use rustflow::core::engine::SwanFlowEngine;
-use rustflow::core::graph::Workflow;
-use rustflow::nodes::registry::NodeRegistry;
-use rustflow::nodes::NodeEvent;
+use swanflow::core::engine::SwanFlowEngine;
+use swanflow::core::graph::Workflow;
+use swanflow::mcp::client::McpClient;
+use swanflow::mcp::server::McpServer;
+use swanflow::nodes::registry::NodeRegistry;
+use swanflow::nodes::NodeEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -25,6 +27,41 @@ enum Commands {
     Inspect {
         /// Path to the workflow file
         file: PathBuf,
+    },
+    /// MCP (Model Context Protocol) commands for interacting with MCP servers
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// Start MCP server (stdio-based, for LangFlow / Claude Code / Dify integration)
+    Serve,
+
+    /// List tools from an external MCP server
+    Tools {
+        /// Command to start the MCP server (e.g., "python", "node")
+        command: String,
+
+        /// Arguments for the server command
+        args: Vec<String>,
+    },
+
+    /// Call a tool on an external MCP server
+    Call {
+        /// Command to start the MCP server (e.g., "python", "node")
+        command: String,
+
+        /// Arguments for the server command
+        args: Vec<String>,
+
+        /// Name of the tool to call
+        tool: String,
+
+        /// JSON arguments for the tool
+        tool_args: String,
     },
 }
 
@@ -80,9 +117,11 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
                 if let Some(samples) = metadata.sample_data.get(&node_id) {
+                    let sample_vec: Vec<&datafusion::arrow::record_batch::RecordBatch> =
+                        samples.iter().collect();
                     println!(
                         "    Sample Rows: {}",
-                        samples.iter().map(|b| b.num_rows()).sum::<usize>()
+                        sample_vec.iter().map(|b| b.num_rows()).sum::<usize>()
                     );
                 }
                 if let Some(diagnostics) = metadata.diagnostics.get(&node_id) {
@@ -92,6 +131,57 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::Mcp { command } => match command {
+            McpCommands::Serve => {
+                println!("🧩 Starting SwanFlow MCP Server (stdio)...");
+                let registry = Arc::new(NodeRegistry::default());
+                let engine = SwanFlowEngine::new(registry.clone());
+                let server = McpServer::new(engine, registry);
+                server.run().await?;
+            }
+            McpCommands::Tools { command, args } => {
+                println!(
+                    "🔧 Connecting to MCP server: {} {}",
+                    command,
+                    args.join(" ")
+                );
+                let mut client = McpClient::connect(&command, &args).await?;
+                let tools = client.list_tools().await?;
+                client.close().await?;
+
+                println!("📋 Available tools ({}):", tools.len());
+                for tool in &tools {
+                    let desc = tool
+                        .description
+                        .as_deref()
+                        .unwrap_or("(no description)");
+                    println!("  - {}: {}", tool.name, desc);
+                }
+            }
+            McpCommands::Call {
+                command,
+                args,
+                tool,
+                tool_args,
+            } => {
+                println!(
+                    "🔧 Calling tool '{}' on MCP server: {} {}",
+                    tool,
+                    command,
+                    args.join(" ")
+                );
+
+                let parsed_args: serde_json::Value =
+                    serde_json::from_str(&tool_args).unwrap_or(serde_json::json!({}));
+
+                let mut client = McpClient::connect(&command, &args).await?;
+                let result = client.call_tool(&tool, parsed_args).await?;
+                client.close().await?;
+
+                println!("📬 Result:");
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+        },
     }
 
     Ok(())

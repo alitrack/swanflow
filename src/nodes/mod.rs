@@ -16,6 +16,7 @@ pub mod common;
 pub mod config;
 pub mod connectors;
 pub mod io;
+pub mod mcp;
 pub mod missing;
 pub mod registry;
 pub mod script;
