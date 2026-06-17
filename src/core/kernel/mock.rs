@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use crate::core::error::{CoreResult, SwanFlowError};
 use crate::core::kernel::ai::*;
 use crate::core::kernel::core::*;
+use crate::core::kernel::plugin::*;
 use crate::core::kernel::runtime::*;
 
 // ---------------------------------------------------------------------------
@@ -527,6 +528,493 @@ impl Embedding for MockEmbedding {
 }
 
 // ---------------------------------------------------------------------------
+// MockModeration — Moderation
+// ---------------------------------------------------------------------------
+
+/// Mock for Moderation — flags specific categories on demand.
+pub struct MockModeration {
+    flagged: Mutex<Vec<String>>,
+    threshold: Mutex<f64>,
+}
+
+impl MockModeration {
+    pub fn new() -> Self {
+        Self {
+            flagged: Mutex::new(Vec::new()),
+            threshold: Mutex::new(0.5),
+        }
+    }
+
+    pub fn with_flag(self, category: &str) -> Self {
+        self.flagged.lock().unwrap().push(category.to_string());
+        self
+    }
+
+    pub fn with_safe_threshold(self, threshold: f64) -> Self {
+        *self.threshold.lock().unwrap() = threshold;
+        self
+    }
+}
+
+#[async_trait]
+impl Moderation for MockModeration {
+    async fn check(&self, _text: &str) -> CoreResult<ModerationResult> {
+        let flagged = self.flagged.lock().unwrap().clone();
+        let is_safe = flagged.is_empty();
+        Ok(ModerationResult {
+            is_safe,
+            flagged_categories: flagged,
+            category_scores: std::collections::HashMap::new(),
+        })
+    }
+
+    async fn check_batch(&self, texts: &[&str]) -> CoreResult<Vec<ModerationResult>> {
+        let mut results = Vec::with_capacity(texts.len());
+        for t in texts {
+            results.push(self.check(t).await?);
+        }
+        Ok(results)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockLogger — Logger
+// ---------------------------------------------------------------------------
+
+/// Mock for Logger — records all log entries in memory.
+pub struct MockLogger {
+    entries: Mutex<Vec<LogEntry>>,
+}
+
+/// A recorded log entry.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub level: LogLevel,
+    pub message: String,
+    pub fields: Vec<(String, String)>,
+}
+
+impl MockLogger {
+    pub fn new() -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn entries(&self) -> Vec<LogEntry> {
+        self.entries.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Logger for MockLogger {
+    async fn log(&self, level: LogLevel, message: &str, fields: Vec<(String, String)>) {
+        self.entries.lock().unwrap().push(LogEntry {
+            level,
+            message: message.to_string(),
+            fields,
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockNotification — Notification
+// ---------------------------------------------------------------------------
+
+/// Mock for Notification — records sent messages.
+pub struct MockNotification {
+    sent: Mutex<Vec<(String, String, String)>>,
+}
+
+impl MockNotification {
+    pub fn new() -> Self {
+        Self {
+            sent: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn sent(&self) -> Vec<(String, String, String)> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Notification for MockNotification {
+    async fn send(&self, channel: &str, title: &str, body: &str) -> CoreResult<()> {
+        self.sent
+            .lock()
+            .unwrap()
+            .push((channel.to_string(), title.to_string(), body.to_string()));
+        Ok(())
+    }
+
+    async fn alert(&self, title: &str, body: &str) -> CoreResult<()> {
+        self.send("alert", title, body).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockCache — Cache
+// ---------------------------------------------------------------------------
+
+/// Mock for Cache — in-memory HashMap with mock TTL.
+pub struct MockCache {
+    store: Mutex<HashMap<String, (String, u64)>>,
+}
+
+impl MockCache {
+    pub fn new() -> Self {
+        Self {
+            store: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl Cache for MockCache {
+    async fn get(&self, key: &str) -> CoreResult<Option<String>> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap()
+            .get(key)
+            .map(|(v, _)| v.clone()))
+    }
+
+    async fn set(&self, key: &str, value: &str, ttl_secs: u64) -> CoreResult<()> {
+        self.store
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), (value.to_string(), ttl_secs));
+        Ok(())
+    }
+
+    async fn invalidate(&self, key: &str) -> CoreResult<()> {
+        self.store.lock().unwrap().remove(key);
+        Ok(())
+    }
+
+    async fn exists(&self, key: &str) -> bool {
+        self.store.lock().unwrap().contains_key(key)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockTelemetry — Telemetry
+// ---------------------------------------------------------------------------
+
+/// Mock for Telemetry — records all metric operations.
+pub struct MockTelemetry {
+    counters: Mutex<Vec<(String, u64, Vec<(String, String)>)>>,
+    histograms: Mutex<Vec<(String, f64, Vec<(String, String)>)>>,
+    gauges: Mutex<Vec<(String, f64, Vec<(String, String)>)>>,
+}
+
+impl MockTelemetry {
+    pub fn new() -> Self {
+        Self {
+            counters: Mutex::new(Vec::new()),
+            histograms: Mutex::new(Vec::new()),
+            gauges: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn counters(&self) -> Vec<(String, u64, Vec<(String, String)>)> {
+        self.counters.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Telemetry for MockTelemetry {
+    async fn counter_inc(&self, name: &str, value: u64, labels: Vec<(String, String)>) {
+        self.counters
+            .lock()
+            .unwrap()
+            .push((name.to_string(), value, labels));
+    }
+
+    async fn histogram_observe(&self, name: &str, value: f64, labels: Vec<(String, String)>) {
+        self.histograms
+            .lock()
+            .unwrap()
+            .push((name.to_string(), value, labels));
+    }
+
+    async fn gauge_set(&self, name: &str, value: f64, labels: Vec<(String, String)>) {
+        self.gauges
+            .lock()
+            .unwrap()
+            .push((name.to_string(), value, labels));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockEventBus — EventBus
+// ---------------------------------------------------------------------------
+
+/// Mock for EventBus — in-memory publish/subscribe with direct callback invocation.
+pub struct MockEventBus {
+    subscribers: Mutex<HashMap<String, Vec<(String, Box<dyn Fn(&str, &str) + Send>)>>>,
+    next_id: Mutex<u64>,
+}
+
+impl MockEventBus {
+    pub fn new() -> Self {
+        Self {
+            subscribers: Mutex::new(HashMap::new()),
+            next_id: Mutex::new(1),
+        }
+    }
+}
+
+#[async_trait]
+impl EventBus for MockEventBus {
+    async fn publish(&self, topic: &str, payload: &str) -> CoreResult<()> {
+        let subs = self.subscribers.lock().unwrap();
+        if let Some(callbacks) = subs.get(topic) {
+            for (_, cb) in callbacks {
+                cb(topic, payload);
+            }
+        }
+        Ok(())
+    }
+
+    async fn subscribe<F>(&self, topic: &str, callback: F) -> String
+    where
+        F: Fn(&str, &str) + Send + 'static,
+    {
+        let mut subs = self.subscribers.lock().unwrap();
+        let mut next = self.next_id.lock().unwrap();
+        let id = format!("sub_{}", *next);
+        *next += 1;
+        subs.entry(topic.to_string())
+            .or_default()
+            .push((id.clone(), Box::new(callback)));
+        id
+    }
+
+    async fn unsubscribe(&self, subscription_id: &str) -> CoreResult<()> {
+        let mut subs = self.subscribers.lock().unwrap();
+        for (_topic, callbacks) in subs.iter_mut() {
+            callbacks.retain(|(id, _)| id != subscription_id);
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockSchemaRegistry — SchemaRegistry
+// ---------------------------------------------------------------------------
+
+/// Mock for SchemaRegistry — in-memory schema storage.
+pub struct MockSchemaRegistry {
+    schemas: Mutex<HashMap<String, Vec<SchemaColumn>>>,
+}
+
+impl MockSchemaRegistry {
+    pub fn new() -> Self {
+        Self {
+            schemas: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl SchemaRegistry for MockSchemaRegistry {
+    async fn register_schema(&self, name: &str, columns: Vec<SchemaColumn>) -> CoreResult<()> {
+        self.schemas
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), columns);
+        Ok(())
+    }
+
+    async fn get_schema(&self, name: &str) -> CoreResult<Option<Vec<SchemaColumn>>> {
+        Ok(self.schemas.lock().unwrap().get(name).cloned())
+    }
+
+    async fn find_by_column(&self, column_name: &str) -> CoreResult<Vec<String>> {
+        let schemas = self.schemas.lock().unwrap();
+        let mut result = Vec::new();
+        for (name, cols) in schemas.iter() {
+            if cols.iter().any(|c| c.name == column_name) {
+                result.push(name.clone());
+            }
+        }
+        Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockAuthProvider — AuthProvider
+// ---------------------------------------------------------------------------
+
+/// Mock for AuthProvider — pre-configured token, always authorizes.
+pub struct MockAuthProvider {
+    token_value: Mutex<String>,
+}
+
+impl MockAuthProvider {
+    pub fn new() -> Self {
+        Self {
+            token_value: Mutex::new("mock_token".into()),
+        }
+    }
+
+    pub fn with_token(self, value: &str) -> Self {
+        *self.token_value.lock().unwrap() = value.to_string();
+        self
+    }
+}
+
+#[async_trait]
+impl AuthProvider for MockAuthProvider {
+    async fn authenticate(&self, _credentials: AuthCredentials) -> CoreResult<AuthToken> {
+        Ok(AuthToken {
+            value: self.token_value.lock().unwrap().clone(),
+            expires_at: None,
+            permissions: vec!["*".into()],
+        })
+    }
+
+    async fn authorize(&self, _token: &AuthToken, _permission: &str) -> CoreResult<bool> {
+        Ok(true)
+    }
+
+    async fn validate(&self, _token: &AuthToken) -> CoreResult<bool> {
+        Ok(true)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockPluginHost — PluginHost
+// ---------------------------------------------------------------------------
+
+/// Mock for PluginHost — pre-registered plugins with canned responses.
+pub struct MockPluginHost {
+    plugins: Mutex<HashMap<String, PluginDescriptor>>,
+    loaded: Mutex<Vec<String>>,
+}
+
+impl MockPluginHost {
+    pub fn new() -> Self {
+        Self {
+            plugins: Mutex::new(HashMap::new()),
+            loaded: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn with_plugin(self, name: &str, version: &str) -> Self {
+        self.plugins.lock().unwrap().insert(
+            name.to_string(),
+            PluginDescriptor {
+                name: name.to_string(),
+                version: version.to_string(),
+                plugin_type: PluginType::Wasm,
+                description: String::new(),
+                functions: vec!["parse".into()],
+            },
+        );
+        self
+    }
+}
+
+#[async_trait]
+impl PluginHost for MockPluginHost {
+    async fn scan(&self, _dir: &str) -> CoreResult<Vec<PluginDescriptor>> {
+        Ok(self.plugins.lock().unwrap().values().cloned().collect())
+    }
+
+    async fn load(&self, name: &str) -> CoreResult<PluginHandle> {
+        if self.plugins.lock().unwrap().contains_key(name) {
+            self.loaded.lock().unwrap().push(name.to_string());
+            Ok(PluginHandle {
+                name: name.to_string(),
+                plugin_type: PluginType::Wasm,
+            })
+        } else {
+            Err(SwanFlowError::unknown(format!("plugin not found: {name}")))
+        }
+    }
+
+    async fn init(&self, _handle: &PluginHandle, _config: HashMap<String, String>) -> CoreResult<()> {
+        Ok(())
+    }
+
+    async fn run(&self, handle: &PluginHandle, _function: &str, _args: &[u8]) -> CoreResult<Vec<u8>> {
+        Ok(format!("result from {}", handle.name).into_bytes())
+    }
+
+    async fn unload(&self, handle: &PluginHandle) -> CoreResult<()> {
+        self.loaded
+            .lock()
+            .unwrap()
+            .retain(|n| n != &handle.name);
+        Ok(())
+    }
+
+    fn loaded(&self) -> Vec<String> {
+        self.loaded.lock().unwrap().clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockWasmExec — WasmExec
+// ---------------------------------------------------------------------------
+
+/// Mock for WasmExec — pre-configured modules with canned results.
+pub struct MockWasmExec {
+    modules: Mutex<HashMap<String, WasmModule>>,
+}
+
+impl MockWasmExec {
+    pub fn new() -> Self {
+        Self {
+            modules: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn with_module(self, name: &str, exports: Vec<String>) -> Self {
+        self.modules.lock().unwrap().insert(
+            name.to_string(),
+            WasmModule {
+                name: name.to_string(),
+                exports,
+            },
+        );
+        self
+    }
+}
+
+#[async_trait]
+impl WasmExec for MockWasmExec {
+    async fn compile(&self, bytes: &[u8]) -> CoreResult<WasmModule> {
+        let name = format!("mod_{}", bytes.len());
+        let module = self
+            .modules
+            .lock()
+            .unwrap()
+            .get(&name)
+            .cloned()
+            .unwrap_or(WasmModule {
+                name,
+                exports: vec!["add".into()],
+            });
+        Ok(module)
+    }
+
+    async fn execute(&self, _module: &WasmModule, _function: &str, args: &[u8]) -> CoreResult<Vec<u8>> {
+        // Mock: sum all bytes and return as a single-byte result.
+        let sum: u8 = args.iter().sum();
+        Ok(vec![0, sum])
+    }
+
+    fn has_function(&self, module: &WasmModule, function: &str) -> bool {
+        module.exports.contains(&function.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -804,5 +1292,151 @@ mod tests {
     async fn test_mock_timeout_remaining() {
         let t = MockTimeout;
         assert!((t.remaining_secs() - 60.0).abs() < 0.001);
+    }
+
+    // ── Moderation ──
+
+    #[tokio::test]
+    async fn test_mock_moderation_pass() {
+        let m = MockModeration::new();
+        let result = m.check("safe content").await.unwrap();
+        assert!(result.is_safe);
+        assert!(result.flagged_categories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mock_moderation_flag() {
+        let m = MockModeration::new().with_flag("violence");
+        let result = m.check("kill them").await.unwrap();
+        assert!(!result.is_safe);
+        assert!(result.flagged_categories.contains(&"violence".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_mock_moderation_batch() {
+        let m = MockModeration::new()
+            .with_flag("hate")
+            .with_safe_threshold(0.8);
+        let results = m.check_batch(&["hello", "bad stuff"]).await.unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    // ── Logger ──
+
+    #[tokio::test]
+    async fn test_mock_logger() {
+        let log = MockLogger::new();
+        log.info("startup complete").await;
+        log.error("connection failed").await;
+        assert_eq!(log.entries().len(), 2);
+        assert_eq!(log.entries()[0].level, LogLevel::Info);
+    }
+
+    // ── Notification ──
+
+    #[tokio::test]
+    async fn test_mock_notification() {
+        let n = MockNotification::new();
+        n.send("slack:#alerts", "Test", "Body").await.unwrap();
+        n.alert("URGENT", "Server down").await.unwrap();
+        assert_eq!(n.sent().len(), 2);
+    }
+
+    // ── Cache ──
+
+    #[tokio::test]
+    async fn test_mock_cache() {
+        let c = MockCache::new();
+        c.set("key1", "val1", 60).await.unwrap();
+        assert!(c.exists("key1").await);
+        assert_eq!(c.get("key1").await.unwrap(), Some("val1".into()));
+        c.invalidate("key1").await.unwrap();
+        assert!(!c.exists("key1").await);
+    }
+
+    // ── Telemetry ──
+
+    #[tokio::test]
+    async fn test_mock_telemetry() {
+        let t = MockTelemetry::new();
+        t.counter_inc("requests", 1, vec![]).await;
+        t.histogram_observe("latency", 0.5, vec![]).await;
+        t.gauge_set("memory", 1024.0, vec![]).await;
+        assert_eq!(t.counters().len(), 1);
+    }
+
+    // ── EventBus ──
+
+    #[tokio::test]
+    async fn test_mock_eventbus() {
+        use std::sync::Arc;
+        let bus = Arc::new(MockEventBus::new());
+        let bus_clone = bus.clone();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ev_clone = events.clone();
+        let sid = bus.subscribe("node.complete", move |topic, payload| {
+            ev_clone.lock().unwrap().push((topic.to_string(), payload.to_string()));
+        }).await;
+        bus.publish("node.complete", r#"{"id":"n1"}"#).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert_eq!(events.lock().unwrap().len(), 1);
+        bus.unsubscribe(&sid).await.unwrap();
+    }
+
+    // ── SchemaRegistry ──
+
+    #[tokio::test]
+    async fn test_mock_schema_registry() {
+        let sr = MockSchemaRegistry::new();
+        let cols = vec![
+            SchemaColumn { name: "id".into(), data_type: "INTEGER".into(), nullable: false, entity_type: None },
+            SchemaColumn { name: "name".into(), data_type: "VARCHAR".into(), nullable: true, entity_type: Some("Patient".into()) },
+        ];
+        sr.register_schema("patients", cols).await.unwrap();
+        let schema = sr.get_schema("patients").await.unwrap().unwrap();
+        assert_eq!(schema.len(), 2);
+        let found = sr.find_by_column("name").await.unwrap();
+        assert_eq!(found, vec!["patients"]);
+    }
+
+    // ── AuthProvider ──
+
+    #[tokio::test]
+    async fn test_mock_auth_provider() {
+        let auth = MockAuthProvider::new().with_token("tk_abc123");
+        let creds = AuthCredentials { username: Some("admin".into()), password: Some("pass".into()), api_key: None };
+        let token = auth.authenticate(creds).await.unwrap();
+        assert_eq!(token.value, "tk_abc123");
+        let authorized = auth.authorize(&token, "read:data").await.unwrap();
+        assert!(authorized);
+        let valid = auth.validate(&token).await.unwrap();
+        assert!(valid);
+    }
+
+    // ── PluginHost ──
+
+    #[tokio::test]
+    async fn test_mock_plugin_host() {
+        let ph = MockPluginHost::new().with_plugin("csv-parser", "1.0.0");
+        let descriptors = ph.scan("/plugins").await.unwrap();
+        assert_eq!(descriptors.len(), 1);
+        let handle = ph.load("csv-parser").await.unwrap();
+        assert_eq!(handle.name, "csv-parser");
+        let config = std::collections::HashMap::new();
+        ph.init(&handle, config).await.unwrap();
+        let result = ph.run(&handle, "parse", b"a,b,c").await.unwrap();
+        assert!(!result.is_empty());
+        ph.unload(&handle).await.unwrap();
+    }
+
+    // ── WasmExec ──
+
+    #[tokio::test]
+    async fn test_mock_wasm_exec() {
+        let w = MockWasmExec::new().with_module("add", vec!["add".into()]);
+        let module = w.compile(b"mock wasm bytes").await.unwrap();
+        assert!(w.has_function(&module, "add"));
+        let result = w.execute(&module, "add", b"\x01\x02").await.unwrap();
+        assert_eq!(result, vec![0, 3]);
     }
 }

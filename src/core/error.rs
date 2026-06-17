@@ -52,6 +52,16 @@ pub enum ErrorCode {
     WasmError,
     /// Timeout
     Timeout,
+    /// Content moderation
+    Moderation,
+    /// Plugin execution
+    PluginError,
+    /// Cache error
+    CacheError,
+    /// Notification delivery failure
+    NotificationError,
+    /// Authorization failure
+    AuthorizationFailed,
     /// Unclassified
     Unknown,
 }
@@ -71,6 +81,11 @@ impl ErrorCode {
             Self::DataFusionError => "DATAFUSION_ERROR",
             Self::WasmError => "WASM_ERROR",
             Self::Timeout => "TIMEOUT",
+            Self::Moderation => "MODERATION",
+            Self::PluginError => "PLUGIN_ERROR",
+            Self::CacheError => "CACHE_ERROR",
+            Self::NotificationError => "NOTIFICATION_ERROR",
+            Self::AuthorizationFailed => "AUTHZ_FAILED",
             Self::Unknown => "UNKNOWN",
         }
     }

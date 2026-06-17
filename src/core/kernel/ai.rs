@@ -112,3 +112,32 @@ pub trait Tokenize: Send + Sync {
     /// Decode token IDs back into text.
     async fn decode(&self, tokens: &[u32]) -> CoreResult<String>;
 }
+
+// ---------------------------------------------------------------------------
+// Moderation
+// ---------------------------------------------------------------------------
+
+/// Content moderation — check if LLM output or user input is safe.
+///
+/// Follows Nika's Moderation trait pattern. Production impls wrap
+/// OpenAI Moderation API, LlamaGuard, or local classification models.
+#[async_trait]
+pub trait Moderation: Send + Sync {
+    /// Check a text string for harmful content.
+    /// Returns OK if content is safe, Err if moderation flags it.
+    async fn check(&self, text: &str) -> CoreResult<ModerationResult>;
+
+    /// Batch check multiple texts.
+    async fn check_batch(&self, texts: &[&str]) -> CoreResult<Vec<ModerationResult>>;
+}
+
+/// Result of a moderation check.
+#[derive(Debug, Clone)]
+pub struct ModerationResult {
+    /// True if the content is safe / passed moderation.
+    pub is_safe: bool,
+    /// Categories that were flagged (empty if safe).
+    pub flagged_categories: Vec<String>,
+    /// Scores per category (0.0 = safe, 1.0 = definitely harmful).
+    pub category_scores: std::collections::HashMap<String, f64>,
+}
