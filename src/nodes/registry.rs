@@ -66,6 +66,10 @@ impl NodeRegistry {
             GraphIndexWriterNode, HttpFetchNode, ParquetReadNode, UniversalReadNode,
         };
         use crate::nodes::mcp::McpToolNode;
+        use crate::nodes::quality::{
+            NullCheckNode, RowCountAssertNode, SchemaAssertNode, UniquenessCheckNode,
+            ValueRangeCheckNode,
+        };
         use crate::nodes::script::boxed_python::BoxedPythonNode;
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
         use crate::nodes::sql::SqlNode;
@@ -104,6 +108,11 @@ impl NodeRegistry {
         self.register_node(Arc::new(TableToVariableNode));
         self.register_node(Arc::new(GraphMergerNode));
         self.register_node(Arc::new(TableSchemaValidatorNode));
+        self.register_node(Arc::new(NullCheckNode));
+        self.register_node(Arc::new(UniquenessCheckNode));
+        self.register_node(Arc::new(RowCountAssertNode));
+        self.register_node(Arc::new(SchemaAssertNode));
+        self.register_node(Arc::new(ValueRangeCheckNode));
         self.register_node(Arc::new(SemanticCleanerNode));
         self.register_node(Arc::new(AiRouterNode));
         self.register_node(Arc::new(PythonNode));

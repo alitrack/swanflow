@@ -18,6 +18,7 @@ pub mod connectors;
 pub mod io;
 pub mod mcp;
 pub mod missing;
+pub mod quality;
 pub mod registry;
 pub mod script;
 pub mod sql;

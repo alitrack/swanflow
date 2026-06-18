@@ -1,3 +1,11 @@
+pub mod backend;
+pub mod datafusion_backend;
+pub mod duckdb_backend;
+
+pub use backend::{EngineCapabilities, QueryEngine, QueryEngineRef, RegisteredTable, TableSource};
+pub use datafusion_backend::DataFusionEngine;
+pub use duckdb_backend::DuckDBEngine;
+
 use async_trait::async_trait;
 use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::Result;
@@ -52,11 +60,26 @@ pub trait IntelligenceHook: Send + Sync {
     ) -> Option<serde_json::Value>;
 }
 
+/// Engine execution mode for SwanFlow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineMode {
+    /// Default — use DataFusion for all execution (backward compatible).
+    DataFusion,
+    /// Use DuckDB as the primary execution engine.
+    DuckDB,
+    /// Auto-select based on pipeline node types.
+    Auto,
+}
+
 pub struct SwanFlowEngine {
     pub ctx: Arc<SessionContext>,
     pub registry: Arc<NodeRegistry>,
     pub cache_dir: String,
     pub hook: Option<Arc<dyn IntelligenceHook>>,
+    /// Optional query engine for DuckDB/Auto modes.
+    pub engine: Option<QueryEngineRef>,
+    /// Active engine mode.
+    pub engine_mode: EngineMode,
 }
 
 async fn sync_metadata_to_context(ctx: &Arc<SessionContext>, cache_dir: &str) {
@@ -146,7 +169,151 @@ impl SwanFlowEngine {
             registry,
             cache_dir,
             hook: None,
+            engine: None,
+            engine_mode: EngineMode::DataFusion,
         }
+    }
+
+    /// Create an engine with DuckDB as the query backend.
+    pub fn with_engine(mut self, engine: QueryEngineRef) -> Self {
+        self.engine = Some(engine);
+        self.engine_mode = EngineMode::DuckDB;
+        self
+    }
+
+    /// Set the engine mode explicitly.
+    pub fn with_engine_mode(mut self, mode: EngineMode) -> Self {
+        self.engine_mode = mode;
+        self
+    }
+
+    /// Resolve Auto mode to a concrete engine based on pipeline node types.
+    pub fn resolve_mode(&mut self, workflow: &Workflow) -> EngineMode {
+        if self.engine_mode != EngineMode::Auto {
+            return self.engine_mode;
+        }
+        // Auto: scan nodes — if any require DataFusion (python, wasm, sqlx_scan), use DF
+        for node_idx in workflow.graph.node_indices() {
+            if let Some(node) = workflow.graph.node_weight(node_idx) {
+                let tid = &node.type_id;
+                if tid.contains("python") || tid.contains("wasm") || tid.contains("sqlx_scan") {
+                    self.engine_mode = EngineMode::DataFusion;
+                    return EngineMode::DataFusion;
+                }
+            }
+        }
+        // Default to DuckDB for pure SQL/transform pipelines
+        self.engine_mode = EngineMode::DuckDB;
+        EngineMode::DuckDB
+    }
+
+    /// Execute a workflow using the DuckDB SQL compilation pipeline.
+    /// Compiles each node's LogicalPlan to SQL, executes in DuckDB, materializes results.
+    pub async fn execute_workflow_duckdb(
+        &self,
+        workflow: &Workflow,
+    ) -> Result<mpsc::UnboundedReceiver<NodeEvent>> {
+        let engine = self
+            .engine
+            .as_ref()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "DuckDB engine not configured. Use with_engine() to set one.".to_string(),
+                )
+            })?;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        // Compile workflow to LogicalPlans (same as DataFusion path)
+        let mut compiler = WorkflowCompiler::with_cache_dir(true, self.cache_dir.clone());
+        compiler.ctx = self.ctx.clone();
+        compiler.event_tx = Some(tx.clone());
+
+        let stages = compiler
+            .compile(workflow, &self.registry, Some(self.ctx.clone()))
+            .await
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Workflow compilation failed: {}",
+                    e
+                ))
+            })?;
+
+        let engine_clone = engine.arc_clone();
+        let tx_err = tx.clone();
+
+        tokio::spawn(async move {
+            for (level, terminals) in stages.into_iter().enumerate() {
+                for stage_plan in terminals {
+                    let node_id = stage_plan.node_id;
+                    let logical_plan = stage_plan.plan;
+
+                    // Compile LogicalPlan to SQL
+                    let sql = match engine_clone.compile_to_sql(&logical_plan) {
+                        Ok(sql) => sql,
+                        Err(e) => {
+                            let _ = tx_err.send(NodeEvent::Error {
+                                node_id,
+                                message: format!("SQL compilation failed: {}", e),
+                            });
+                            continue;
+                        }
+                    };
+
+                    // Execute SQL in DuckDB
+                    match engine_clone.execute_sql(&sql).await {
+                        Ok(batches) => {
+                            if !batches.is_empty() {
+                                // Materialize result as a registered table
+                                let table_name =
+                                    format!("node_{}", &node_id.to_string()[..8]);
+                                let schema = batches[0].schema();
+                                if let Err(e) = engine_clone
+                                    .register_table(RegisteredTable {
+                                        name: table_name.clone(),
+                                        schema,
+                                        source: TableSource::InMemory {
+                                            batches: batches.clone(),
+                                        },
+                                    })
+                                    .await
+                                {
+                                    let _ = tx_err.send(NodeEvent::Error {
+                                        node_id,
+                                        message: format!(
+                                            "Materialization failed: {}",
+                                            e
+                                        ),
+                                    });
+                                    continue;
+                                }
+                                let _ = tx_err.send(NodeEvent::Materialized {
+                                    node_id,
+                                    table_name,
+                                    parquet_path: String::new(),
+                                });
+                            }
+                            let _ = tx_err.send(NodeEvent::StateChanged {
+                                node_id,
+                                state: crate::nodes::NodeState::Executed,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx_err.send(NodeEvent::Error {
+                                node_id,
+                                message: format!(
+                                    "DuckDB execution failed (level {}): {}",
+                                    level, e
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+            drop(tx_err);
+        });
+
+        Ok(rx)
     }
 
     pub async fn execute_workflow(
