@@ -5,3 +5,20 @@ members = [
     "crates/swanflow",
     "crates/swanflow-plugin-sdk",
 ]
+
+# Optimized release profile for single-file distribution.
+# Usage: cargo build --release -p swanflow
+# Output: target/release/swanflow (single binary ~15-25 MB)
+[profile.release]
+opt-level = 3       # Full optimizations
+lto = "fat"         # Link-time optimization across all crates
+codegen-units = 1   # Single codegen unit for better inlining
+strip = "symbols"   # Strip debug symbols from binary
+panic = "abort"     # Smaller binary, no unwind tables
+
+# Fast release for CI / development (no LTO, faster compile)
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = "none"
