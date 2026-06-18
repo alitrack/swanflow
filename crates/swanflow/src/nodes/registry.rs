@@ -1,0 +1,196 @@
+use crate::nodes::NodeBehavior;
+use anyhow::{anyhow, Result};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+/// A thread-safe registry for node implementations.
+/// Node types are indexed by their unique type_id.
+pub struct NodeRegistry {
+    nodes: HashMap<String, Arc<dyn NodeBehavior>>,
+}
+
+impl NodeRegistry {
+    /// Create a new, empty node registry.
+    pub fn new() -> Self {
+        Self {
+            nodes: HashMap::new(),
+        }
+    }
+
+    /// Register a node implementation.
+    pub fn register_node(&mut self, behavior: Arc<dyn NodeBehavior>) {
+        let type_id = behavior.spec().type_id;
+        self.nodes.insert(type_id, behavior);
+    }
+
+    /// Retrieve a node implementation by its type identifier.
+    pub fn get_node(&self, type_id: &str) -> Result<Arc<dyn NodeBehavior>> {
+        self.nodes
+            .get(type_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("Node type '{}' not found in registry", type_id))
+    }
+
+    /// List all registered node specifications.
+    pub fn list_specs(&self) -> Vec<crate::nodes::NodeSpec> {
+        self.nodes.values().map(|n| n.spec()).collect()
+    }
+
+    /// Register all fundamental SwanFlow nodes.
+    ///
+    /// Note: AI nodes (ConfigWizard, McpNode) are not registered here as they
+    /// require runtime configuration (API keys, tool names) and are used as
+    /// helpers rather than direct workflow nodes.
+    pub fn register_core_nodes(&mut self) {
+        use crate::nodes::ai::contracts::{CitationTrackerNode, StructuredIoContractNode};
+        use crate::nodes::ai::graph::{
+            ContextFuserNode, EntityExtractorNode, GraphRetrieverNode, ResearchLoopMetaNode,
+        };
+        use crate::nodes::ai::mcp::McpInvokeNode;
+        use crate::nodes::ai::privacy::{PiiDetectorNode, PiiMaskerNode, PolicyPrivacyGateNode};
+        use crate::nodes::ai::providers::{LlmConfig, OpenAiProvider, ProviderKind};
+        use crate::nodes::ai::retrieval::{
+            EmbeddingGeneratorNode, HybridRetrieverNode, QueryPlanningNode, RerankerNode,
+            SemanticChunkerNode, VectorIndexWriterNode, VectorRetrieverNode,
+        };
+        use crate::nodes::ai::runtime::{
+            AgentLoopOrchestratorNode, CheckpointResumeControllerNode,
+            ObservabilityAuditLedgerNode, RetryBackoffGuardNode, RunStateStoreNode,
+        };
+        use crate::nodes::ai::tool_executor::ToolExecutorNode;
+        use crate::nodes::ai::verification::FactClaimVerifierNode;
+        use crate::nodes::boundary::{DuckDBExtensionNode, InputNode, OutputNode};
+        use crate::nodes::io::{
+            CsvReadNode, DbConnectorNode, DuckDBReadNode, DuckDBWriteNode, ExcelReadNode,
+            ExcelReportNode, ExcelSheetNamesNode, ExcelTemplateNode, ExcelWriteNode,
+            GraphIndexWriterNode, HttpFetchNode, ParquetReadNode, UniversalReadNode,
+        };
+        use crate::nodes::mcp::McpToolNode;
+        use crate::nodes::quality::{
+            NullCheckNode, RowCountAssertNode, SchemaAssertNode, UniquenessCheckNode,
+            ValueRangeCheckNode,
+        };
+        use crate::nodes::script::boxed_python::BoxedPythonNode;
+        use crate::nodes::script::python::{PythonNode, PythonUdfNode};
+        use crate::nodes::sql::SqlNode;
+        use crate::nodes::transform::{
+            AggregateNode, AiRouterNode, ConditionNode, FilterNode, ForEachNode, GraphMergerNode,
+            ProfilerNode, ProjectNode, SemanticCleanerNode, TableSchemaValidatorNode,
+            TableToVariableNode, VariableCreatorNode, WindowNode,
+        };
+        use crate::nodes::wasm::WasmNode;
+
+        self.register_node(Arc::new(SqlNode));
+        self.register_node(Arc::new(CsvReadNode));
+        self.register_node(Arc::new(ParquetReadNode));
+        self.register_node(Arc::new(UniversalReadNode));
+        self.register_node(Arc::new(DbConnectorNode));
+        self.register_node(Arc::new(ExcelReadNode));
+        self.register_node(Arc::new(ExcelWriteNode));
+        self.register_node(Arc::new(ExcelTemplateNode));
+        self.register_node(Arc::new(ExcelReportNode));
+        self.register_node(Arc::new(ExcelSheetNamesNode));
+        self.register_node(Arc::new(DuckDBReadNode));
+        self.register_node(Arc::new(DuckDBWriteNode));
+        self.register_node(Arc::new(HttpFetchNode));
+        self.register_node(Arc::new(GraphIndexWriterNode));
+        self.register_node(Arc::new(InputNode));
+        self.register_node(Arc::new(OutputNode));
+        self.register_node(Arc::new(DuckDBExtensionNode));
+        self.register_node(Arc::new(FilterNode));
+        self.register_node(Arc::new(ProjectNode));
+        self.register_node(Arc::new(AggregateNode));
+        self.register_node(Arc::new(WindowNode));
+        self.register_node(Arc::new(ConditionNode));
+        self.register_node(Arc::new(ForEachNode));
+        self.register_node(Arc::new(ProfilerNode));
+        self.register_node(Arc::new(VariableCreatorNode));
+        self.register_node(Arc::new(TableToVariableNode));
+        self.register_node(Arc::new(GraphMergerNode));
+        self.register_node(Arc::new(TableSchemaValidatorNode));
+        self.register_node(Arc::new(NullCheckNode));
+        self.register_node(Arc::new(UniquenessCheckNode));
+        self.register_node(Arc::new(RowCountAssertNode));
+        self.register_node(Arc::new(SchemaAssertNode));
+        self.register_node(Arc::new(ValueRangeCheckNode));
+        self.register_node(Arc::new(SemanticCleanerNode));
+        self.register_node(Arc::new(AiRouterNode));
+        self.register_node(Arc::new(PythonNode));
+        self.register_node(Arc::new(BoxedPythonNode));
+        // Note: PythonUdfNode is registered but currently returns empty plan (stub implementation)
+        self.register_node(Arc::new(PythonUdfNode));
+        self.register_node(Arc::new(WasmNode));
+        self.register_node(Arc::new(GraphRetrieverNode));
+        self.register_node(Arc::new(ContextFuserNode));
+        self.register_node(Arc::new(McpInvokeNode));
+        self.register_node(Arc::new(McpToolNode));
+        self.register_node(Arc::new(StructuredIoContractNode));
+        self.register_node(Arc::new(CitationTrackerNode));
+        self.register_node(Arc::new(EmbeddingGeneratorNode));
+        self.register_node(Arc::new(QueryPlanningNode));
+        self.register_node(Arc::new(SemanticChunkerNode));
+        self.register_node(Arc::new(HybridRetrieverNode));
+        self.register_node(Arc::new(RerankerNode));
+        self.register_node(Arc::new(VectorIndexWriterNode));
+        self.register_node(Arc::new(VectorRetrieverNode));
+        self.register_node(Arc::new(ToolExecutorNode));
+        self.register_node(Arc::new(PiiDetectorNode));
+        self.register_node(Arc::new(PiiMaskerNode));
+        self.register_node(Arc::new(PolicyPrivacyGateNode));
+        self.register_node(Arc::new(RetryBackoffGuardNode));
+        self.register_node(Arc::new(CheckpointResumeControllerNode::default()));
+        self.register_node(Arc::new(RunStateStoreNode::default()));
+        self.register_node(Arc::new(ObservabilityAuditLedgerNode::default()));
+        self.register_node(Arc::new(AgentLoopOrchestratorNode));
+        self.register_node(Arc::new(FactClaimVerifierNode));
+        self.register_node(Arc::new(ResearchLoopMetaNode::new()));
+
+        // Backward-compatible type aliases used by existing workflow JSON/YAML.
+        if let Some(csv) = self.nodes.get("core.io.csv_read").cloned() {
+            self.nodes.insert("core.io.csv".to_string(), csv);
+        }
+        if let Some(parquet) = self.nodes.get("core.io.parquet_read").cloned() {
+            self.nodes.insert("core.io.parquet".to_string(), parquet);
+        }
+
+        // Register EntityExtractor if environment variables are set
+        if let Ok(model) = std::env::var("LLM_MODEL") {
+            println!("[DEBUG] Found LLM_MODEL: {}", model);
+            let config = LlmConfig {
+                provider: ProviderKind::OpenAI,
+                api_key: std::env::var("LLM_API_KEY").ok(),
+                model,
+                endpoint: std::env::var("LLM_API_BASE").ok(),
+            };
+            match OpenAiProvider::new(config) {
+                Ok(provider) => {
+                    println!("[DEBUG] Registering EntityExtractorNode");
+                    self.register_node(Arc::new(EntityExtractorNode {
+                        provider: Arc::new(provider),
+                    }));
+                }
+                Err(e) => println!("[DEBUG] Failed to create OpenAiProvider: {}", e),
+            }
+        } else if let Ok(provider) = OpenAiProvider::new(LlmConfig {
+            provider: ProviderKind::OpenAI,
+            api_key: std::env::var("OPENAI_API_KEY").ok(),
+            model: "gpt-4o".to_string(),
+            endpoint: None,
+        }) {
+            println!("[DEBUG] Registering EntityExtractorNode (Fallback)");
+            self.register_node(Arc::new(EntityExtractorNode {
+                provider: Arc::new(provider),
+            }));
+        } else {
+            println!("[DEBUG] No LLM_MODEL or OPENAI_API_KEY found, EntityExtractor skip");
+        }
+    }
+}
+
+impl Default for NodeRegistry {
+    fn default() -> Self {
+        let mut registry = Self::new();
+        registry.register_core_nodes();
+        registry
+    }
+}
