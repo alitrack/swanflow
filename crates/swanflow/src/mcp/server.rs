@@ -278,6 +278,10 @@ impl McpServer {
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Missing sql argument"))?;
 
+                // SELECT-only guard — reject write operations at protocol level.
+                // This is structural AI safety: no prompt can override this check.
+                Self::guard_sql(sql)?;
+
                 let df = self.engine.ctx.sql(sql).await?;
                 let batches = df.collect().await?;
                 let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -303,6 +307,34 @@ impl McpServer {
 
             _ => Err(anyhow::anyhow!("Unknown tool: {name}")),
         }
+    }
+
+    /// SELECT-only SQL guard — rejects write operations at protocol level.
+    ///
+    /// This is structural AI safety: no prompt or model can override this check.
+    /// Write operations must go through `run_workflow` with a proper pipeline,
+    /// not raw SQL execution.
+    fn guard_sql(sql: &str) -> anyhow::Result<()> {
+        static FORBIDDEN: &[&str] = &[
+            "INSERT", "UPDATE", "DELETE", "DROP", "ALTER",
+            "CREATE", "TRUNCATE", "REPLACE", "MERGE",
+        ];
+
+        let upper = sql.trim().to_uppercase();
+        for keyword in FORBIDDEN {
+            if upper.starts_with(keyword)
+                || upper.contains(&format!(" {}", keyword))
+                || upper.contains(&format!("\n{}", keyword))
+                || upper.contains(&format!("\t{}", keyword))
+            {
+                return Err(anyhow::anyhow!(
+                    "Write operation '{}' not allowed via execute_sql. \
+                     Use run_workflow with a data sink node for modifications.",
+                    keyword
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn list_resources(&self) -> Vec<McpResource> {

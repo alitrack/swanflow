@@ -66,10 +66,12 @@ redis = "0.24"
 tokio-util = { version = "0.7.18", features = ["codec", "compat"] }
 aws-config = "1.8.14"
 aws-sdk-s3 = "1.124.0"
+swanflow-ai = { path = "../swanflow-ai", optional = true }
 
 [features]
 default = []
 extended-connectors = []
+ai = ["swanflow-ai"]
 
 [dev-dependencies]
 tempfile = "3.26.0"
