@@ -214,6 +214,100 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.viz.property.color.ColorManager2NodeFactory", "Profiler",
             |_| json!({}));
 
+        // ─── Virtual / Infra (pass-through) ───
+        def!("org.knime.core.node.workflow.virtual.subnode.VirtualSubNodeInputNodeFactory", "Project",
+            |_| json!({}));
+        def!("org.knime.core.node.workflow.virtual.subnode.VirtualSubNodeOutputNodeFactory", "Project",
+            |_| json!({}));
+
+        // ─── Flow Variables ───
+        def!("org.knime.ext.jep.variable.JEPVariableNodeFactory", "FlowVar",
+            |_| json!({}));
+        def!("org.knime.base.node.rules.engine.RuleEngineVariableNodeFactory", "FlowVar",
+            |_| json!({}));
+        def!("org.knime.base.node.util.mergevariables.MergeVariablesNodeFactory", "FlowVar",
+            |_| json!({}));
+
+        // ─── Collection / Loop ───
+        def!("org.knime.base.collection.list.create2.CollectionCreate2NodeFactory", "LoopStart",
+            |_| json!({}));
+
+        // ─── Sort (alt namespace) ───
+        def!("org.knime.base.node.preproc.sorter.SorterNodeFactory", "Sort",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let asc = !s.get("sort_descending").and_then(|v| v.as_bool()).unwrap_or(false);
+                json!({"sort_key": col, "ascending": asc})
+            });
+
+        // ─── Column Ops ───
+        def!("org.knime.base.node.preproc.column.renamer.ColumnRenamerNodeFactory", "Project",
+            |s| json!({"rename": s.get("column_name").and_then(|v| v.as_str()),
+                       "new_name": s.get("new_column_name").and_then(|v| v.as_str())}));
+        def!("org.knime.base.node.preproc.columnresorter.ColumnResorterNodeFactory", "Project",
+            |s| json!({"columns": s.get("column_names").and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())}));
+        def!("org.knime.base.node.preproc.columnrenameregex.ColumnRenameRegexNodeFactory", "Project",
+            |s| json!({"pattern": s.get("pattern"), "replacement": s.get("replacement")}));
+
+        // ─── Row Ops ───
+        def!("org.knime.base.node.preproc.append.row.AppendedRowsNodeFactory", "Union",
+            |_| json!({}));
+        def!("org.knime.base.node.preproc.duplicates.DuplicateRowFilterNodeFactory", "Filter",
+            |_| json!({"dedup": true}));
+        def!("org.knime.base.node.preproc.filter.row.RowFilter2PortNodeFactory", "Filter",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let op = s.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
+                let val = s.get("filter_value").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"predicate": format!("{} {} {}", col, op, val), "split": true})
+            });
+
+        // ─── Join / Pivot ───
+        def!("org.knime.base.node.preproc.crossjoin.CrossJoinerNodeFactory", "Join",
+            |_| json!({"join_type": "CROSS"}));
+        def!("org.knime.base.node.preproc.joiner.Joiner2NodeFactory", "Join",
+            |s| json!({
+                "left_keys": s.get("left_column_names").and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+                "right_keys": s.get("right_column_names").and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+                "join_type": s.get("join_type").and_then(|v| v.as_str()).unwrap_or("INNER"),
+            }));
+        def!("org.knime.base.node.preproc.unpivot2.Unpivot2NodeFactory", "Transpose",
+            |_| json!({}));
+
+        // ─── Cell Ops ───
+        def!("org.knime.base.node.preproc.cellsplit2.CellSplitter2NodeFactory", "Project",
+            |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
+                       "delimiter": s.get("delimiter").and_then(|v| v.as_str())}));
+
+        // ─── IO ───
+        def!("org.knime.base.node.io.table.read.ReadTableNodeFactory", "CsvRead",
+            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or("")}));
+
+        // ─── Util ───
+        def!("org.knime.base.node.util.extracttabledimension.ExtractTableDimensionNodeFactory", "Profiler",
+            |_| json!({}));
+
+        // ─── Viz / View ───
+        def!("org.knime.base.views.node.tableview.TableViewNodeFactory", "Profiler",
+            |_| json!({}));
+        def!("org.knime.base.views.node.barchart.BarChartNodeFactory", "Profiler",
+            |_| json!({}));
+
+        // ─── QuickForm / JS Widgets ───
+        def!("org.knime.js.base.node.quickform.input.integer.IntInputQuickFormNodeFactory", "FlowVar",
+            |_| json!({}));
+        def!("org.knime.js.base.node.quickform.input.string.StringInputQuickFormNodeFactory", "FlowVar",
+            |_| json!({}));
+        def!("org.knime.js.base.node.css.editor.CSSEditorNodeFactory", "Project",
+            |_| json!({}));
+
+        // ─── Time ───
+        def!("org.knime.time.node.create.createdatetime.CreateDateTimeNodeFactory", "Project",
+            |_| json!({}));
+
         Self { type_map }
     }
 

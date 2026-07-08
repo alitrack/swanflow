@@ -66,6 +66,11 @@ enum KnimeCommands {
         #[arg(long, default_value_t = default_shaper_db())]
         shaper_db: String,
     },
+    /// Scan KNIME workflow(s) and report factory type coverage
+    Scan {
+        /// Path(s) to KNIME workflow files (.knwf/.knar) or directories
+        inputs: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
