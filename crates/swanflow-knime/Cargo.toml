@@ -24,3 +24,7 @@ tracing = "0.1"
 [dev-dependencies]
 tempfile = "3.26.0"
 tokio = { version = "1", features = ["rt", "macros"] }
+
+[[bin]]
+name = "shaper-gen"
+path = "src/bin/shaper-gen.rs"

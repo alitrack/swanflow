@@ -506,16 +506,24 @@ fn resolve_chart_type(name: &str) -> Option<&'static str> {
 
 /// Generate the correct Shaper annotation suffix for an axis.
 ///
-/// Shaper convention:
-///   - `col::CHARTTYPE` → value column
-///   - `col::CHARTTYPE_XAXIS` → X axis
-///   - `col::CHARTTYPE_YAXIS` → Y axis
+/// Shaper uses DuckDB custom types:
+///   - `col::XAXIS` → X axis (for bar, line, box, scatter, area, histogram)
+///   - `col::YAXIS` → Y axis
+///   - `col::BARCHART` → bar chart value column
+///   - `col::LINECHART` → line chart value column
+///   - `col::PIECHART` → pie chart value column
+///   - `col::BARCHART_STACKED` → stacked bar
+///   - `col::CATEGORY` → category grouping
+///   - `col::COLOR` → color grouping
+///   See: https://taleshape.com/shaper/docs/dashboard-sql-reference/
 fn suffix_annotation(chart_type: &str, axis: &str) -> String {
-    match axis {
-        "xaxis" => format!("{}_XAXIS", chart_type),
-        "yaxis" => format!("{}_YAXIS", chart_type),
-        "value" => chart_type.to_string(),
-        _ => format!("{}_{}", chart_type, axis.to_uppercase()),
+    match (chart_type, axis) {
+        (_, "xaxis") => "XAXIS".to_string(),
+        (_, "yaxis") => "YAXIS".to_string(),
+        (_, "value") => chart_type.to_string(),
+        (_, "category") => "CATEGORY".to_string(),
+        (_, "color") => "COLOR".to_string(),
+        _ => chart_type.to_string(),
     }
 }
 
