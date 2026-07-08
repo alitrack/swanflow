@@ -51,6 +51,11 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum KnimeCommands {
+    /// Parse KNIME workflow and execute it with SwanFlow engine
+    Run {
+        /// Path to KNIME workflow file (.knwf or .knar)
+        input: PathBuf,
+    },
     /// Convert KNIME workflow (.knwf/.knar) to Shaper SQL dashboard queries
     Shaper {
         /// Path to KNIME workflow file (.knwf or .knar)
@@ -233,6 +238,93 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Knime { command } => match command {
+            KnimeCommands::Run { input } => {
+                println!("🧩 Parsing KNIME workflow: {:?}", input);
+                let archive = KnwfParser::parse_file(&input)?;
+                println!(
+                    "   Nodes: {}  Edges: {}  Metanodes: {}",
+                    archive.nodes.len(),
+                    archive.edges.len(),
+                    archive.metanodes.len(),
+                );
+
+                let core_wf = swanflow_knime::import_knwf(
+                    input.to_str().unwrap_or("unknown"),
+                )
+                .await?;
+
+                // Convert swanflow_core::Workflow → swanflow::Workflow via JSON
+                let json = serde_json::to_value(&core_wf)?;
+                let workflow: Workflow = serde_json::from_value(json)?;
+
+                println!(
+                    "🚀 Executing Workflow: {} ({} nodes)",
+                    workflow.name,
+                    workflow.graph.node_count()
+                );
+
+                let registry = Arc::new(NodeRegistry::default());
+                let engine = SwanFlowEngine::new(registry);
+
+                let mut rx = engine.execute_workflow(&workflow).await?;
+
+                let mut executed = 0;
+                let mut errors = 0;
+                while let Some(event) = rx.recv().await {
+                    match &event {
+                        NodeEvent::StateChanged { node_id, state } => {
+                            let short_id = &node_id.to_string()[..8];
+                            match state {
+                                swanflow::nodes::NodeState::Running => {
+                                    println!("  ▶  Node[{}] Running", short_id)
+                                }
+                                swanflow::nodes::NodeState::Executed => {
+                                    executed += 1;
+                                    println!("  ✅ Node[{}] Executed", short_id)
+                                }
+                                swanflow::nodes::NodeState::Error(e) => {
+                                    println!("  ❌ Node[{}] Error: {}", short_id, e)
+                                }
+                                _ => {}
+                            }
+                        }
+                        NodeEvent::Error { node_id, message } => {
+                            errors += 1;
+                            println!("  ❌ Node[{}]: {}", &node_id.to_string()[..8], message);
+                        }
+                        NodeEvent::Materialized { node_id, table_name, .. } => {
+                            println!(
+                                "  💾 Node[{}] → table `{}`",
+                                &node_id.to_string()[..8],
+                                table_name
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                println!(
+                    "✅ Done — {} executed, {} errors",
+                    executed, errors
+                );
+            }
+            KnimeCommands::Scan { inputs } => {
+                println!("🔍 Scanning {} workflow(s) for factory types...", inputs.len());
+                let mut all_factories: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                for path in &inputs {
+                    if let Ok(archive) = KnwfParser::parse_file(path) {
+                        for node in &archive.nodes {
+                            let factory = node.node_type.as_deref().unwrap_or("unknown");
+                            *all_factories.entry(factory.to_string()).or_default() += 1;
+                        }
+                    }
+                }
+                println!("  Unique factory types: {}", all_factories.len());
+                let mut sorted: Vec<_> = all_factories.into_iter().collect();
+                sorted.sort_by(|a, b| b.1.cmp(&a.1));
+                for (factory, count) in sorted.iter().take(20) {
+                    println!("  {} ({} occurrences)", factory, count);
+                }
+            }
             KnimeCommands::Shaper {
                 input,
                 output,
