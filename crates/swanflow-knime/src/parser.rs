@@ -111,7 +111,7 @@ impl KnwfParser {
 
         // Step 6: Build KnimeNode list
         let mut nodes = Vec::new();
-        let mut metanodes = HashMap::new();
+        let metanodes = HashMap::new();
 
         for raw_node in nodes_raw.iter() {
             let node_name = raw_node.name.as_deref().unwrap_or("Unknown");
@@ -168,7 +168,6 @@ impl KnwfParser {
         let mut in_edge_entry = false;
         let mut current_node: Option<RawNodeBuilder> = None;
         let mut current_edge: Option<EdgeBuilder> = None;
-        let mut current_field = String::new();
         let mut depth = 0u32;
 
         loop {
@@ -211,11 +210,8 @@ impl KnwfParser {
                         }
                     }
                 }
-                Ok(Event::Text(ref e)) => {
-                    let text = e.unescape().unwrap_or_default();
-                    if !text.trim().is_empty() {
-                        current_field = text.to_string();
-                    }
+                Ok(Event::Text(_)) => {
+                    // Text content ignored — all data is in attributes
                 }
                 Ok(Event::Empty(ref e)) => {
                     let entry_attrs: Vec<(String, String)> = e
