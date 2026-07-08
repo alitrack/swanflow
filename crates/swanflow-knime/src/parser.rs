@@ -204,18 +204,19 @@ impl KnwfParser {
                     }
                 }
                 Ok(Event::Empty(ref e)) => {
+                    let entry_attrs: Vec<(String, String)> = e
+                        .attributes()
+                        .flatten()
+                        .map(|a| {
+                            let k = String::from_utf8_lossy(a.key.as_ref()).to_string();
+                            let v = String::from_utf8_lossy(&a.value).to_string();
+                            (k, v)
+                        })
+                        .collect();
                     let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                     if tag == "entry" {
-                        // Extract key/value attributes
-                        let key = e.attributes().flatten()
-                            .find(|a| a.key.as_ref() == b"key")
-                            .map(|a| String::from_utf8_lossy(&a.value).to_string());
-                        let value = e.attributes().flatten()
-                            .find(|a| a.key.as_ref() == b"value")
-                            .map(|a| String::from_utf8_lossy(&a.value).to_string());
-                        let xtype = e.attributes().flatten()
-                            .find(|a| a.key.as_ref() == b"type")
-                            .map(|a| String::from_utf8_lossy(&a.value).to_string());
+                        let key = entry_attrs.iter().find(|(k, _)| k == "key").map(|(_, v)| v.clone());
+                        let value = entry_attrs.iter().find(|(k, _)| k == "value").map(|(_, v)| v.clone());
 
                         if in_node_entry {
                             if let Some(ref mut node) = current_node {
@@ -226,10 +227,10 @@ impl KnwfParser {
                                             if node.name.is_none() { node.name = value; }
                                         }
                                         "state" => node.state = value,
-                                        "num_inputs" => node.num_inputs = value.and_then(|v| v.parse().ok()),
-                                        "num_outputs" => node.num_outputs = value.and_then(|v| v.parse().ok()),
-                                        "x" => node.x = value.and_then(|v| v.parse().ok()),
-                                        "y" => node.y = value.and_then(|v| v.parse().ok()),
+                                        "num_inputs" => node.num_inputs = value.as_deref().and_then(|v| v.parse().ok()),
+                                        "num_outputs" => node.num_outputs = value.as_deref().and_then(|v| v.parse().ok()),
+                                        "x" => node.x = value.as_deref().and_then(|v| v.parse().ok()),
+                                        "y" => node.y = value.as_deref().and_then(|v| v.parse().ok()),
                                         _ => {}
                                     }
                                 }
@@ -238,11 +239,11 @@ impl KnwfParser {
 
                         if in_edge_entry {
                             if let Some(ref mut edge) = current_edge {
-                                if let (Some(k), Some(v)) = (key, value) {
+                                if let (Some(k), Some(v)) = (&key, &value) {
                                     match k.as_str() {
-                                        "srcID" => edge.source_id = Some(v),
+                                        "srcID" => edge.source_id = Some(v.clone()),
                                         "src_port" => edge.source_port = v.parse().unwrap_or(0),
-                                        "destID" => edge.target_id = Some(v),
+                                        "destID" => edge.target_id = Some(v.clone()),
                                         "dest_port" => edge.target_port = v.parse().unwrap_or(0),
                                         _ => {}
                                     }
@@ -315,19 +316,21 @@ impl KnwfParser {
         let mut buf = Vec::new();
         let mut result = serde_json::Map::new();
         let mut in_model = false;
-        let mut path: Vec<String> = Vec::new();
 
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
-                    let tag = String::from_utf8_lossy(e.name().as_ref());
-                    if tag == "entry" {
-                        let key = e.attributes().flatten()
-                            .find(|a| a.key.as_ref() == b"key")
-                            .map(|a| String::from_utf8_lossy(&a.value).to_string());
-                        let value = e.attributes().flatten()
-                            .find(|a| a.key.as_ref() == b"value")
-                            .map(|a| String::from_utf8_lossy(&a.value).to_string());
+                    let entry_attrs: Vec<(String, String)> = e
+                        .attributes()
+                        .flatten()
+                        .map(|a| {
+                            (String::from_utf8_lossy(a.key.as_ref()).to_string(),
+                             String::from_utf8_lossy(&a.value).to_string())
+                        })
+                        .collect();
+                    if entry_attrs.iter().any(|(k, _)| k == "key") {
+                        let key = entry_attrs.iter().find(|(k, _)| k == "key").map(|(_, v)| v.clone());
+                        let value = entry_attrs.iter().find(|(k, _)| k == "value").map(|(_, v)| v.clone());
 
                         if let Some(k) = key {
                             if k == "model" {
@@ -338,12 +341,6 @@ impl KnwfParser {
                                 }
                             }
                         }
-                    }
-                }
-                Ok(Event::End(ref e)) => {
-                    let tag = String::from_utf8_lossy(e.name().as_ref());
-                    if tag == "entry" && in_model {
-                        // Check if we're leaving the model entry
                     }
                 }
                 Ok(Event::Eof) => break,
