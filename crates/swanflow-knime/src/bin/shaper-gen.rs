@@ -4,6 +4,7 @@
 //!   cargo run --bin shaper-gen -- /tmp/test_walmart.knwf -o /tmp/dashboard.sql
 //!   cargo run --bin shaper-gen -- /tmp/test_walmart.knwf   # stdout
 
+use std::path::PathBuf;
 use swanflow_knime::{shaper::write_shaper_sql, KnwfParser};
 
 fn main() {

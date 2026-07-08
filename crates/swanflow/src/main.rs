@@ -58,6 +58,13 @@ enum KnimeCommands {
         /// Output SQL file (optional, writes to stdout if omitted)
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
+        /// Push directly to Shaper's SQLite database
+        /// (default: ~/.shaper/shaper_internal.sqlite)
+        #[arg(long)]
+        push: bool,
+        /// Override Shaper SQLite path (used with --push)
+        #[arg(long, default_value_t = default_shaper_db())]
+        shaper_db: String,
     },
 }
 
@@ -221,8 +228,13 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Knime { command } => match command {
-            KnimeCommands::Shaper { input, output } => {
-                println!("🧩 Parsing KNIME workflow: {:?}", input);
+            KnimeCommands::Shaper {
+                input,
+                output,
+                push,
+                shaper_db,
+            } => {
+                println!("\u{1f9e9} Parsing KNIME workflow: {:?}", input);
                 let archive = KnwfParser::parse_file(&input)?;
                 println!(
                     "   Nodes: {}  Edges: {}  Metanodes: {}",
@@ -230,19 +242,58 @@ async fn main() -> anyhow::Result<()> {
                     archive.edges.len(),
                     archive.metanodes.len(),
                 );
-                let queries = swanflow_knime::shaper::generate_shaper_queries(&archive);
-                if queries.is_empty() {
-                    println!("   No visualization nodes found in this workflow.");
-                } else {
-                    println!("   Generated {} Shaper queries.", queries.len());
-                    if let Some(out) = output {
-                        let out_path = out.display().to_string();
-                        swanflow_knime::shaper::write_shaper_sql(&archive, &out_path)?;
-                        println!("✅ SQL written to {:?}", out);
+
+                if push {
+                    let queries = swanflow_knime::shaper::generate_shaper_queries(&archive);
+                    if queries.is_empty() {
+                        println!("   No visualization nodes found — nothing pushed.");
                     } else {
-                        for q in &queries {
-                            println!("\n-- [{}] {}", q.chart_type, q.node_name);
-                            println!("{};", q.sql);
+                        // Use DuckDB to ATTACH Shaper's SQLite and INSERT directly
+                        let db = duckdb::Connection::open_in_memory()
+                            .map_err(|e| anyhow::anyhow!("DuckDB: {}", e))?;
+                        db.execute_batch("INSTALL sqlite; LOAD sqlite;")
+                            .map_err(|e| anyhow::anyhow!("sqlite ext: {}", e))?;
+                        db.execute_batch(&format!(
+                            "ATTACH '{}' AS shaper (TYPE SQLITE);",
+                            shaper_db
+                        ))?;
+
+                        let content: String = queries
+                            .iter()
+                            .map(|q| format!("-- [{}] {}\n{};\n", q.chart_type, q.node_name, q.sql))
+                            .collect();
+                        let id = uuid::Uuid::new_v4().simple().to_string();
+                        let name = format!(
+                            "SwanFlow {}",
+                            archive.workflow_meta.name.as_deref().unwrap_or("Untitled")
+                        );
+
+                        db.execute(
+                            "INSERT INTO shaper.apps (id, name, content, created_at, updated_at, type, visibility)
+                             VALUES (?, ?, ?, now(), now(), 'dashboard', 'private')",
+                            duckdb::params![id, name, content],
+                        )?;
+
+                        println!(
+                            "✅ Pushed dashboard '{}' to Shaper SQLite",
+                            name
+                        );
+                    }
+                } else {
+                    let queries = swanflow_knime::shaper::generate_shaper_queries(&archive);
+                    if queries.is_empty() {
+                        println!("   No visualization nodes found in this workflow.");
+                    } else {
+                        println!("   Generated {} Shaper queries.", queries.len());
+                        if let Some(out) = output {
+                            let out_path = out.display().to_string();
+                            swanflow_knime::shaper::write_shaper_sql(&archive, &out_path)?;
+                            println!("✅ SQL written to {:?}", out);
+                        } else {
+                            for q in &queries {
+                                println!("\n-- [{}] {}", q.chart_type, q.node_name);
+                                println!("{};", q.sql);
+                            }
                         }
                     }
                 }
@@ -334,4 +385,9 @@ fn load_workflow(file: PathBuf) -> anyhow::Result<Workflow> {
         serde_json::from_str(&content)?
     };
     Ok(workflow)
+}
+
+fn default_shaper_db() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    format!("{home}/.shaper/shaper_internal.sqlite")
 }

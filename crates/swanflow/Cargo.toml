@@ -26,7 +26,6 @@ test = false
 
 [dependencies]
 swanflow-core = { path = "../swanflow-core" }
-swanflow-knime = { path = "../swanflow-knime" }
 datafusion = "52.1.0"
 arrow = { version = "57.0", features = ["ffi", "pyarrow"] }
 tokio = { version = "1.0", features = ["full"] }

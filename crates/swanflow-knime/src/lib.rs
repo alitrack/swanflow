@@ -30,6 +30,7 @@ pub use parser::KnwfParser;
 pub use mapper::KnimeNodeMapper;
 pub use mapper::KnimeNodeMapper as Mapper;
 pub use types::KnwfArchive;
+pub use shaper;
 
 use swanflow_core::graph::Workflow;
 
