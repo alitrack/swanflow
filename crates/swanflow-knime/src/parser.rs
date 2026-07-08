@@ -65,7 +65,7 @@ impl KnwfParser {
         };
 
         // Step 3: Parse workflow.knime XML
-        let wf_root: serde_xml_rs::value::Element = xml_from_str(&wf_xml)?;
+        let wf_root: serde_xml_rs::Element = xml_from_str(&wf_xml)?;
         let (nodes_raw, edges) = Self::extract_nodes_and_edges(&wf_root)?;
 
         // Step 4: Build a name→node_raw lookup from the raw nodes
@@ -163,7 +163,7 @@ impl KnwfParser {
 
     /// Extract nodes and edges from the workflow.knime XML root element.
     fn extract_nodes_and_edges(
-        root: &serde_xml_rs::value::Element,
+        root: &serde_xml_rs::Element,
     ) -> KnimeResult<(Vec<RawNode>, Vec<KnimeEdge>)> {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
@@ -214,7 +214,7 @@ impl KnwfParser {
         Ok((nodes, edges))
     }
 
-    fn parse_node_entry(entry: &serde_xml_rs::value::Element) -> Option<RawNode> {
+    fn parse_node_entry(entry: &serde_xml_rs::Element) -> Option<RawNode> {
         let id = entry
             .attributes
             .iter()
@@ -277,7 +277,7 @@ impl KnwfParser {
         })
     }
 
-    fn parse_edge_entry(entry: &serde_xml_rs::value::Element) -> Option<KnimeEdge> {
+    fn parse_edge_entry(entry: &serde_xml_rs::Element) -> Option<KnimeEdge> {
         let config = entry
             .children
             .iter()
@@ -328,7 +328,7 @@ impl KnwfParser {
             return serde_json::Value::Null;
         }
 
-        let root: Result<serde_xml_rs::value::Element, _> = xml_from_str(xml);
+        let root: Result<serde_xml_rs::Element, _> = xml_from_str(xml);
         let root = match root {
             Ok(r) => r,
             Err(_) => return serde_json::Value::Null,
@@ -359,7 +359,7 @@ impl KnwfParser {
     }
 
     /// Convert KNIME XML config tree to JSON, stripping KNIME type wrappers.
-    fn config_to_json(entry: &serde_xml_rs::value::Element) -> serde_json::Value {
+    fn config_to_json(entry: &serde_xml_rs::Element) -> serde_json::Value {
         let entry_type = entry
             .attributes
             .iter()
