@@ -44,7 +44,7 @@ impl KnwfParser {
     }
 
     /// Parse a workflow at the given ZIP prefix ("" = root).
-    fn parse_zip_at(
+    pub(crate) fn parse_zip_at(
         archive: &mut zip::ZipArchive<impl Read + std::io::Seek>,
         prefix: &str,
     ) -> KnimeResult<KnwfArchive> {

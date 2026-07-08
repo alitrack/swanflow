@@ -102,3 +102,101 @@ fn test_metanode_parsing() {
             id, name, sub.nodes.len(), sub.edges.len());
     }
 }
+
+#[test]
+fn test_parse_knar() {
+    let wfs = swanflow_knime::parse_knar("/Users/sa/ws/npp/knime/KNIME_study.knar")
+        .expect("Failed to parse .knar");
+    
+    println!("Total workflows parsed: {}", wfs.len());
+    
+    let mut total_nodes = 0usize;
+    let mut total_edges = 0usize;
+    let mut total_metanodes = 0usize;
+    
+    for (name, knwf) in &wfs {
+        let meta = knwf.nodes.iter().filter(|n| n.is_metanode).count();
+        let parsed_meta = knwf.metanodes.len();
+        total_nodes += knwf.nodes.len();
+        total_edges += knwf.edges.len();
+        total_metanodes += meta;
+        println!("  {:40} {:3} nodes  {:3} edges  meta={}/{}",
+            name, knwf.nodes.len(), knwf.edges.len(), meta, parsed_meta);
+    }
+    
+    println!("---");
+    println!("Total: {} workflows, {} nodes, {} edges, {} metanodes",
+        wfs.len(), total_nodes, total_edges, total_metanodes);
+    
+    assert!(wfs.len() > 50, "Expected 50+ workflows in .knar");
+    assert!(total_nodes > 100, "Expected 100+ total nodes");
+}
+
+#[tokio::test]
+async fn test_mapper_coverage() {
+    // Test against the Walmart workflow
+    let knwf = KnwfParser::parse_file("/tmp/test_walmart.knwf")
+        .expect("Failed to parse");
+    
+    // Collect all node names from all 85 workflows in .knar
+    
+    let mapper = swanflow_knime::KnimeNodeMapper::new();
+    
+    // Test Walmart specifically
+    let (mapped, unmapped): (Vec<_>, Vec<_>) = knwf.nodes.iter()
+        .partition(|n| {
+            let name = n.name.as_deref().unwrap_or("");
+            // Check if mapper would NOT use pass_through
+            let (sw_type, _) = mapper.resolve_node(Some(name), &n.settings);
+            sw_type != "core.util.unknown"
+        });
+    
+    println!("Walmart workflow: {} nodes total", knwf.nodes.len());
+    println!("  Mapped:   {}", mapped.len());
+    println!("  Fallback: {}", unmapped.len());
+    
+    for n in &unmapped {
+        println!("    UNMAPPED: {}", n.name.as_deref().unwrap_or("?"));
+    }
+}
+
+// Test full .knar coverage
+#[test]
+fn test_knar_mapper_coverage() {
+    let wfs = swanflow_knime::parse_knar("/Users/sa/ws/npp/knime/KNIME_study.knar")
+        .expect("Failed to parse");
+    
+    let mapper = swanflow_knime::KnimeNodeMapper::new();
+    let mut total = 0usize;
+    let mut mapped = 0usize;
+    let mut unmapped_names: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    
+    for (_wf_name, knwf) in &wfs {
+        for node in &knwf.nodes {
+            total += 1;
+            let name = node.name.as_deref().unwrap_or("");
+            let (sw_type, config) = mapper.resolve_node(Some(name), &node.settings);
+            if sw_type == "core.util.unknown" {
+                *unmapped_names.entry(name.to_string()).or_default() += 1;
+                // Also flag WASM fallbacks
+                if config.get("wasm_fallback").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    // Java snippets counted as WASM (semi-mapped)
+                }
+            } else {
+                mapped += 1;
+            }
+        }
+    }
+    
+    let coverage = mapped as f64 / total as f64 * 100.0;
+    println!("KNIME Study .knar: {}/{} nodes mapped ({:.1}%)", mapped, total, coverage);
+    println!("Unmapped node types: {}", unmapped_names.len());
+    
+    let mut sorted: Vec<_> = unmapped_names.into_iter().collect();
+    sorted.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+    for (name, count) in sorted.iter().take(20) {
+        println!("  {:4}  {}", count, name);
+    }
+    
+    assert!(coverage > 80.0, "Expected >60% coverage, got {:.1}%", coverage);
+}
