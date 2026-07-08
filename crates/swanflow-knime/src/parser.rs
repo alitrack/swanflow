@@ -7,6 +7,24 @@ use quick_xml::Reader;
 use crate::error::{KnimeError, KnimeResult};
 use crate::types::{KnimeEdge, KnimeNode, KnwfArchive, WorkflowMeta};
 
+/// Collect XML element attributes into a Vec of (key, value) strings.
+fn collect_attrs(e: &quick_xml::events::BytesStart) -> Vec<(String, String)> {
+    e.attributes()
+        .flatten()
+        .map(|a| {
+            (
+                String::from_utf8_lossy(a.key.as_ref()).to_string(),
+                String::from_utf8_lossy(&a.value).to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Get the value of a named attribute.
+fn get_attr(attrs: &[(String, String)], name: &str) -> Option<String> {
+    attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+}
+
 /// Parser for `.knwf` workflow archives.
 pub struct KnwfParser;
 
@@ -282,7 +300,11 @@ impl KnwfParser {
         Ok((nodes, edges))
     }
 
-    /// Parse KNIME settings.xml into simplified JSON.
+    /// Parse KNIME settings.xml into nested JSON.
+    ///
+    /// Uses a stack-based approach to capture nested `<config>` elements
+    /// and their `<entry key="X" value="Y"/>` children. The result preserves
+    /// the full config hierarchy.
     fn parse_settings_xml(xml: &str) -> serde_json::Value {
         if xml.is_empty() {
             return serde_json::Value::Null;
@@ -290,26 +312,58 @@ impl KnwfParser {
         let mut reader = Reader::from_str(xml);
         reader.config_mut().trim_text(true);
         let mut buf = Vec::new();
-        let mut result = serde_json::Map::new();
-        let mut in_model = false;
+
+        // Stack of (config_name, Map) — push on <config>, pop on </config>
+        let mut stack: Vec<(String, serde_json::Map<String, serde_json::Value>)> = Vec::new();
 
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
-                    let key = e.attributes().flatten()
-                        .find(|a| a.key.as_ref() == b"key")
-                        .map(|a| String::from_utf8_lossy(&a.value).to_string());
-                    let value = e.attributes().flatten()
-                        .find(|a| a.key.as_ref() == b"value")
-                        .map(|a| String::from_utf8_lossy(&a.value).to_string());
+                Ok(Event::Start(ref e)) => {
+                    let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let attrs = collect_attrs(e);
 
-                    if let Some(k) = key {
-                        if k == "model" {
-                            in_model = true;
-                        } else if in_model {
-                            if let Some(v) = value {
-                                result.insert(k, serde_json::Value::String(v));
+                    if tag == "config" {
+                        if let Some(k) = get_attr(&attrs, "key") {
+                            stack.push((k, serde_json::Map::new()));
+                        }
+                    } else if tag == "entry" {
+                        if let Some(k) = get_attr(&attrs, "key") {
+                            if let Some(v) = get_attr(&attrs, "value") {
+                                if let Some((_, current)) = stack.last_mut() {
+                                    current.insert(k, serde_json::Value::String(v));
+                                }
                             }
+                        }
+                    }
+                }
+                Ok(Event::Empty(ref e)) => {
+                    let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let attrs = collect_attrs(e);
+
+                    if tag == "entry" {
+                        if let Some(k) = get_attr(&attrs, "key") {
+                            if let Some(v) = get_attr(&attrs, "value") {
+                                if let Some((_, current)) = stack.last_mut() {
+                                    current.insert(k, serde_json::Value::String(v));
+                                }
+                            }
+                        }
+                    }
+                    // Self-closing <config key="X"/> — rare but valid
+                    if tag == "config" {
+                        if let Some(k) = get_attr(&attrs, "key") {
+                            if let Some((_, current)) = stack.last_mut() {
+                                current.insert(k, serde_json::Value::Object(Default::default()));
+                            }
+                        }
+                    }
+                }
+                Ok(Event::End(ref e)) => {
+                    let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    if tag == "config" && stack.len() > 1 {
+                        let (name, map) = stack.pop().unwrap();
+                        if let Some((_, parent)) = stack.last_mut() {
+                            parent.insert(name, serde_json::Value::Object(map));
                         }
                     }
                 }
@@ -320,10 +374,15 @@ impl KnwfParser {
             buf.clear();
         }
 
-        if result.is_empty() {
-            serde_json::Value::Null
+        // Return the root config's object
+        if let Some((_, root_map)) = stack.pop() {
+            if root_map.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::Object(root_map)
+            }
         } else {
-            serde_json::Value::Object(result)
+            serde_json::Value::Null
         }
     }
 }

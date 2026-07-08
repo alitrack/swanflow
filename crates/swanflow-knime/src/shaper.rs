@@ -349,12 +349,15 @@ impl ColumnInfo {
 
 /// Extract column names and types from a node's settings Value.
 ///
-/// KNIME CSV Reader stores column info at:
-///   settings.model.table_spec_config_Internals.individual_specs.<path>.<N>
-///   with keys "name" and "type.class".
+/// With the stack-based parser, settings have a nested structure like:
+///   settings["settings.xml"]["model"]["table_spec_config_Internals"]...
+/// or just:
+///   settings["model"]["table_spec_config_Internals"]...  (legacy flat format)
 fn extract_columns(settings: &Value) -> Vec<ColumnInfo> {
-    let model = match settings.get("model") {
-        Some(v) => v,
+    // Find the `model` object — may be wrapped in root config key
+    let model = find_model(settings);
+    let model = match model {
+        Some(m) => m,
         None => return vec![],
     };
 
@@ -368,7 +371,6 @@ fn extract_columns(settings: &Value) -> Vec<ColumnInfo> {
         None => return vec![],
     };
 
-    // individual_specs has keys like "/path/to/file.csv" → column configs
     for (_path, file_spec) in specs.as_object().unwrap_or(&Default::default()) {
         let mut cols = Vec::new();
         for i in 0.. {
@@ -398,7 +400,53 @@ fn extract_columns(settings: &Value) -> Vec<ColumnInfo> {
     vec![]
 }
 
-/// Pick reasonable X and Y axis columns.
+/// Find the `model` config in settings JSON. Handles both:
+/// - New format: `{"settings.xml": {"model": {...}, ...}}`
+/// - Legacy flat: `{"model": {...}}`  
+fn find_model(settings: &Value) -> Option<&Value> {
+    // Direct model (legacy flat format)
+    if let Some(model) = settings.get("model") {
+        return Some(model);
+    }
+    // Root-wrapped: find first config key that contains "model"
+    if let Some(obj) = settings.as_object() {
+        for (_root_key, root_val) in obj {
+            if let Some(model) = root_val.get("model") {
+                return Some(model);
+            }
+        }
+    }
+    None
+}
+
+/// Extract the data file path from a source node's settings.
+fn source_path(settings: &Value) -> String {
+    let model = find_model(settings);
+
+    // Try KNIME Relative-to-workflow-data path
+    if let Some(path) = model
+        .and_then(|m| m.get("table_spec_config_Internals"))
+        .and_then(|t| t.get("source_group_id"))
+        .and_then(|v| v.as_str())
+    {
+        let filename = path.rsplit('/').next().unwrap_or(path);
+        return filename.to_string();
+    }
+
+    // Try direct file_selection path
+    if let Some(path) = model
+        .and_then(|m| m.get("settings"))
+        .and_then(|s| s.get("file_selection"))
+        .and_then(|f| f.get("path"))
+        .and_then(|p| p.get("path"))
+        .and_then(|v| v.as_str())
+    {
+        let filename = path.rsplit('/').next().unwrap_or(path);
+        return filename.to_string();
+    }
+
+    "data.csv".to_string()
+}
 fn pick_axes(columns: &[ColumnInfo], _chart_type: &str) -> (String, String) {
     // X: first non-numeric (category) column, or first column if all numeric
     let x = columns
@@ -417,31 +465,6 @@ fn pick_axes(columns: &[ColumnInfo], _chart_type: &str) -> (String, String) {
         .clone();
 
     (x, y)
-}
-
-/// Extract the data file path from a source node's settings.
-fn source_path(settings: &Value) -> String {
-    // Try KNIME Relative-to-workflow-data path
-    if let Some(path) = settings
-        .pointer("/model/table_spec_config_Internals/source_group_id")
-        .and_then(|v| v.as_str())
-    {
-        // Convert KNIME relative path to actual filename
-        let filename = path.rsplit('/').next().unwrap_or(path);
-        return filename.to_string();
-    }
-
-    // Try direct file_selection path
-    if let Some(path) = settings
-        .pointer("/settings/file_selection/path/path")
-        .or_else(|| settings.pointer("/model/settings/file_selection/path/path"))
-        .and_then(|v| v.as_str())
-    {
-        let filename = path.rsplit('/').next().unwrap_or(path);
-        return filename.to_string();
-    }
-
-    "data.csv".to_string()
 }
 
 /// Map KNIME chart name to Shaper annotation suffix.
@@ -519,7 +542,7 @@ mod tests {
     /// table_spec_config_Internals with column info) are NOT parsed yet.
     /// Once the parser is enhanced, extract_columns will work.
     #[test]
-    fn test_extract_columns_parser_limited() {
+    fn test_extract_columns_parser_enhanced() {
         let archive = KnwfParser::parse_file("/tmp/test_walmart.knwf")
             .expect("Failed to parse Walmart workflow");
 
@@ -535,11 +558,14 @@ mod tests {
             .expect("CSV Reader not found");
 
         let columns = extract_columns(&csv_node.settings);
-        // Current parser doesn't capture nested configs → empty result
-        println!(
-            "Columns extracted (limited parser): {} — TODO: enhance parser for nested configs",
-            columns.len()
-        );
+        assert_eq!(columns.len(), 8, "Walmart.csv has 8 columns");
+        assert_eq!(columns[0].name, "Store");
+        assert_eq!(columns[1].name, "Date");
+        assert_eq!(columns[2].name, "Weekly_Sales");
+        println!("Extracted {} columns:", columns.len());
+        for c in &columns {
+            println!("  {} ({}) numeric={}", c.name, c.java_type, c.is_numeric());
+        }
     }
 
     #[test]
