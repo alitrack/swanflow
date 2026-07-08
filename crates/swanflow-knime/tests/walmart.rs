@@ -43,7 +43,7 @@ async fn test_parse_walmart_workflow() {
 
     // Verify we have CSV Reader nodes
     let csv_count = knwf.nodes.iter()
-        .filter(|n| n.node_type.as_deref().map(|t| t.contains("CSVReader")).unwrap_or(false))
+        .filter(|n| n.name.as_deref().map(|n| n.contains("CSV Reader")).unwrap_or(false))
         .count();
     println!("\nCSV Reader nodes: {}", csv_count);
     assert!(csv_count > 0, "Expected at least 1 CSV Reader");
