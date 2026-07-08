@@ -31,7 +31,7 @@ impl KnwfParser {
     }
 
     /// Find a file entry by name suffix anywhere in the ZIP.
-    fn find_entry(archive: &zip::ZipArchive<impl Read + std::io::Seek>, name: &str) -> KnimeResult<String> {
+    fn find_entry(archive: &mut zip::ZipArchive<impl Read + std::io::Seek>, name: &str) -> KnimeResult<String> {
         for i in 0..archive.len() {
             let file = archive.by_index(i).map_err(KnimeError::Zip)?;
             let fname = file.name().to_string();

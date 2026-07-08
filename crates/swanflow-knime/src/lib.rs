@@ -28,7 +28,7 @@ pub use error::{KnimeError, KnimeResult};
 pub use parser::KnwfParser;
 pub use mapper::KnimeNodeMapper;
 
-use swanflow::core::graph::Workflow;
+use swanflow_core::graph::Workflow;
 
 /// Import a .knwf file and convert to SwanFlow Workflow.
 pub async fn import_knwf(path: &str) -> KnimeResult<Workflow> {
