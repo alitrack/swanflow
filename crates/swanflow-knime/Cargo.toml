@@ -28,6 +28,3 @@ tokio = { version = "1", features = ["rt", "macros"] }
 [[bin]]
 name = "shaper-gen"
 path = "src/bin/shaper-gen.rs"
-[[example]]
-name = "debug_knar"
-path = "examples/debug_knar.rs"
