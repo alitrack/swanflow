@@ -230,17 +230,18 @@ impl KnwfParser {
 
                         if in_node_entry {
                             if let Some(ref mut node) = current_node {
-                                if let Some(k) = key {
+                                if let Some(k) = &key {
+                                    let v = value.as_deref().unwrap_or("");
                                     match k.as_str() {
-                                        "node_type" => node.node_type = value,
+                                        "node_type" => node.node_type = value.clone(),
                                         "custom_description" | "name" => {
-                                            if node.name.is_none() { node.name = value; }
+                                            if node.name.is_none() { node.name = value.clone(); }
                                         }
-                                        "state" => node.state = value,
-                                        "num_inputs" => node.num_inputs = value.as_deref().and_then(|v| v.parse().ok()),
-                                        "num_outputs" => node.num_outputs = value.as_deref().and_then(|v| v.parse().ok()),
-                                        "x" => node.x = value.as_deref().and_then(|v| v.parse().ok()),
-                                        "y" => node.y = value.as_deref().and_then(|v| v.parse().ok()),
+                                        "state" => node.state = value.clone(),
+                                        "num_inputs" => node.num_inputs = v.parse().ok(),
+                                        "num_outputs" => node.num_outputs = v.parse().ok(),
+                                        "x" => node.x = v.parse().ok(),
+                                        "y" => node.y = v.parse().ok(),
                                         _ => {}
                                     }
                                 }
