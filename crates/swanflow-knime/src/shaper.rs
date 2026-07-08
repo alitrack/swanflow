@@ -204,22 +204,16 @@ fn build_shaper_sql(trace: &UpstreamTrace, chart_type: &str) -> String {
             let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
             format!("SELECT {} FROM '{}'", cols.join(", "), source_path(&trace.source_node.settings))
         }
-        "PIE" | "BARCHART" | "LINE" | "AREA" | "SCATTER" | "HISTOGRAM"
-        | "BOXPLOT" | "DENSITY" | "VIOLIN" | "BUBBLE" | "RADAR" => {
+        "PIECHART" | "BARCHART" | "LINECHART" | "SCATTERPLOT" | "BUBBLECHART" => {
             // Most charts need X axis (category) + Y axis (value)
             let x_suffix = suffix_annotation(chart_type, "xaxis");
             let y_suffix = suffix_annotation(chart_type, "value");
 
-            let x_expr = if chart_type == "HISTOGRAM" || chart_type == "DENSITY" {
-                // These only need one axis
-                format!("{}::{}", y_col, y_suffix)
-            } else {
-                format!(
-                    "{}::{},\n  {}::{}",
-                    x_col, x_suffix,
-                    y_col, y_suffix,
-                )
-            };
+            let x_expr = format!(
+                "{}::{},\n  {}::{}",
+                x_col, x_suffix,
+                y_col, y_suffix,
+            );
 
             let source = source_path(&trace.source_node.settings);
 
@@ -235,15 +229,11 @@ fn build_shaper_sql(trace: &UpstreamTrace, chart_type: &str) -> String {
                     "SELECT {}\nFROM '{}'\nGROUP BY {}",
                     x_expr, source, x_col,
                 )
-            } else if chart_type != "HISTOGRAM" && chart_type != "DENSITY" {
-                // For non-aggregated charts, use SUM/COUNT for Y
-                format!(
-                    "SELECT {}\nFROM '{}'\nGROUP BY {}",
-                    format!("{}::{},\n  COUNT(*)::{}", x_col, x_suffix, y_suffix),
-                    source, x_col,
-                )
             } else {
-                format!("SELECT {}\nFROM '{}'", x_expr, source)
+                format!(
+                    "SELECT {}::XAXIS,\n  COUNT(*)::{}\nFROM '{}'\nGROUP BY {}",
+                    x_col, chart_type, source, x_col,
+                )
             }
         }
         "HEATMAP" => {
@@ -441,34 +431,36 @@ fn pick_axes(columns: &[ColumnInfo], _chart_type: &str) -> (String, String) {
 }
 
 /// Map KNIME chart name to Shaper annotation suffix.
+/// Only types confirmed in Shaper's SQL reference:
+/// https://taleshape.com/shaper/docs/dashboard-sql-reference/
 fn resolve_chart_type(name: &str) -> Option<&'static str> {
     for &(knime_name, shaper_type) in &[
         ("Bar Chart", "BARCHART"),
-        ("Line Plot", "LINE"),
-        ("Pie Chart", "PIE"),
-        ("Scatter Plot", "SCATTER"),
-        ("Scatter Plot Matrix", "SCATTER"),
-        ("Histogram", "HISTOGRAM"),
+        ("Line Plot", "LINECHART"),
+        ("Pie Chart", "PIECHART"),
+        ("Scatter Plot", "SCATTERPLOT"),
+        ("Scatter Plot Matrix", "SCATTERPLOT"),
+        ("Histogram", "BARCHART"),       // Shaper has no HISTOGRAM type
         ("Heatmap", "HEATMAP"),
-        ("Box Plot", "BOXPLOT"),
-        ("Stacked Area Chart", "AREA"),
+        ("Box Plot", "LINECHART"),        // Shaper has no BOXPLOT type
+        ("Stacked Area Chart", "BARCHART"), // Shaper has no AREACHART
         ("Sunburst Chart", "SUNBURST"),
-        ("Density Plot", "DENSITY"),
-        ("2D Density Plot", "DENSITY"),
+        ("Density Plot", "LINECHART"),    // Shaper has no DENSITYPLOT type
+        ("2D Density Plot", "LINECHART"),
         ("Table View", "TABLE"),
         ("Tile View", "TABLE"),
         ("Table Editor", "TABLE"),
         ("Generic ECharts View", "ECHART"),
         ("Generic JavaScript View", "ECHART"),
         ("Parallel Coordinates Plot", "PARALLEL"),
-        ("Bubble Chart", "BUBBLE"),
-        ("Radar Plot", "RADAR"),
-        ("Radar Plot Appender", "RADAR"),
-        ("Violin Plot", "VIOLIN"),
-        ("Contour Plot", "CONTOUR"),
-        ("Error Bars Plot", "ERRORBAR"),
-        ("Tag Cloud", "TAGCLOUD"),
-        ("Spark Line Appender", "SPARKLINE"),
+        ("Bubble Chart", "BUBBLECHART"),
+        ("Radar Plot", "SCATTERPLOT"),    // Shaper has no RADAR type
+        ("Radar Plot Appender", "SCATTERPLOT"),
+        ("Violin Plot", "BARCHART"),      // Shaper has no VIOLINPLOT
+        ("Contour Plot", "HEATMAP"),
+        ("Error Bars Plot", "SCATTERPLOT"),
+        ("Tag Cloud", "TABLE"),
+        ("Spark Line Appender", "LINECHART"),
     ] {
         if name == knime_name {
             return Some(shaper_type);
