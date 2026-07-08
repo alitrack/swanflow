@@ -8,6 +8,7 @@ use swanflow::mcp::client::McpClient;
 use swanflow::mcp::server::McpServer;
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeEvent;
+use swanflow_knime::KnwfParser;
 
 #[derive(Parser)]
 #[command(name = "swanflow")]
@@ -39,6 +40,24 @@ enum Commands {
     Connect {
         #[command(subcommand)]
         command: ConnectCommands,
+    },
+
+    /// KNIME workflow import and conversion
+    Knime {
+        #[command(subcommand)]
+        command: KnimeCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum KnimeCommands {
+    /// Convert KNIME workflow (.knwf/.knar) to Shaper SQL dashboard queries
+    Shaper {
+        /// Path to KNIME workflow file (.knwf or .knar)
+        input: PathBuf,
+        /// Output SQL file (optional, writes to stdout if omitted)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -199,6 +218,34 @@ async fn main() -> anyhow::Result<()> {
 
                 println!("📬 Result:");
                 println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+        },
+        Commands::Knime { command } => match command {
+            KnimeCommands::Shaper { input, output } => {
+                println!("🧩 Parsing KNIME workflow: {:?}", input);
+                let archive = KnwfParser::parse_file(&input)?;
+                println!(
+                    "   Nodes: {}  Edges: {}  Metanodes: {}",
+                    archive.nodes.len(),
+                    archive.edges.len(),
+                    archive.metanodes.len(),
+                );
+                let queries = swanflow_knime::shaper::generate_shaper_queries(&archive);
+                if queries.is_empty() {
+                    println!("   No visualization nodes found in this workflow.");
+                } else {
+                    println!("   Generated {} Shaper queries.", queries.len());
+                    if let Some(out) = output {
+                        let out_path = out.display().to_string();
+                        swanflow_knime::shaper::write_shaper_sql(&archive, &out_path)?;
+                        println!("✅ SQL written to {:?}", out);
+                    } else {
+                        for q in &queries {
+                            println!("\n-- [{}] {}", q.chart_type, q.node_name);
+                            println!("{};", q.sql);
+                        }
+                    }
+                }
             }
         },
         Commands::Connect { command } => match command {
