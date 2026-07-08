@@ -33,8 +33,6 @@ struct UpstreamTrace {
     source_node: KnimeNode,
     /// Intermediate transform nodes in order (nearest first)
     pipeline: Vec<KnimeNode>,
-    /// Distance from viz node to data source
-    distance: usize,
 }
 
 /// Known data-source node name prefixes.
@@ -44,31 +42,7 @@ const DATA_SOURCE_NAMES: &[&str] = &[
     "Database Reader", "Table Creator", "Create Table",
 ];
 
-/// Known visualization chart types from the mapper.
-const CHART_SUFFIX_MAP: &[(&str, &str)] = &[
-    ("BARCHART", "BARCHART"), ("LINE", "LINE"), ("PIE", "PIE"),
-    ("SCATTER", "SCATTER"), ("HISTOGRAM", "HISTOGRAM"),
-    ("HEATMAP", "HEATMAP"), ("BOXPLOT", "BOXPLOT"),
-    ("AREA", "AREA"), ("SUNBURST", "SUNBURST"),
-    ("DENSITY", "DENSITY"), ("TABLE", "TABLE"),
-    ("ECHART", "ECHART"), ("PARALLEL", "PARALLEL"),
-    ("BUBBLE", "BUBBLE"), ("RADAR", "RADAR"),
-    ("VIOLIN", "VIOLIN"), ("CONTOUR", "CONTOUR"),
-    ("ERRORBAR", "ERRORBAR"), ("TAGCLOUD", "TAGCLOUD"),
-    ("SPARKLINE", "SPARKLINE"),
-];
-
-/// Node-name patterns that identify visualization nodes.
-const VIZ_NAMES: &[&str] = &[
-    "Bar Chart", "Line Plot", "Pie Chart", "Scatter Plot",
-    "Scatter Plot Matrix", "Histogram", "Heatmap", "Box Plot",
-    "Stacked Area Chart", "Sunburst Chart", "Density Plot",
-    "Table View", "Generic ECharts View", "Parallel Coordinates Plot",
-    "Bubble Chart", "Radar Plot", "Violin Plot", "Contour Plot",
-    "2D Density Plot", "Error Bars Plot", "Generic JavaScript View",
-    "Tile View", "Table Editor", "Tag Cloud", "Radar Plot Appender",
-    "Spark Line Appender", "Color Manager",
-];
+// (shaper-specific helpers — see mapper.rs for chart-type resolution)
 
 // ─── Public API ──────────────────────────────────────────────────────
 
@@ -182,7 +156,6 @@ fn trace_upstream<'a>(
             return Some(UpstreamTrace {
                 source_node: (*current).clone(),
                 pipeline,
-                distance: depth,
             });
         }
 
@@ -604,9 +577,8 @@ mod tests {
                 let src_name = t.source_node.name.as_deref().unwrap_or("");
                 if src_name.contains("CSV Reader") {
                     println!(
-                        "Node '{}' traces upstream {} steps to '{}'",
+                        "Node '{}' traces upstream to '{}'",
                         node.name.as_deref().unwrap_or("?"),
-                        t.distance,
                         src_name,
                     );
                     return; // Success
