@@ -53,8 +53,8 @@ async fn test_parse_walmart_workflow() {
     let wf = import_knwf("/tmp/test_walmart.knwf")
         .await
         .expect("Failed to convert to SwanFlow");
-    println!("SwanFlow nodes: {}", wf.nodes.len());
-    println!("SwanFlow edges: {}", wf.edges.len());
+    println!("SwanFlow nodes: {}", wf.graph.node_count());
+    println!("SwanFlow edges: {}", wf.graph.edge_count());
 }
 
 #[test]
