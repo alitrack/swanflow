@@ -79,3 +79,26 @@ fn test_parse_zip_structure() {
     assert!(wf_count >= 1);
     assert!(settings_count > 5);
 }
+
+#[test]
+fn test_metanode_parsing() {
+    let knwf = KnwfParser::parse_file("/tmp/test_walmart.knwf")
+        .expect("Failed to parse");
+    
+    let meta_count = knwf.nodes.iter().filter(|n| n.is_metanode).count();
+    println!("Metanodes (top-level): {}", meta_count);
+    println!("Parsed sub-workflows: {}", knwf.metanodes.len());
+    
+    assert!(meta_count > 0, "Expected at least 1 metanode");
+    assert_eq!(meta_count, knwf.metanodes.len(), "All metanodes should have parsed sub-workflows");
+    
+    // Show first metanode internals
+    for (id, sub) in knwf.metanodes.iter().take(1) {
+        let name = knwf.nodes.iter()
+            .find(|n| &n.id == id)
+            .and_then(|n| n.name.as_deref())
+            .unwrap_or("?");
+        println!("Metanode [{}] '{}' : {} nodes, {} edges",
+            id, name, sub.nodes.len(), sub.edges.len());
+    }
+}

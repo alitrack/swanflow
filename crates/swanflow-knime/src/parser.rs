@@ -14,25 +14,26 @@ impl KnwfParser {
     pub fn parse_file<P: AsRef<Path>>(path: P) -> KnimeResult<KnwfArchive> {
         let file = std::fs::File::open(path.as_ref()).map_err(KnimeError::Io)?;
         let mut archive = zip::ZipArchive::new(file).map_err(KnimeError::Zip)?;
-        Self::parse_zip(&mut archive)
+        Self::parse_zip_at(&mut archive, "")
     }
 
     pub fn parse_bytes(data: &[u8]) -> KnimeResult<KnwfArchive> {
         let cursor = std::io::Cursor::new(data);
         let mut archive = zip::ZipArchive::new(cursor).map_err(KnimeError::Zip)?;
-        Self::parse_zip(&mut archive)
+        Self::parse_zip_at(&mut archive, "")
     }
 
-    /// Find the shallowest entry matching `suffix` (fewest path segments).
-    fn find_shallowest(
+    /// Find the shallowest entry matching `suffix` under a given prefix.
+    fn find_shallowest_under(
         archive: &mut zip::ZipArchive<impl Read + std::io::Seek>,
         suffix: &str,
+        prefix: &str,
     ) -> KnimeResult<String> {
         let mut best: Option<(usize, String)> = None;
         for i in 0..archive.len() {
             let Ok(file) = archive.by_index(i) else { continue };
             let fname = file.name().to_string();
-            if fname.ends_with(suffix) {
+            if fname.starts_with(prefix) && fname.ends_with(suffix) {
                 let depth = fname.matches('/').count();
                 if best.as_ref().map_or(true, |(d, _)| depth < *d) {
                     best = Some((depth, fname));
@@ -42,32 +43,35 @@ impl KnwfParser {
         best.map(|(_, s)| s).ok_or(KnimeError::MissingWorkflow)
     }
 
-    fn parse_zip(
+    /// Parse a workflow at the given ZIP prefix ("" = root).
+    fn parse_zip_at(
         archive: &mut zip::ZipArchive<impl Read + std::io::Seek>,
+        prefix: &str,
     ) -> KnimeResult<KnwfArchive> {
-        let (wf_xml, prefix) = {
-            let wf_entry = Self::find_shallowest(archive, "workflow.knime")?;
-            let mut wf_file = archive
-                .by_name(&wf_entry)
-                .map_err(|_| KnimeError::MissingWorkflow)?;
-            let mut xml = String::new();
-            wf_file.read_to_string(&mut xml).map_err(KnimeError::Io)?;
-            let pfx = wf_entry
-                .strip_suffix("workflow.knime")
-                .unwrap_or("")
-                .to_string();
-            (xml, pfx)
-        };
+        let wf_entry = Self::find_shallowest_under(archive, "workflow.knime", prefix)?;
+        let mut wf_file = archive
+            .by_name(&wf_entry)
+            .map_err(|_| KnimeError::MissingWorkflow)?;
+        let mut wf_xml = String::new();
+        wf_file.read_to_string(&mut wf_xml).map_err(KnimeError::Io)?;
+        drop(wf_file);
+
+        // Derive the enclosing directory prefix for this workflow
+        let wf_prefix = wf_entry
+            .strip_suffix("workflow.knime")
+            .unwrap_or("")
+            .to_string();
 
         let (nodes_raw, edges) = Self::parse_workflow_xml(&wf_xml)?;
 
         let all_names: Vec<String> = archive.file_names().map(|n| n.to_string()).collect();
 
+        // Collect settings.xml content
         let node_settings: HashMap<String, String> = {
             let mut map = HashMap::new();
             for raw_node in nodes_raw.iter() {
                 let settings_rel = raw_node.settings_file.as_deref().unwrap_or("");
-                let full_path = format!("{}{}", prefix, settings_rel);
+                let full_path = format!("{}{}", wf_prefix, settings_rel);
                 if let Ok(mut sf) = archive.by_name(&full_path) {
                     let mut xml = String::new();
                     if sf.read_to_string(&mut xml).is_ok() {
@@ -78,19 +82,21 @@ impl KnwfParser {
             map
         };
 
-        let mut nodes = Vec::new();
+        // Build KnimeNode list
+        let mut nodes: Vec<KnimeNode> = Vec::new();
         for raw_node in nodes_raw.iter() {
             let settings_xml = node_settings.get(&raw_node.id);
             let settings = settings_xml
                 .map(|xml| Self::parse_settings_xml(xml))
                 .unwrap_or(serde_json::Value::Null);
 
+            // Detect metanode: check if node dir has its own workflow.knime
             let is_metanode = raw_node
                 .settings_file
                 .as_deref()
                 .map(|sf| {
                     let dir = sf.strip_suffix("settings.xml").unwrap_or(sf);
-                    let meta_wf = format!("{}{}workflow.knime", prefix, dir);
+                    let meta_wf = format!("{}{}workflow.knime", wf_prefix, dir);
                     all_names.iter().any(|n| n == &meta_wf)
                 })
                 .unwrap_or(false);
@@ -109,18 +115,29 @@ impl KnwfParser {
             });
         }
 
+        // Recursively parse metanode sub-workflows
+        let mut metanodes: HashMap<String, KnwfArchive> = HashMap::new();
+        for node in nodes.iter().filter(|n| n.is_metanode) {
+            let node_name = node.name.as_deref().unwrap_or("");
+            // The metanode directory is wf_prefix + node_name + "/"
+            let meta_dir = format!("{}{}/", wf_prefix, node_name);
+            match Self::parse_zip_at(archive, &meta_dir) {
+                Ok(sub) => { metanodes.insert(node.id.clone(), sub); }
+                Err(e) => {
+                    tracing::warn!("Failed to parse metanode {} ({}): {}", node.id, node_name, e);
+                }
+            }
+        }
+
         Ok(KnwfArchive {
             workflow_meta: WorkflowMeta::default(),
             nodes,
             edges,
-            metanodes: HashMap::new(),
+            metanodes,
         })
     }
 
     /// Parse workflow.knime XML.
-    ///
-    /// Uses a state-machine approach: tracks which `<config>` section we're in
-    /// (nodes / connections) and captures `<entry>` attributes within.
     fn parse_workflow_xml(xml: &str) -> KnimeResult<(Vec<RawNode>, Vec<KnimeEdge>)> {
         let mut reader = Reader::from_str(xml);
         reader.config_mut().trim_text(true);
@@ -135,7 +152,7 @@ impl KnwfParser {
         let mut section = Section::Root;
         let mut current_node: Option<RawNodeBuilder> = None;
         let mut current_edge: Option<EdgeBuilder> = None;
-        let mut config_stack: Vec<String> = Vec::new(); // stack of config keys
+        let mut config_stack: Vec<String> = Vec::new();
 
         loop {
             match reader.read_event_into(&mut buf) {
@@ -182,7 +199,6 @@ impl KnwfParser {
                                     "node_type" => node.node_type = value.clone(),
                                     "node_settings_file" => {
                                         node.settings_file = value.clone();
-                                        // Extract name from path like "CSV Reader (#1)/settings.xml"
                                         if node.name.is_none() {
                                             node.name = value.as_ref().map(|s| {
                                                 s.strip_suffix("/settings.xml")
@@ -224,7 +240,6 @@ impl KnwfParser {
                     if tag == "config" {
                         let popped = config_stack.pop().unwrap_or_default();
 
-                        // Complete current node/edge
                         if let Some(builder) = current_node.take() {
                             nodes.push(RawNode {
                                 id: builder.id,
@@ -249,7 +264,6 @@ impl KnwfParser {
                             }
                         }
 
-                        // Pop section
                         if section == Section::Nodes && popped == "nodes" {
                             section = Section::Root;
                         }
