@@ -140,6 +140,80 @@ impl KnimeNodeMapper {
             |s| json!({"query": s.get("sql_string").and_then(|v| v.as_str()).unwrap_or(""),
                        "connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or("")}));
 
+        // ─── IO (v3 / alternative factories) ───
+        def!("org.knime.base.node.io.tablecreator.TableCreator2NodeFactory", "CsvRead",
+            |_| json!({}));
+        def!("org.knime.ext.poi3.node.io.filehandling.excel.reader.ExcelTableReaderNodeFactory", "ExcelRead",
+            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""),
+                       "sheet_name": s.get("sheet_name").and_then(|v| v.as_str())}));
+        def!("org.knime.ext.poi3.node.io.filehandling.excel.writer.ExcelTableWriterNodeFactory", "ExcelWrite",
+            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or("")}));
+        def!("org.knime.base.node.io.filehandling.csv.reader.CSVTableReaderNodeFactory", "CsvRead",
+            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""),
+                       "has_header": s.get("has_column_header").and_then(|v| v.as_bool()).unwrap_or(true)}));
+        def!("org.knime.base.node.io.filehandling.table.reader.KnimeTableReaderNodeFactory", "CsvRead",
+            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or("")}));
+
+        // ─── Transform (v2/v3 / alternative factories) ───
+        def!("org.knime.base.node.preproc.rowkey2.RowKeyNodeFactory2", "Project",
+            |_| json!({"add_rowid": true}));
+        def!("org.knime.base.node.preproc.constantvalue.ConstantValueColumnNodeFactory", "Project",
+            |s| json!({"constant_column": s.get("column_name").and_then(|v| v.as_str()),
+                       "constant_value": s.get("value").and_then(|v| v.as_str())}));
+        def!("org.knime.base.node.preproc.stringmanipulation.StringManipulationNodeFactory", "Project",
+            |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
+                       "expression": s.get("expression").and_then(|v| v.as_str())}));
+        def!("org.knime.expressions.base.node.formulas.FormulasNodeFactory", "Project",
+            |s| json!({"expressions": s.get("formulas")}));
+        def!("org.knime.ext.jep.JEPNodeFactory", "Project",
+            |s| json!({"expression": s.get("expression").and_then(|v| v.as_str())}));
+        def!("org.knime.base.node.rules.engine.RuleEngineNodeFactory", "Condition",
+            |s| json!({"rules": s.get("rules").cloned().unwrap_or(json!([]))}));
+        def!("org.knime.base.node.rules.engine.RuleEngineFilterNodeFactory", "Filter",
+            |s| json!({"rules": s.get("rules").cloned().unwrap_or(json!([]))}));
+        def!("org.knime.base.node.preproc.pivot.Pivot2NodeFactory", "Pivot",
+            |_| json!({}));
+        def!("org.knime.base.node.preproc.joiner3.Joiner3NodeFactory", "Join",
+            |s| json!({
+                "left_keys": s.get("left_column_names").and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+                "right_keys": s.get("right_column_names").and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+                "join_type": s.get("join_type").and_then(|v| v.as_str()).unwrap_or("INNER"),
+            }));
+        def!("org.knime.base.node.preproc.filter.column.DataColumnSpecFilterNodeFactory", "Project",
+            |s| json!({"columns": s.get("included_column_names").and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())}));
+        def!("org.knime.base.node.preproc.table.cropper.TableCropperNodeFactory", "Filter",
+            |s| json!({"row_range": s.get("row_range")}));
+        def!("org.knime.base.node.preproc.transpose.TransposeTableNodeFactory", "Transpose",
+            |_| json!({}));
+        def!("org.knime.base.node.util.sampledata.SampleDataNodeFactory", "Filter",
+            |s| json!({"sample_size": s.get("sample_size"), "seed": s.get("seed")}));
+
+        // ─── Loop / Flow ───
+        def!("org.knime.base.node.meta.looper.LoopEndDynamicNodeFactory", "LoopEnd",
+            |_| json!({}));
+        def!("org.knime.base.node.flowvariable.tablerowtovariable3.TableToVariable3NodeFactory", "FlowVar",
+            |_| json!({}));
+        def!("org.knime.base.node.util.mergevariables.MergeVariables2NodeFactory", "FlowVar",
+            |_| json!({}));
+        def!("org.knime.base.node.meta.looper.variable.start.LoopStartVariable3NodeFactory", "LoopStart",
+            |_| json!({}));
+
+        // ─── Viz / View / Dialog (passthrough data) ───
+        def!("org.knime.base.views.node.textview.TextViewNodeFactory", "Profiler",
+            |_| json!({}));
+        def!("org.knime.js.base.node.configuration.input.integer.IntegerDialogNodeFactory", "FlowVar",
+            |_| json!({}));
+        def!("org.knime.js.base.node.configuration.selection.value.ValueSelectionDialogNodeFactory", "FlowVar",
+            |_| json!({}));
+        def!("org.knime.dynamic.js.v30.DynamicJSNodeFactory", "PythonNode",
+            |s| json!({"script": s.get("js_script").and_then(|v| v.as_str()).unwrap_or(""),
+                       "type": "javascript"}));
+        def!("org.knime.base.node.viz.property.color.ColorManager2NodeFactory", "Profiler",
+            |_| json!({}));
+
         Self { type_map }
     }
 
