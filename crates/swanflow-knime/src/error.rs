@@ -9,7 +9,7 @@ pub enum KnimeError {
     Zip(#[from] zip::result::ZipError),
 
     #[error("XML parse error: {0}")]
-    Xml(#[from] serde_xml_rs::Error),
+    Xml(String),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),

@@ -2,36 +2,31 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
-use serde_xml_rs::from_str as xml_from_str;
-
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use crate::error::{KnimeError, KnimeResult};
 use crate::types::{KnimeEdge, KnimeNode, KnwfArchive, WorkflowMeta};
 
 /// Parser for `.knwf` workflow archives.
-///
-/// A `.knwf` file is a ZIP archive containing:
-/// - `workflow.knime` — XML describing nodes and connections
-/// - `Node Name (#N)/settings.xml` — per-node configuration XML
-/// - Metanode dirs contain their own `workflow.knime` sub-structure
 pub struct KnwfParser;
 
 impl KnwfParser {
-    /// Parse a .knwf file from disk.
     pub fn parse_file<P: AsRef<Path>>(path: P) -> KnimeResult<KnwfArchive> {
         let file = std::fs::File::open(path.as_ref()).map_err(KnimeError::Io)?;
         let mut archive = zip::ZipArchive::new(file).map_err(KnimeError::Zip)?;
         Self::parse_zip(&mut archive)
     }
 
-    /// Parse .knwf from in-memory bytes.
     pub fn parse_bytes(data: &[u8]) -> KnimeResult<KnwfArchive> {
         let cursor = std::io::Cursor::new(data);
         let mut archive = zip::ZipArchive::new(cursor).map_err(KnimeError::Zip)?;
         Self::parse_zip(&mut archive)
     }
 
-    /// Find a file entry by name suffix anywhere in the ZIP.
-    fn find_entry(archive: &mut zip::ZipArchive<impl Read + std::io::Seek>, name: &str) -> KnimeResult<String> {
+    fn find_entry(
+        archive: &mut zip::ZipArchive<impl Read + std::io::Seek>,
+        name: &str,
+    ) -> KnimeResult<String> {
         for i in 0..archive.len() {
             let file = archive.by_index(i).map_err(KnimeError::Zip)?;
             let fname = file.name().to_string();
@@ -57,7 +52,6 @@ impl KnwfParser {
         let prefix = if wf_entry == "workflow.knime" {
             String::new()
         } else {
-            // "Walmart Sales Prediction/workflow.knime" → "Walmart Sales Prediction/"
             wf_entry
                 .strip_suffix("workflow.knime")
                 .unwrap_or("")
@@ -65,23 +59,13 @@ impl KnwfParser {
         };
 
         // Step 3: Parse workflow.knime XML
-        let wf_root: serde_xml_rs::Element = xml_from_str(&wf_xml)?;
-        let (nodes_raw, edges) = Self::extract_nodes_and_edges(&wf_root)?;
+        let (nodes_raw, edges) = Self::parse_workflow_xml(&wf_xml)?;
 
-        // Step 4: Build a name→node_raw lookup from the raw nodes
-        // KNIME's workflow.knime stores node names like "CSV Reader"
-        // The ZIP directories use "CSV Reader (#1)" format
-        let raw_by_name: HashMap<String, &RawNode> = nodes_raw
-            .iter()
-            .filter_map(|n| n.name.as_ref().map(|name| (name.clone(), n)))
-            .collect();
-
-        // Step 5: Collect all node directories (matching "Name (#N)" pattern)
+        // Step 4: Collect node directories
         let node_dirs: Vec<String> = archive
             .file_names()
             .filter(|n| {
                 let stripped = n.strip_prefix(&prefix).unwrap_or(n);
-                // Match "Something (#N)/" pattern
                 stripped.ends_with('/')
                     && stripped != "workflow.knime"
                     && !stripped.starts_with("report")
@@ -90,7 +74,7 @@ impl KnwfParser {
             .map(|n| n.trim_end_matches('/').to_string())
             .collect();
 
-        // Step 6: Detect metanode directories (contain their own workflow.knime)
+        // Step 5: Detect metanode directories
         let metanode_dirs: Vec<String> = node_dirs
             .iter()
             .filter(|d| {
@@ -100,14 +84,13 @@ impl KnwfParser {
             .cloned()
             .collect();
 
-        // Step 7: Parse settings.xml for each node, matching by name
+        // Step 6: Parse settings.xml for each node
         let mut nodes = Vec::new();
         let mut metanodes = HashMap::new();
 
-        for (idx, raw_node) in nodes_raw.iter().enumerate() {
+        for raw_node in nodes_raw.iter() {
             let node_name = raw_node.name.as_deref().unwrap_or("Unknown");
 
-            // Find the matching directory in the ZIP
             let dir_name = node_dirs
                 .iter()
                 .find(|d| {
@@ -116,7 +99,6 @@ impl KnwfParser {
                 })
                 .cloned();
 
-            // Parse settings.xml
             let settings = if let Some(ref dir) = dir_name {
                 let settings_path = format!("{}/settings.xml", dir);
                 if let Ok(mut sf) = archive.by_name(&settings_path) {
@@ -150,297 +132,245 @@ impl KnwfParser {
         }
 
         Ok(KnwfArchive {
-            workflow_meta: WorkflowMeta {
-                name: None,
-                version: None,
-                created_by: None,
-            },
+            workflow_meta: WorkflowMeta::default(),
             nodes,
             edges,
             metanodes,
         })
     }
 
-    /// Extract nodes and edges from the workflow.knime XML root element.
-    fn extract_nodes_and_edges(
-        root: &serde_xml_rs::Element,
-    ) -> KnimeResult<(Vec<RawNode>, Vec<KnimeEdge>)> {
+    /// Parse workflow.knime XML to extract nodes and edges.
+    fn parse_workflow_xml(xml: &str) -> KnimeResult<(Vec<RawNode>, Vec<KnimeEdge>)> {
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
+        let mut buf = Vec::new();
 
-        let config = root
-            .children
-            .iter()
-            .find(|c| c.name.local_name == "config");
+        let mut in_nodes = false;
+        let mut in_connections = false;
+        let mut in_node_entry = false;
+        let mut in_edge_entry = false;
+        let mut current_node: Option<RawNodeBuilder> = None;
+        let mut current_edge: Option<EdgeBuilder> = None;
+        let mut current_field = String::new();
+        let mut depth = 0u32;
 
-        if let Some(config) = config {
-            // Find nodes entry
-            let nodes_entry = config.children.iter().find(|c| {
-                c.name.local_name == "entry"
-                    && c.attributes
-                        .iter()
-                        .any(|a| a.name.local_name == "key" && a.value == "nodes")
-            });
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(ref e)) => {
+                    depth += 1;
+                    let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
 
-            if let Some(nodes_container) = nodes_entry {
-                for child in &nodes_container.children {
-                    if child.name.local_name == "entry" {
-                        if let Some(raw) = Self::parse_node_entry(child) {
-                            nodes.push(raw);
+                    // Track entry context
+                    if tag == "entry" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"key" {
+                                let val = String::from_utf8_lossy(&attr.value);
+                                match val.as_ref() {
+                                    "nodes" => in_nodes = true,
+                                    "connections" => in_connections = true,
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        if in_nodes && depth == 4 {
+                            // Node entry at correct depth: <config> <entry key="nodes"> <config> <entry key="id">
+                            let key = e.attributes().flatten().find(|a| a.key.as_ref() == b"key");
+                            if let Some(k) = key {
+                                let kid = String::from_utf8_lossy(&k.value);
+                                if kid.parse::<u32>().is_ok() || kid.chars().all(|c| c.is_ascii_digit()) {
+                                    in_node_entry = true;
+                                    current_node = Some(RawNodeBuilder {
+                                        id: kid.to_string(),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                        }
+
+                        if in_connections && depth == 4 {
+                            in_edge_entry = true;
+                            current_edge = Some(EdgeBuilder::default());
                         }
                     }
                 }
-            }
+                Ok(Event::Text(ref e)) => {
+                    let text = e.unescape().unwrap_or_default();
+                    if !text.trim().is_empty() {
+                        current_field = text.to_string();
+                    }
+                }
+                Ok(Event::Empty(ref e)) => {
+                    let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    if tag == "entry" {
+                        // Extract key/value attributes
+                        let key = e.attributes().flatten()
+                            .find(|a| a.key.as_ref() == b"key")
+                            .map(|a| String::from_utf8_lossy(&a.value).to_string());
+                        let value = e.attributes().flatten()
+                            .find(|a| a.key.as_ref() == b"value")
+                            .map(|a| String::from_utf8_lossy(&a.value).to_string());
+                        let xtype = e.attributes().flatten()
+                            .find(|a| a.key.as_ref() == b"type")
+                            .map(|a| String::from_utf8_lossy(&a.value).to_string());
 
-            // Find connections entry
-            let conns_entry = config.children.iter().find(|c| {
-                c.name.local_name == "entry"
-                    && c.attributes
-                        .iter()
-                        .any(|a| a.name.local_name == "key" && a.value == "connections")
-            });
+                        if in_node_entry {
+                            if let Some(ref mut node) = current_node {
+                                if let Some(k) = key {
+                                    match k.as_str() {
+                                        "node_type" => node.node_type = value,
+                                        "custom_description" | "name" => {
+                                            if node.name.is_none() { node.name = value; }
+                                        }
+                                        "state" => node.state = value,
+                                        "num_inputs" => node.num_inputs = value.and_then(|v| v.parse().ok()),
+                                        "num_outputs" => node.num_outputs = value.and_then(|v| v.parse().ok()),
+                                        "x" => node.x = value.and_then(|v| v.parse().ok()),
+                                        "y" => node.y = value.and_then(|v| v.parse().ok()),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
 
-            if let Some(conns_container) = conns_entry {
-                for child in &conns_container.children {
-                    if child.name.local_name == "entry" {
-                        if let Some(edge) = Self::parse_edge_entry(child) {
-                            edges.push(edge);
+                        if in_edge_entry {
+                            if let Some(ref mut edge) = current_edge {
+                                if let (Some(k), Some(v)) = (key, value) {
+                                    match k.as_str() {
+                                        "srcID" => edge.source_id = Some(v),
+                                        "src_port" => edge.source_port = v.parse().unwrap_or(0),
+                                        "destID" => edge.target_id = Some(v),
+                                        "dest_port" => edge.target_port = v.parse().unwrap_or(0),
+                                        _ => {}
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+                Ok(Event::End(ref e)) => {
+                    let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    depth = depth.saturating_sub(1);
+
+                    if tag == "entry" && in_node_entry && depth == 3 {
+                        // Node entry complete
+                        if let Some(builder) = current_node.take() {
+                            nodes.push(RawNode {
+                                id: builder.id,
+                                name: builder.name,
+                                node_type: builder.node_type,
+                                state: builder.state,
+                                x: builder.x,
+                                y: builder.y,
+                                num_inputs: builder.num_inputs,
+                                num_outputs: builder.num_outputs,
+                            });
+                        }
+                        in_node_entry = false;
+                    }
+
+                    if tag == "entry" && in_edge_entry && depth == 3 {
+                        if let Some(builder) = current_edge.take() {
+                            if let (Some(src), Some(tgt)) = (builder.source_id, builder.target_id) {
+                                edges.push(KnimeEdge {
+                                    source_id: src,
+                                    source_port: builder.source_port,
+                                    target_id: tgt,
+                                    target_port: builder.target_port,
+                                });
+                            }
+                        }
+                        in_edge_entry = false;
+                    }
+
+                    if tag == "entry" && in_nodes && depth == 2 {
+                        in_nodes = false;
+                    }
+                    if tag == "entry" && in_connections && depth == 2 {
+                        in_connections = false;
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(KnimeError::Xml(format!("XML parse error: {}", e))),
+                _ => {}
             }
+            buf.clear();
         }
 
         Ok((nodes, edges))
     }
 
-    fn parse_node_entry(entry: &serde_xml_rs::Element) -> Option<RawNode> {
-        let id = entry
-            .attributes
-            .iter()
-            .find(|a| a.name.local_name == "key")?
-            .value
-            .clone();
-
-        let config = entry
-            .children
-            .iter()
-            .find(|c| c.name.local_name == "config")?;
-
-        let mut node_type = None;
-        let mut node_name = None;
-        let mut state = None;
-        let mut x = None;
-        let mut y = None;
-        let mut num_inputs = None;
-        let mut num_outputs = None;
-
-        for child in &config.children {
-            if child.name.local_name == "entry" {
-                let key = child
-                    .attributes
-                    .iter()
-                    .find(|a| a.name.local_name == "key");
-                let value = child
-                    .attributes
-                    .iter()
-                    .find(|a| a.name.local_name == "value");
-
-                if let (Some(k), Some(v)) = (key, value) {
-                    match k.value.as_str() {
-                        "node_type" => node_type = Some(v.value.clone()),
-                        "name" | "custom_description" => {
-                            if node_name.is_none() {
-                                node_name = Some(v.value.clone());
-                            }
-                        }
-                        "state" => state = Some(v.value.clone()),
-                        "x" => x = v.value.parse().ok(),
-                        "y" => y = v.value.parse().ok(),
-                        "num_inputs" => num_inputs = v.value.parse().ok(),
-                        "num_outputs" => num_outputs = v.value.parse().ok(),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        Some(RawNode {
-            id,
-            name: node_name,
-            node_type,
-            state,
-            x,
-            y,
-            num_inputs,
-            num_outputs,
-        })
-    }
-
-    fn parse_edge_entry(entry: &serde_xml_rs::Element) -> Option<KnimeEdge> {
-        let config = entry
-            .children
-            .iter()
-            .find(|c| c.name.local_name == "config")?;
-
-        let mut source_id = None;
-        let mut source_port = 0u32;
-        let mut target_id = None;
-        let mut target_port = 0u32;
-
-        for child in &config.children {
-            if child.name.local_name == "entry" {
-                let key = child
-                    .attributes
-                    .iter()
-                    .find(|a| a.name.local_name == "key");
-                let value = child
-                    .attributes
-                    .iter()
-                    .find(|a| a.name.local_name == "value");
-
-                if let (Some(k), Some(v)) = (key, value) {
-                    match k.value.as_str() {
-                        "srcID" => source_id = Some(v.value.clone()),
-                        "src_port" => source_port = v.value.parse().unwrap_or(0),
-                        "destID" => target_id = Some(v.value.clone()),
-                        "dest_port" => target_port = v.value.parse().unwrap_or(0),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        let source_id = source_id?;
-        let target_id = target_id?;
-
-        Some(KnimeEdge {
-            source_id,
-            source_port,
-            target_id,
-            target_port,
-        })
-    }
-
-    /// Parse KNIME settings.xml into a simplified JSON model.
+    /// Parse KNIME settings.xml into simplified JSON.
     fn parse_settings_xml(xml: &str) -> serde_json::Value {
         if xml.is_empty() {
             return serde_json::Value::Null;
         }
+        // Quick-n-dirty: KNIME settings.xml has <entry key="model"> as the root config.
+        // We search for key/value pairs and build a flat JSON object.
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+        let mut buf = Vec::new();
+        let mut result = serde_json::Map::new();
+        let mut in_model = false;
+        let mut path: Vec<String> = Vec::new();
 
-        let root: Result<serde_xml_rs::Element, _> = xml_from_str(xml);
-        let root = match root {
-            Ok(r) => r,
-            Err(_) => return serde_json::Value::Null,
-        };
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
+                    let tag = String::from_utf8_lossy(e.name().as_ref());
+                    if tag == "entry" {
+                        let key = e.attributes().flatten()
+                            .find(|a| a.key.as_ref() == b"key")
+                            .map(|a| String::from_utf8_lossy(&a.value).to_string());
+                        let value = e.attributes().flatten()
+                            .find(|a| a.key.as_ref() == b"value")
+                            .map(|a| String::from_utf8_lossy(&a.value).to_string());
 
-        let config = match root
-            .children
-            .iter()
-            .find(|c| c.name.local_name == "config")
-        {
-            Some(c) => c,
-            None => return serde_json::Value::Null,
-        };
-
-        let model = config.children.iter().find(|c| {
-            c.name.local_name == "entry"
-                && c.attributes
-                    .iter()
-                    .any(|a| a.name.local_name == "key" && a.value == "model")
-        });
-
-        let model = match model {
-            Some(m) => m,
-            None => return serde_json::Value::Null,
-        };
-
-        Self::config_to_json(model)
-    }
-
-    /// Convert KNIME XML config tree to JSON, stripping KNIME type wrappers.
-    fn config_to_json(entry: &serde_xml_rs::Element) -> serde_json::Value {
-        let entry_type = entry
-            .attributes
-            .iter()
-            .find(|a| a.name.local_name == "type");
-
-        match entry_type.map(|t| t.value.as_str()) {
-            Some("xstring") | Some("xdouble") | Some("xint") | Some("xboolean") => {
-                let value = entry
-                    .attributes
-                    .iter()
-                    .find(|a| a.name.local_name == "value");
-                match value {
-                    Some(v) => {
-                        let et = entry_type.unwrap().value.as_str();
-                        match et {
-                            "xdouble" => {
-                                if let Ok(n) = v.value.parse::<f64>() {
-                                    return serde_json::Value::Number(
-                                        serde_json::Number::from_f64(n)
-                                            .unwrap_or(serde_json::Number::from(0)),
-                                    );
+                        if let Some(k) = key {
+                            if k == "model" {
+                                in_model = true;
+                            } else if in_model {
+                                if let Some(v) = value {
+                                    result.insert(k, serde_json::Value::String(v));
                                 }
                             }
-                            "xint" => {
-                                if let Ok(n) = v.value.parse::<i64>() {
-                                    return serde_json::Value::Number(n.into());
-                                }
-                            }
-                            "xboolean" => {
-                                return serde_json::Value::Bool(v.value == "true");
-                            }
-                            _ => {}
                         }
-                        serde_json::Value::String(v.value.clone())
                     }
-                    None => serde_json::Value::Null,
                 }
-            }
-            _ => {
-                let children: Vec<_> = entry
-                    .children
-                    .iter()
-                    .filter(|c| c.name.local_name == "entry")
-                    .collect();
-
-                let all_numeric = children.iter().all(|c| {
-                    c.attributes
-                        .iter()
-                        .find(|a| a.name.local_name == "key")
-                        .map(|a| a.value.parse::<usize>().is_ok())
-                        .unwrap_or(false)
-                });
-
-                if all_numeric && !children.is_empty() {
-                    let mut sorted = children.clone();
-                    sorted.sort_by_key(|c| {
-                        c.attributes
-                            .iter()
-                            .find(|a| a.name.local_name == "key")
-                            .and_then(|a| a.value.parse::<usize>().ok())
-                            .unwrap_or(0)
-                    });
-                    let arr: Vec<_> = sorted.iter().map(|c| Self::config_to_json(c)).collect();
-                    serde_json::Value::Array(arr)
-                } else {
-                    let mut map = serde_json::Map::new();
-                    for child in children {
-                        let key = child
-                            .attributes
-                            .iter()
-                            .find(|a| a.name.local_name == "key")
-                            .map(|a| a.value.clone())
-                            .unwrap_or_default();
-                        let val = Self::config_to_json(child);
-                        map.insert(key, val);
+                Ok(Event::End(ref e)) => {
+                    let tag = String::from_utf8_lossy(e.name().as_ref());
+                    if tag == "entry" && in_model {
+                        // Check if we're leaving the model entry
                     }
-                    serde_json::Value::Object(map)
                 }
+                Ok(Event::Eof) => break,
+                Err(_) => break,
+                _ => {}
             }
+            buf.clear();
+        }
+
+        if result.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::Object(result)
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RawNodeBuilder {
+    id: String,
+    name: Option<String>,
+    node_type: Option<String>,
+    state: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
+    num_inputs: Option<u32>,
+    num_outputs: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -453,4 +383,12 @@ struct RawNode {
     y: Option<f64>,
     num_inputs: Option<u32>,
     num_outputs: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EdgeBuilder {
+    source_id: Option<String>,
+    source_port: u32,
+    target_id: Option<String>,
+    target_port: u32,
 }
