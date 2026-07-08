@@ -1,0 +1,24 @@
+[package]
+name = "swanflow-knime"
+version = "0.1.0"
+edition = "2021"
+description = "KNIME workflow (.knwf) import for SwanFlow — parse KNIME workflows and execute them on the SwanFlow engine"
+license = "Apache-2.0"
+repository = "https://github.com/alitrack/swanflow"
+keywords = ["knime", "swanflow", "workflow", "datafusion", "etl"]
+
+[dependencies]
+swanflow = { path = "../swanflow" }
+swanflow-core = { path = "../swanflow-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-xml-rs = "0.6"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+anyhow = "1.0"
+thiserror = "2.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+petgraph = "0.7"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3.26.0"

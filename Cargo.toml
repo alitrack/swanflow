@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/swanflow-core",
     "crates/swanflow",
+    "crates/swanflow-knime",
     "crates/swanflow-plugin-sdk",
     "crates/swanflow-ai",
 ]
