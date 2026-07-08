@@ -40,28 +40,30 @@ impl KnwfParser {
     fn parse_zip(
         archive: &mut zip::ZipArchive<impl Read + std::io::Seek>,
     ) -> KnimeResult<KnwfArchive> {
-        // Step 1: Find and read workflow.knime
-        let wf_entry = Self::find_entry(archive, "workflow.knime")?;
-        let mut wf_file = archive
-            .by_name(&wf_entry)
-            .map_err(|_| KnimeError::MissingWorkflow)?;
-        let mut wf_xml = String::new();
-        wf_file.read_to_string(&mut wf_xml).map_err(KnimeError::Io)?;
+        // Step 1: Find and read workflow.knime (in own scope to drop ZipFile borrow)
+        let (wf_xml, prefix) = {
+            let wf_entry = Self::find_entry(archive, "workflow.knime")?;
+            let mut wf_file = archive
+                .by_name(&wf_entry)
+                .map_err(|_| KnimeError::MissingWorkflow)?;
+            let mut xml = String::new();
+            wf_file.read_to_string(&mut xml).map_err(KnimeError::Io)?;
+            // Determine the workflow root prefix
+            let pfx = if wf_entry == "workflow.knime" {
+                String::new()
+            } else {
+                wf_entry
+                    .strip_suffix("workflow.knime")
+                    .unwrap_or("")
+                    .to_string()
+            };
+            (xml, pfx)
+        }; // wf_file dropped here
 
-        // Step 2: Determine the workflow root prefix
-        let prefix = if wf_entry == "workflow.knime" {
-            String::new()
-        } else {
-            wf_entry
-                .strip_suffix("workflow.knime")
-                .unwrap_or("")
-                .to_string()
-        };
-
-        // Step 3: Parse workflow.knime XML
+        // Step 2: Parse workflow.knime XML
         let (nodes_raw, edges) = Self::parse_workflow_xml(&wf_xml)?;
 
-        // Step 4: Collect node directories
+        // Step 3: Collect node directories
         let node_dirs: Vec<String> = archive
             .file_names()
             .filter(|n| {
@@ -74,23 +76,45 @@ impl KnwfParser {
             .map(|n| n.trim_end_matches('/').to_string())
             .collect();
 
-        // Step 5: Detect metanode directories
-        let metanode_dirs: Vec<String> = node_dirs
-            .iter()
-            .filter(|d| {
-                let meta_path = format!("{}/workflow.knime", d);
-                archive.by_name(&meta_path).is_ok()
-            })
-            .cloned()
-            .collect();
+        // Step 4: Detect metanode directories (by checking file_names, not by_name)
+        let metanode_dirs: Vec<String> = {
+            let all_names: Vec<String> = archive.file_names().map(|n| n.to_string()).collect();
+            node_dirs
+                .iter()
+                .filter(|d| {
+                    let meta_path = format!("{}/workflow.knime", d);
+                    all_names.iter().any(|n| n == &meta_path)
+                })
+                .cloned()
+                .collect()
+        };
 
-        // Step 6: Parse settings.xml for each node
+        // Step 5: Collect all settings.xml content upfront (avoids double-borrow)
+        let node_settings: HashMap<String, String> = {
+            let mut map = HashMap::new();
+            for raw_node in nodes_raw.iter() {
+                let node_name = raw_node.name.as_deref().unwrap_or("Unknown");
+                if let Some(dir_name) = node_dirs.iter().find(|d| {
+                    let stripped = d.strip_prefix(&prefix).unwrap_or(d);
+                    stripped.starts_with(node_name)
+                }) {
+                    let settings_path = format!("{}/settings.xml", dir_name);
+                    if let Ok(mut sf) = archive.by_name(&settings_path) {
+                        let mut xml = String::new();
+                        sf.read_to_string(&mut xml).ok();
+                        map.insert(raw_node.id.clone(), xml);
+                    }
+                }
+            }
+            map
+        };
+
+        // Step 6: Build KnimeNode list
         let mut nodes = Vec::new();
         let mut metanodes = HashMap::new();
 
         for raw_node in nodes_raw.iter() {
             let node_name = raw_node.name.as_deref().unwrap_or("Unknown");
-
             let dir_name = node_dirs
                 .iter()
                 .find(|d| {
@@ -98,20 +122,10 @@ impl KnwfParser {
                     stripped.starts_with(node_name)
                 })
                 .cloned();
-
-            let settings = if let Some(ref dir) = dir_name {
-                let settings_path = format!("{}/settings.xml", dir);
-                if let Ok(mut sf) = archive.by_name(&settings_path) {
-                    let mut xml = String::new();
-                    sf.read_to_string(&mut xml).ok();
-                    Self::parse_settings_xml(&xml)
-                } else {
-                    serde_json::Value::Null
-                }
-            } else {
-                serde_json::Value::Null
-            };
-
+            let settings_xml = node_settings.get(&raw_node.id);
+            let settings = settings_xml
+                .map(|xml| Self::parse_settings_xml(xml))
+                .unwrap_or(serde_json::Value::Null);
             let is_metanode = dir_name
                 .as_ref()
                 .map(|d| metanode_dirs.contains(d))
