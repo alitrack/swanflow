@@ -22,6 +22,7 @@
 pub mod error;
 pub mod mapper;
 pub mod parser;
+pub mod shaper;
 pub mod types;
 
 pub use error::{KnimeError, KnimeResult};
@@ -50,7 +51,7 @@ pub async fn import_knwf_bytes(data: &[u8]) -> KnimeResult<Workflow> {
 pub fn parse_knar(path: &str) -> KnimeResult<Vec<(String, crate::types::KnwfArchive)>> {
     let file = std::fs::File::open(path).map_err(KnimeError::Io)?;
     let mut archive = zip::ZipArchive::new(file).map_err(KnimeError::Zip)?;
-    
+
     // Find all top-level workflow directories (depth=3 within group root)
     let wf_paths: Vec<String> = (0..archive.len())
         .filter_map(|i| {
@@ -63,16 +64,16 @@ pub fn parse_knar(path: &str) -> KnimeResult<Vec<(String, crate::types::KnwfArch
             }
         })
         .collect();
-    
+
     let mut results = Vec::new();
     let mut errors = Vec::new();
-    
+
     for wf_path in &wf_paths {
         let prefix = wf_path
             .strip_suffix("workflow.knime")
             .unwrap_or("")
             .to_string();
-        
+
         match KnwfParser::parse_zip_at(&mut archive, &prefix) {
             Ok(knwf) => {
                 let name = prefix
@@ -88,14 +89,23 @@ pub fn parse_knar(path: &str) -> KnimeResult<Vec<(String, crate::types::KnwfArch
             }
         }
     }
-    
+
     if results.is_empty() && !errors.is_empty() {
-        return Err(KnimeError::Xml(format!("All {} workflows failed: {}", errors.len(), errors.join("; "))));
+        return Err(KnimeError::Xml(format!(
+            "All {} workflows failed: {}",
+            errors.len(),
+            errors.join("; ")
+        )));
     }
-    
+
     if !errors.is_empty() {
-        tracing::warn!("{} workflow(s) failed to parse out of {}: {:?}", errors.len(), wf_paths.len(), errors);
+        tracing::warn!(
+            "{} workflow(s) failed to parse out of {}: {:?}",
+            errors.len(),
+            wf_paths.len(),
+            errors
+        );
     }
-    
+
     Ok(results)
 }
