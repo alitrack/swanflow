@@ -879,6 +879,60 @@ impl KnimeNodeMapper {
                 json!({"query": format!("SELECT * FROM ml_load_xgboost('imported_model', '{}')", path)})
             });
 
+
+        // ─── Analysis — Missing duckdb-ml algorithms ───
+        def!("org.knime.base.node.mine.knn.KNNNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols = feats.iter().map(|f| format!("\"{}\"", f)).collect::<Vec<_>>();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                let k = s.get("number_of_neighbors").and_then(|v| v.as_str()).unwrap_or("5");
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_knn', 'knn_regressor', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"k\": {}}}')",
+                    target, feat_json_array, k)})
+            });
+        def!("org.knime.base.node.mine.lasso.LassoNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols = feats.iter().map(|f| format!("\"{}\"", f)).collect::<Vec<_>>();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                let alpha = s.get("alpha").and_then(|v| v.as_str()).unwrap_or("1.0");
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_lasso', 'lasso_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"lambda\": {}}}')",
+                    target, feat_json_array, alpha)})
+            });
+
+        // ─── DuckDB WASM extension bridge (ducklink) ───
+        def!("org.knime.base.node.io.filehandling.node.WebAppNodeFactory", "core.sql",
+            |s| {
+                let component = s.get("wasm_component").and_then(|v| v.as_str()).unwrap_or("my_extension");
+                json!({"query": format!("FROM ducklink_load('{}'); SELECT * FROM ducklink.modules", component)})
+            });
+
+        // ─── SAS / SPSS / Stata readers (via DuckDB community extensions) ───
+        def!("org.knime.base.node.io.filehandling.node.SASReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_csv_auto('{}')", path)})
+            });
+        def!("org.knime.base.node.io.filehandling.node.SPSSReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_parquet('{}')", path)})
+            });
+
+        // ─── DB Query / Table Selector / Connection ───
+        def!("org.knime.base.node.io.database.DBQueryReaderNodeFactory", "core.sql",
+            |s| json!({"query": s.get("sql_string").and_then(|v| v.as_str()).unwrap_or("SELECT 1")}));
+        def!("org.knime.base.node.io.database.DBTableSelectorNodeFactory", "core.sql",
+            |s| json!({"query": format!("SELECT * FROM {}",
+                s.get("table_name").and_then(|v| v.as_str()).unwrap_or("unknown_table"))}));
+        def!("org.knime.base.node.io.database.DBConnectionNodeFactory", "core.sql",
+            |s| json!({"query": format!("ATTACH '{}' AS knime_db (TYPE postgres)",
+                s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""))}));
+
         // ─── Scripting ───
         def!("org.knime.base.node.preproc.r.RSnippetNodeFactory", "core.script.python",
             |s| json!({"script": s.get("r_script").and_then(|v| v.as_str()).unwrap_or(""), "type": "r"}));
