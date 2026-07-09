@@ -371,18 +371,60 @@ impl KnimeNodeMapper {
             |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
                        "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or(""),
                        "mode": "update"}));
-        def!("org.knime.base.node.io.filestore.FileDownloadNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "file download"}));
-        def!("org.knime.base.node.io.filehandling.node.FileListDirectoryNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "file list directory"}));
+        def!("org.knime.base.node.io.filestore.FileDownloadNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                // Detect cloud provider and use appropriate DuckDB extension protocol
+                let (proto, path) = if url.starts_with("spfs://") || url.contains("sharepoint") {
+                    ("spfs", url.trim_start_matches("spfs://"))
+                } else if url.starts_with("odfs://") || url.contains("onedrive") {
+                    ("odfs", url.trim_start_matches("odfs://"))
+                } else if url.starts_with("gdfs://") || url.contains("drive.google") {
+                    ("gdfs", url.trim_start_matches("gdfs://"))
+                } else if url.starts_with("dbxfs://") || url.contains("dropbox") {
+                    ("dbxfs", url.trim_start_matches("dbxfs://"))
+                } else if url.starts_with("sftp://") {
+                    ("sftp", url.trim_start_matches("sftp://"))
+                } else if url.starts_with("s3://") {
+                    ("s3", url.trim_start_matches("s3://"))
+                } else if url.starts_with("http://") || url.starts_with("https://") {
+                    ("httpfs", url)
+                } else {
+                    ("file", url)
+                };
+                let ext = if path.ends_with(".parquet") { "parquet" }
+                    else if path.ends_with(".csv") { "csv" }
+                    else if path.ends_with(".json") { "json" }
+                    else { "auto" };
+                json!({"query": format!("SELECT * FROM read_{}('{}://{}')", ext, proto, path)})
+            });
+        def!("org.knime.base.node.io.filehandling.node.FileListDirectoryNodeFactory", "core.sql",
+            |s| {
+                let dir = s.get("directory").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM glob('{}**')", dir)})
+            });
 
-        // ─── REST / HTTP ───
-        def!("org.knime.rest.nodes.GETRequestNodeFactory", "core.missing.placeholder",
-            |s| json!({"reason": "REST GET", "url": s.get("url").and_then(|v| v.as_str()).unwrap_or("")}));
-        def!("org.knime.rest.nodes.POSTRequestNodeFactory", "core.missing.placeholder",
-            |s| json!({"reason": "REST POST", "url": s.get("url").and_then(|v| v.as_str()).unwrap_or("")}));
-        def!("org.knime.rest.nodes.PUTRequestNodeFactory", "core.missing.placeholder",
-            |s| json!({"reason": "REST PUT", "url": s.get("url").and_then(|v| v.as_str()).unwrap_or("")}));
+        // ─── REST / HTTP (erpl-web / http_client powered) ───
+        def!("org.knime.rest.nodes.GETRequestNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM read_json_auto('{}')", url)})
+            });
+        def!("org.knime.rest.nodes.POSTRequestNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let body = s.get("body").and_then(|v| v.as_str()).unwrap_or("{}");
+                json!({"query": format!(
+                    "SELECT http_post('{}', headers := '{{}}', body := '{}') AS response", url, body)})
+            });
+        def!("org.knime.rest.nodes.PUTRequestNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let body = s.get("body").and_then(|v| v.as_str()).unwrap_or("{}");
+                json!({"query": format!(
+                    "SELECT http_put('{}', headers := '{{}}', body := '{}') AS response", url, body)})
+            });
 
         // ─── Transform — String / Regex ───
         def!("org.knime.base.node.preproc.stringreplacer.StringReplaceNodeFactory", "core.transform.project",
@@ -550,71 +592,234 @@ impl KnimeNodeMapper {
         def!("org.knime.ext.ssh.SSHCommandNodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "ssh command"}));
 
-        // ─── Analysis — Regression ───
-        def!("org.knime.base.node.mine.regression.linear.LinearRegressionNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "linear regression"}));
-        def!("org.knime.base.node.mine.regression.logistic.LogisticRegressionNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "logistic regression"}));
-        def!("org.knime.base.node.mine.regression.polynomial.PolynomialRegressionNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "polynomial regression"}));
+        // ─── Analysis — Regression (duckdb-ml powered) ───
+        // ml_train() takes: model_name, algorithm, target_json, features_json, params_json
+        // KNIME settings: target_column, feature_columns (comma-separated)
+        def!("org.knime.base.node.mine.regression.linear.LinearRegressionNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_linreg', 'linear_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{}}')",
+                    target, feat_json_array)})
+            });
+        def!("org.knime.base.node.mine.regression.logistic.LogisticRegressionNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_logreg', 'logistic_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{}}')",
+                    target, feat_json_array)})
+            });
+        def!("org.knime.base.node.mine.regression.polynomial.PolynomialRegressionNodeFactory", "core.sql",
+            |s| {
+                // duckdb-ml doesn't have polynomial regression; use linear with feature expansion hint
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let degree = s.get("polynomial_degree").and_then(|v| v.as_str()).unwrap_or("2");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_polyreg', 'linear_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"poly_degree\": {}}}')",
+                    target, feat_json_array, degree)})
+            });
 
-        // ─── Analysis — Tree / Ensemble ───
-        def!("org.knime.base.node.mine.decisiontree2.DecisionTreeLearnerNodeFactory2", "core.missing.placeholder",
-            |_| json!({"reason": "decision tree learner"}));
-        def!("org.knime.base.node.mine.decisiontree2.DecisionTreePredictorNodeFactory2", "core.missing.placeholder",
-            |_| json!({"reason": "decision tree predictor"}));
-        def!("org.knime.base.node.mine.treeensemble.randomforest.RandomForestLearnerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "random forest learner"}));
-        def!("org.knime.base.node.mine.treeensemble.randomforest.RandomForestPredictorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "random forest predictor"}));
-        def!("org.knime.base.node.mine.treeensemble.gradientboost.GradientBoostLearnerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "gradient boost learner"}));
+        // ─── Analysis — Tree / Ensemble (duckdb-ml powered) ───
+        def!("org.knime.base.node.mine.decisiontree2.DecisionTreeLearnerNodeFactory2", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_dt', 'decision_tree', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{}}')",
+                    target, feat_json_array)})
+            });
+        def!("org.knime.base.node.mine.decisiontree2.DecisionTreePredictorNodeFactory2", "core.sql",
+            |s| {
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_args: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                json!({"query": format!(
+                    "SELECT *, (SELECT prediction FROM ml_predict('sw_dt', {})) AS prediction FROM input_0",
+                    feat_args.join(", "))})
+            });
+        def!("org.knime.base.node.mine.treeensemble.randomforest.RandomForestLearnerNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                let n_trees = s.get("number_of_trees").and_then(|v| v.as_str()).unwrap_or("100");
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_rf', 'random_forest', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_estimators\": {}}}')",
+                    target, feat_json_array, n_trees)})
+            });
+        def!("org.knime.base.node.mine.treeensemble.randomforest.RandomForestPredictorNodeFactory", "core.sql",
+            |s| {
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_args: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                json!({"query": format!(
+                    "SELECT *, (SELECT prediction FROM ml_predict('sw_rf', {})) AS prediction FROM input_0",
+                    feat_args.join(", "))})
+            });
+        def!("org.knime.base.node.mine.treeensemble.gradientboost.GradientBoostLearnerNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                let n_trees = s.get("number_of_trees").and_then(|v| v.as_str()).unwrap_or("100");
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_gbdt', 'xgboost_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_estimators\": {}}}')",
+                    target, feat_json_array, n_trees)})
+            });
 
-        // ─── Analysis — Clustering ───
-        def!("org.knime.base.node.mine.cluster.kmeans.KMeansNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "k-means clustering"}));
+        // ─── Analysis — Clustering (duckdb-ml powered) ───
+        def!("org.knime.base.node.mine.cluster.kmeans.KMeansNodeFactory", "core.sql",
+            |s| {
+                let feats = Self::parse_feats(s, "feature_columns");
+                let n_clusters = s.get("number_of_clusters").and_then(|v| v.as_str()).unwrap_or("3");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_kmeans', 'kmeans', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"k\": {}}}')",
+                    feat_json_array, n_clusters)})
+            });
         def!("org.knime.base.node.mine.cluster.hierarchical.HierarchicalClusterNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "hierarchical clustering"}));
+            |_| json!({"reason": "hierarchical clustering (not in duckdb-ml; use KMeans or SwanFlow Python UDF)"}));
         def!("org.knime.base.node.mine.cluster.dbscan.DBSCANNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "DBSCAN clustering"}));
+            |_| json!({"reason": "DBSCAN clustering (not in duckdb-ml yet)"}));
 
-        // ─── Analysis — Dimension Reduction ───
-        def!("org.knime.base.node.mine.pca.PCANodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "PCA"}));
+        // ─── Analysis — Dimension Reduction (duckdb-ml powered) ───
+        def!("org.knime.base.node.mine.pca.PCANodeFactory", "core.sql",
+            |s| {
+                let feats = Self::parse_feats(s, "feature_columns");
+                let n_components = s.get("number_of_components").and_then(|v| v.as_str()).unwrap_or("2");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_pca', 'pca', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_components\": {}}}')",
+                    feat_json_array, n_components)})
+            });
 
-        // ─── Analysis — Statistics ───
-        def!("org.knime.base.node.stats.correlation.CorrelationNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "correlation matrix"}));
-        def!("org.knime.base.node.stats.shapiro.ShapiroWilkNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "shapiro-wilk normality test"}));
-        def!("org.knime.base.node.stats.ttest.TTestNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "t-test"}));
-        def!("org.knime.base.node.stats.anova.ANOVANodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "ANOVA"}));
-        def!("org.knime.base.node.stats.chisquare.ChiSquareNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "chi-square test"}));
+        // ─── Analysis — Statistics (DuckDB built-in + stats_duck) ───
+        def!("org.knime.base.node.stats.correlation.CorrelationNodeFactory", "core.sql",
+            |s| {
+                let cols_str = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
+                let cols: Vec<&str> = cols_str.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+                if cols.len() < 2 {
+                    json!({"query": "SELECT 'Need at least 2 columns' AS error FROM input_0"})
+                } else {
+                    let cols_ref: Vec<String> = cols.iter().map(|c| c.to_string()).collect();
+                    let pairs: Vec<String> = (0..cols_ref.len()).flat_map(|i| {
+                        let c = cols_ref.clone();
+                        ((i+1)..cols_ref.len()).map(move |j| {
+                            format!("corr(\"{}\", \"{}\") AS {}_{}_corr", c[i], c[j], c[i], c[j])
+                        })
+                    }).collect();
+                    json!({"query": format!("SELECT {} FROM input_0", pairs.join(", "))})
+                }
+            });
+        def!("org.knime.base.node.stats.shapiro.ShapiroWilkNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT stats_duck_shapiro_wilk(\"{}\") AS shapiro_wilk FROM input_0", col)})
+            });
+        def!("org.knime.base.node.stats.ttest.TTestNodeFactory", "core.sql",
+            |s| {
+                let col1 = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let col2 = s.get("second_column").and_then(|v| v.as_str()).unwrap_or("");
+                let test_type = s.get("test_type").and_then(|v| v.as_str()).unwrap_or("independent");
+                let query = if test_type == "paired" {
+                    format!("SELECT stats_duck_ttest_paired(\"{}\", \"{}\") AS t_test FROM input_0", col1, col2)
+                } else {
+                    format!("SELECT stats_duck_ttest_independent(\"{}\", \"{}\") AS t_test FROM input_0", col1, col2)
+                };
+                json!({"query": query})
+            });
+        def!("org.knime.base.node.stats.anova.ANOVANodeFactory", "core.sql",
+            |s| {
+                let group_col = s.get("group_column").and_then(|v| v.as_str()).unwrap_or("");
+                let value_col = s.get("value_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT stats_duck_anova(\"{}\", \"{}\") AS anova FROM input_0", group_col, value_col)})
+            });
+        def!("org.knime.base.node.stats.chisquare.ChiSquareNodeFactory", "core.sql",
+            |s| {
+                let col1 = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let col2 = s.get("second_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT stats_duck_chisq(\"{}\", \"{}\") AS chi_square FROM input_0", col1, col2)})
+            });
 
-        // ─── Analysis — Naive Bayes / SVM / MLP ───
-        def!("org.knime.base.node.mine.bayes.naivebayes.NaiveBayesLearnerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "naive bayes learner"}));
-        def!("org.knime.base.node.mine.bayes.naivebayes.NaiveBayesPredictorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "naive bayes predictor"}));
+        // ─── Analysis — Naive Bayes / SVM / MLP (duckdb-ml powered) ───
+        def!("org.knime.base.node.mine.bayes.naivebayes.NaiveBayesLearnerNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_nb', 'naive_bayes', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{}}')",
+                    target, feat_json_array)})
+            });
+        def!("org.knime.base.node.mine.bayes.naivebayes.NaiveBayesPredictorNodeFactory", "core.sql",
+            |s| {
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_args: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                json!({"query": format!(
+                    "SELECT *, (SELECT prediction FROM ml_predict('sw_nb', {})) AS prediction FROM input_0",
+                    feat_args.join(", "))})
+            });
         def!("org.knime.base.node.mine.svm.SVMLearnerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "SVM learner"}));
+            |_| json!({"reason": "SVM learner (not in duckdb-ml; use SwanFlow Python UDF)"}));
         def!("org.knime.base.node.mine.svm.SVMPredictorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "SVM predictor"}));
-        def!("org.knime.base.node.mine.mlp.MLPLearnerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "MLP learner"}));
-        def!("org.knime.base.node.mine.mlp.MLPPredictorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "MLP predictor"}));
+            |_| json!({"reason": "SVM predictor (not in duckdb-ml; use SwanFlow Python UDF)"}));
+        def!("org.knime.base.node.mine.mlp.MLPLearnerNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                let hidden = s.get("hidden_layers").and_then(|v| v.as_str()).unwrap_or("64");
+                let lr = s.get("learning_rate").and_then(|v| v.as_str()).unwrap_or("0.01");
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_mlp', 'mlp_regressor', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"hidden_size\": {}, \"lr\": {}}}')",
+                    target, feat_json_array, hidden, lr)})
+            });
+        def!("org.knime.base.node.mine.mlp.MLPPredictorNodeFactory", "core.sql",
+            |s| {
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_args: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                json!({"query": format!(
+                    "SELECT *, (SELECT prediction FROM ml_predict('sw_mlp', {})) AS prediction FROM input_0",
+                    feat_args.join(", "))})
+            });
 
-        // ─── Analysis — Scoring / PMML ───
-        def!("org.knime.base.node.mine.scorer.accuracy.AccuracyScorerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "accuracy scorer"}));
-        def!("org.knime.base.node.io.pmml.PMMLWriterNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "PMML writer"}));
-        def!("org.knime.base.node.io.pmml.PMMLReaderNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "PMML reader"}));
+        // ─── Analysis — Scoring / PMML (duckdb-ml AutoML + model export) ───
+        def!("org.knime.base.node.mine.scorer.accuracy.AccuracyScorerNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("reference_column").and_then(|v| v.as_str()).unwrap_or("");
+                let pred = s.get("prediction_column").and_then(|v| v.as_str()).unwrap_or("prediction");
+                json!({"query": format!(
+                    "SELECT COUNT(*) FILTER (WHERE \"{}\" = \"{}\") * 1.0 / COUNT(*) AS accuracy FROM input_0",
+                    target, pred)})
+            });
+        def!("org.knime.base.node.io.pmml.PMMLWriterNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/model.json");
+                json!({"query": format!("SELECT * FROM ml_load_xgboost('exported_model', '{}')", path)})
+            });
+        def!("org.knime.base.node.io.pmml.PMMLReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/model.json");
+                json!({"query": format!("SELECT * FROM ml_load_xgboost('imported_model', '{}')", path)})
+            });
 
         // ─── Scripting ───
         def!("org.knime.base.node.preproc.r.RSnippetNodeFactory", "core.script.python",
@@ -833,14 +1038,46 @@ impl KnimeNodeMapper {
             });
         def!("org.knime.base.node.stats.correlation.LinearCorrelationNodeFactory", "core.transform.profiler",
             |_| json!({"analysis": "correlation"}));
-        def!("org.knime.base.node.mine.cluster.kmeans.KMeansNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "k-means clustering (use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.mine.tree.decisiontree2.DecisionTreeNodeFactory2", "core.missing.placeholder",
-            |_| json!({"reason": "decision tree (use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.mine.regression.linear.LinearRegressionNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "linear regression (use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.preproc.pca.PCA2NodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "PCA (use SwanFlow Python UDF)"}));
+        def!("org.knime.base.node.mine.cluster.kmeans.KMeansNodeFactory", "core.sql",
+            |s| {
+                let feats = Self::parse_feats(s, "feature_columns");
+                let n_clusters = s.get("number_of_clusters").and_then(|v| v.as_str()).unwrap_or("3");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_kmeans', 'kmeans', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"k\": {}}}')",
+                    feat_json_array, n_clusters)})
+            });
+        def!("org.knime.base.node.mine.tree.decisiontree2.DecisionTreeNodeFactory2", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_dt', 'decision_tree', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{}}')",
+                    target, feat_json_array)})
+            });
+        def!("org.knime.base.node.mine.regression.linear.LinearRegressionNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_linreg', 'linear_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{}}')",
+                    target, feat_json_array)})
+            });
+        def!("org.knime.base.node.preproc.pca.PCA2NodeFactory", "core.sql",
+            |s| {
+                let feats = Self::parse_feats(s, "feature_columns");
+                let n_components = s.get("number_of_components").and_then(|v| v.as_str()).unwrap_or("2");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_pca', 'pca', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_components\": {}}}')",
+                    feat_json_array, n_components)})
+            });
         def!("org.knime.base.node.preproc.normalize.Normalizer2NodeFactory", "core.transform.project",
             |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
                        "method": s.get("method").and_then(|v| v.as_str()).unwrap_or("minmax")}));
@@ -1085,27 +1322,75 @@ impl KnimeNodeMapper {
         def!("org.knime.ext.ssh.SSHConnectionNodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "SSH connection"}));
 
-        // ─── Statistics ───
-        def!("org.knime.base.node.stats.ttest.PairedTTestNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "paired t-test (use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.stats.ttest.IndependentTTestNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "independent t-test (use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.stats.anova.OneWayANOVANodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "one-way ANOVA (use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.stats.shapiro.ShapiroWilkNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "Shapiro-Wilk test (use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.stats.chisquare.ChiSquareNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "chi-square test (use SwanFlow Python UDF)"}));
+        // ─── Statistics (duckdb-ml + stats_duck powered) ───
+        def!("org.knime.base.node.stats.ttest.PairedTTestNodeFactory", "core.sql",
+            |s| {
+                let col1 = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let col2 = s.get("second_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT stats_duck_ttest_paired(\"{}\", \"{}\") AS t_test FROM input_0", col1, col2)})
+            });
+        def!("org.knime.base.node.stats.ttest.IndependentTTestNodeFactory", "core.sql",
+            |s| {
+                let col1 = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let col2 = s.get("second_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT stats_duck_ttest_independent(\"{}\", \"{}\") AS t_test FROM input_0", col1, col2)})
+            });
+        def!("org.knime.base.node.stats.anova.OneWayANOVANodeFactory", "core.sql",
+            |s| {
+                let group_col = s.get("group_column").and_then(|v| v.as_str()).unwrap_or("");
+                let value_col = s.get("value_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT stats_duck_anova(\"{}\", \"{}\") AS anova FROM input_0", group_col, value_col)})
+            });
+        def!("org.knime.base.node.stats.shapiro.ShapiroWilkNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT stats_duck_shapiro_wilk(\"{}\") AS shapiro_wilk FROM input_0", col)})
+            });
+        def!("org.knime.base.node.stats.chisquare.ChiSquareNodeFactory", "core.sql",
+            |s| {
+                let col1 = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let col2 = s.get("second_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT stats_duck_chisq(\"{}\", \"{}\") AS chi_square FROM input_0", col1, col2)})
+            });
 
-        // ─── ML ───
-        def!("org.knime.base.node.mine.bayes.naivebayes.NaiveBayesNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "naive bayes (use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.mine.tree.randomforest.RandomForestNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "random forest (use SwanFlow Python UDF)"}));
+        // ─── ML (duckdb-ml powered) ───
+        def!("org.knime.base.node.mine.bayes.naivebayes.NaiveBayesNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_nb', 'naive_bayes', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{}}')",
+                    target, feat_json_array)})
+            });
+        def!("org.knime.base.node.mine.tree.randomforest.RandomForestNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_rf', 'random_forest', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{}}')",
+                    target, feat_json_array)})
+            });
         def!("org.knime.base.node.mine.svm.SVMNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "SVM (use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.mine.neural.mlp.MLPNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "neural network MLP (use SwanFlow Python UDF)"}));
+            |_| json!({"reason": "SVM (not in duckdb-ml; use SwanFlow Python UDF)"}));
+        def!("org.knime.base.node.mine.neural.mlp.MLPNodeFactory", "core.sql",
+            |s| {
+                let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
+                let feats = Self::parse_feats(s, "feature_columns");
+                let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
+                let feat_json_array = format!("json_array({})", feat_cols.join(", "));
+                json!({"query": format!(
+                    "SELECT * FROM ml_train('sw_mlp', 'mlp_regressor', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{}}')",
+                    target, feat_json_array)})
+            });
 
         // ─── JS Viz ───
         def!("org.knime.js.base.node.viz.line.LinePlotJSNodeFactory", "core.sql",
@@ -1313,6 +1598,17 @@ impl KnimeNodeMapper {
                 conditions.join(" AND ")
             )
         }
+    }
+
+    /// Parse feature columns from KNIME settings (comma-separated string or JSON array).
+    fn parse_feats(s: &serde_json::Value, key: &str) -> Vec<String> {
+        s.get(key)
+            .and_then(|v| {
+                v.as_array()
+                    .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .or_else(|| v.as_str().map(|s| s.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect()))
+            })
+            .unwrap_or_default()
     }
 
     fn map_op(knime_op: &str) -> &str {
