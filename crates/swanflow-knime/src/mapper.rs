@@ -1800,6 +1800,54 @@ impl KnimeNodeMapper {
             |_| json!({"query": "SELECT duckdb_memory() AS memory_usage, * FROM input_0"}));
 
 
+
+        // ─── ADBC Scanner (Arrow Database Connectivity) ───
+        def!("org.knime.base.node.io.database.ADBCConnectorNodeFactory", "core.sql",
+            |s| {
+                let driver = s.get("driver").and_then(|v| v.as_str()).unwrap_or("duckdb");
+                let uri = s.get("connection_uri").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "ATTACH '{}' AS adbc_source (TYPE adbc, DRIVER '{}')", uri, driver)})
+            });
+
+        // ─── DuckDB AI (LLM / Embedding in SQL) ───
+        def!("org.knime.base.node.mine.ai.LLMPromptNodeFactory", "core.sql",
+            |s| {
+                let prompt = s.get("prompt").and_then(|v| v.as_str()).unwrap_or("Summarize this");
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let model = s.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o");
+                json!({"query": format!(
+                    "SELECT *, prompt('{}', {}) AS ai_response FROM input_0", model, col)})
+            });
+        def!("org.knime.base.node.mine.ai.EmbeddingNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let model = s.get("embedding_model").and_then(|v| v.as_str()).unwrap_or("text-embedding-3-small");
+                json!({"query": format!(
+                    "SELECT *, embed('{}', {}) AS embedding FROM input_0", model, col)})
+            });
+        def!("org.knime.base.node.mine.ai.VectorSearchNodeFactory", "core.sql",
+            |s| {
+                let query = s.get("search_query").and_then(|v| v.as_str()).unwrap_or("");
+                let col = s.get("embedding_column").and_then(|v| v.as_str()).unwrap_or("");
+                let k = s.get("top_k").and_then(|v| v.as_str()).unwrap_or("10");
+                json!({"query": format!(
+                    "SELECT *, array_cosine_similarity({}, embed('text-embedding-3-small', '{}')) AS similarity FROM input_0 ORDER BY similarity DESC LIMIT {}",
+                    col, query, k)})
+            });
+
+        // ─── flockmtl (LLM + RAG bridge) ───
+        def!("org.knime.base.node.mine.ai.LLMRAGNodeFactory", "core.sql",
+            |s| {
+                let prompt = s.get("prompt").and_then(|v| v.as_str()).unwrap_or("Answer based on context");
+                let context = s.get("context_column").and_then(|v| v.as_str()).unwrap_or("");
+                let model = s.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o");
+                json!({"query": format!(
+                    "SELECT *, llm_complete('{}', {} || '\n\n' || '{}') AS rag_response FROM input_0",
+                    model, context, prompt)})
+            });
+
+
         Self { type_map }
     }
 
