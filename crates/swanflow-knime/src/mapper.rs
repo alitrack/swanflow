@@ -2067,7 +2067,7 @@ impl KnimeNodeMapper {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let quantiles = s.get("quantiles").and_then(|v| v.as_str()).unwrap_or("0.25,0.5,0.75,0.95,0.99");
                 json!({"query": format!(
-                    "SELECT tdigest_quantile({}, [{}]) AS quantiles FROM input_0", col, quantiles)})
+                    "SELECT approx_quantile(\"{}\", [{}]) AS quantiles FROM input_0", col, quantiles)})
             });
 
         // ─── read_stat — SAS/Stata/SPSS via DuckDB stats_duck ───
@@ -2297,13 +2297,9 @@ impl KnimeNodeMapper {
                 json!({"query": format!("PRQL '{}' AS (SELECT * FROM input_0)", prql)})
             });
 
-        // ─── Substrait — query plan serialization ───
-        def!("org.knime.base.node.query.SubstraitExportNodeFactory", "core.sql",
-            |s| {
-                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/plan.substrait");
-                json!({"query": format!(
-                    "CALL get_substrait('SELECT * FROM input_0'); COPY (SELECT get_substrait('SELECT * FROM input_0')) TO '{}'", path)})
-            });
+        // ─── Substrait — query plan serialization (not yet a DuckDB extension) ───
+        def!("org.knime.base.node.query.SubstraitExportNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "No substrait DuckDB extension — consider ducklink WASM component for query plan serialization"}));
 
         // ─── Web Crawler — duckdb crawler extension ───
         def!("org.knime.base.node.io.web.WebCrawlerNodeFactory", "core.sql",
@@ -2339,19 +2335,13 @@ impl KnimeNodeMapper {
                     "SELECT *, tera_render('{}', {}) AS report FROM input_0", template, data_col)})
             });
 
-        // ─── ULID Generation ───
-        def!("org.knime.base.node.preproc.id.ULIDGeneratorNodeFactory", "core.sql",
-            |s| {
-                json!({"query": "SELECT *, ulid() AS ulid FROM input_0".to_string()})
-            });
+        // ─── ULID Generation (not yet a DuckDB extension) ───
+        def!("org.knime.base.node.preproc.id.ULIDGeneratorNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "No ulid DuckDB extension — consider ducklink WASM component for ULID generation"}));
 
-        // ─── Address Parsing (libpostal) ───
-        def!("org.knime.base.node.text.AddressParserNodeFactory", "core.sql",
-            |s| {
-                let col = s.get("address_column").and_then(|v| v.as_str()).unwrap_or("address");
-                json!({"query": format!(
-                    "SELECT *, parse_address({}) AS parsed_address FROM input_0", col)})
-            });
+        // ─── Address Parsing (libpostal — not yet a DuckDB extension) ───
+        def!("org.knime.base.node.text.AddressParserNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "No libpostal DuckDB extension — consider ducklink WASM component for address parsing"}));
 
         // ─── VIndex — advanced vector indexes (HNSW/IVF/DiskANN) ───
         def!("org.knime.base.node.mine.similarity.VIndexCreateNodeFactory", "core.sql",
@@ -2384,35 +2374,21 @@ impl KnimeNodeMapper {
                     "SELECT * FROM rawduck_ingest('{}')", path)})
             });
 
-        // ─── Chinese SQL (chsql) ───
-        def!("org.knime.base.node.query.ChineseSQLNodeFactory", "core.sql",
-            |s| {
-                let cn_query = s.get("chinese_query").and_then(|v| v.as_str()).unwrap_or("选择所有列");
-                json!({"query": format!(
-                    "CHSQL '{}' AS (SELECT * FROM input_0)", cn_query)})
-            });
+        // ─── Chinese SQL (chsql — not yet a DuckDB extension) ───
+        def!("org.knime.base.node.query.ChineseSQLNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "No chsql DuckDB extension — consider ducklink WASM component for Chinese SQL dialect"}));
 
-        // ─── AWS Ion format ───
-        def!("org.knime.base.node.io.filehandling.IonReaderNodeFactory", "core.sql",
-            |s| {
-                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_ion('{}')", path)})
-            });
+        // ─── AWS Ion format (not yet a DuckDB extension) ───
+        def!("org.knime.base.node.io.filehandling.IonReaderNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "No ion DuckDB extension — consider ducklink WASM component for AWS Ion parsing"}));
 
-        // ─── ShellFS — read shell command output as table ───
-        def!("org.knime.base.node.io.system.ShellCommandReaderNodeFactory", "core.sql",
-            |s| {
-                let cmd = s.get("command").and_then(|v| v.as_str()).unwrap_or("ls -la");
-                json!({"query": format!(
-                    "SELECT * FROM read_csv_auto('shellfs://{}')", cmd)})
-            });
+        // ─── ShellFS — shell command output (no DuckDB extension + security risk) ───
+        def!("org.knime.base.node.io.system.ShellCommandReaderNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "No shellfs DuckDB extension + security concern — consider ducklink WASM sandbox"}));
 
-        // ─── TAR Archive reader (tarfs) ───
-        def!("org.knime.base.node.io.filehandling.TARReaderNodeFactory", "core.sql",
-            |s| {
-                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM 'tarfs://{}'", path)})
-            });
+        // ─── TAR Archive reader (tarfs — not yet a DuckDB extension) ───
+        def!("org.knime.base.node.io.filehandling.TARReaderNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "No tarfs DuckDB extension — consider ducklink WASM component for TAR archive reading"}));
 
         // ─── Vortex format reader ───
         def!("org.knime.base.node.io.filehandling.VortexReaderNodeFactory", "core.sql",
@@ -2547,14 +2523,9 @@ impl KnimeNodeMapper {
                     "SELECT * FROM duck_lk('{}', '{}', '{}')", server, schema, query)})
             });
 
-        // ─── GSheet — Google Sheets native reader ───
-        def!("org.knime.ext.google.sheets.GoogleSheetsNativeReaderNodeFactory", "core.sql",
-            |s| {
-                let url = s.get("sheet_url").and_then(|v| v.as_str()).unwrap_or("");
-                let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
-                json!({"query": format!(
-                    "SELECT * FROM gsheet('{}', '{}')", url, sheet)})
-            });
+        // ─── GSheet — Google Sheets (no native extension; use cloudfs gdfs) ───
+        def!("org.knime.ext.google.sheets.GoogleSheetsNativeReaderNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "No gsheet DuckDB extension — use existing gdfs:// backend (cloudfs) or ducklink WASM"}));
 
         // ─── IP Network functions — duckdb inet extension ───
         def!("org.knime.base.node.network.IPAnalyzerNodeFactory", "core.sql",
