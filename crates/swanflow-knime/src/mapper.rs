@@ -550,10 +550,19 @@ impl KnimeNodeMapper {
             });
 
         // ─── Transform — One-to-Many / Many-to-One ───
-        def!("org.knime.base.node.preproc.one2many.OneToManyNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "one to many expand"}));
-        def!("org.knime.base.node.preproc.many2one.ManyToOneNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "many to one combine"}));
+        def!("org.knime.base.node.preproc.one2many.OneToManyNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let delim = s.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
+                json!({"query": format!("SELECT *, UNNEST(string_split(\"{}\", '{}')) AS {}_expanded FROM input_0", col, delim, col)})
+            });
+        def!("org.knime.base.node.preproc.many2one.ManyToOneNodeFactory", "core.sql",
+            |s| {
+                let group_col = s.get("group_column").and_then(|v| v.as_str()).unwrap_or("");
+                let agg_col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let sep = s.get("separator").and_then(|v| v.as_str()).unwrap_or(",");
+                json!({"query": format!("SELECT {}, string_agg(\"{}\", '{}') AS {}_combined FROM input_0 GROUP BY {}", group_col, agg_col, sep, agg_col, group_col)})
+            });
 
         // ─── Transform — Column Type ───
         def!("org.knime.base.node.preproc.colconvert.ColumnConverterNodeFactory", "core.sql",
@@ -1081,8 +1090,12 @@ impl KnimeNodeMapper {
                 let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
                 json!({"query": format!("SELECT * FROM read_csv_auto('gdfs://sheets/{}?sheet={}')", sid, sheet)})
             }, "Fallback: SwanFlow Python UDF → gspread");
-        def!("org.knime.ext.google.bigquery.GoogleBigQueryConnectorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "Google BigQuery"}));
+        def!("org.knime.ext.google.bigquery.GoogleBigQueryConnectorNodeFactory", "core.sql",
+            |s| {
+                let project = s.get("project_id").and_then(|v| v.as_str()).unwrap_or("");
+                let dataset = s.get("dataset").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM bigquery_scan('{}', '{}', 'SELECT * FROM table')", project, dataset)})
+            });
 
         // ─── Text Mining / NLP ───
         def!("org.knime.ext.textprocessing.nodes.preprocessing.documentvector.DocumentVectorNodeFactory", "core.sql",
@@ -1215,8 +1228,14 @@ impl KnimeNodeMapper {
             });
         def!("org.knime.base.node.mine.cluster.hierarchical.HierarchicalClusterNodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "hierarchical clustering (use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.mine.association.AssociationRuleLearnerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "association rules (use SwanFlow Python UDF)"}));
+        def!("org.knime.base.node.mine.association.AssociationRuleLearnerNodeFactory", "core.sql",
+            |s| {
+                let item_col = s.get("item_column").and_then(|v| v.as_str()).unwrap_or("");
+                let txn_col = s.get("transaction_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT a.{} AS antecedent, b.{} AS consequent, COUNT(*) AS support FROM input_0 a JOIN input_0 b ON a.{} = b.{} AND a.{} < b.{} GROUP BY 1, 2 HAVING COUNT(*) >= 2 ORDER BY support DESC",
+                    item_col, item_col, txn_col, txn_col, item_col, item_col)})
+            });
 
         // ─── Visualization ───
         def!("org.knime.base.node.viz.plotter.pie.PieChartNodeFactory", "core.sql",
@@ -1305,8 +1324,11 @@ impl KnimeNodeMapper {
             |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── One to Many ───
-        def!("org.knime.base.node.preproc.onetomany.OneToManyNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "one-to-many expansion"}));
+        def!("org.knime.base.node.preproc.onetomany.OneToManyNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, UNNEST(string_split(\"{}\", ',')) AS {}_expanded FROM input_0", col, col)})
+            });
 
         // ─── String / Text ───
         def!("org.knime.base.node.preproc.stringreplacer.StringReplacerNodeFactory", "core.sql",
