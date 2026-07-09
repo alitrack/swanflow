@@ -105,7 +105,7 @@ fn test_metanode_parsing() {
 
 #[test]
 fn test_parse_knar() {
-    let wfs = swanflow_knime::parse_knar("/Users/sa/ws/npp/knime/KNIME_study.knar")
+    let wfs = swanflow_knime::parse_knar("/tmp/KNIME_study.knar")
         .expect("Failed to parse .knar");
     
     println!("Total workflows parsed: {}", wfs.len());
@@ -163,7 +163,7 @@ async fn test_mapper_coverage() {
 // Test full .knar coverage
 #[test]
 fn test_knar_mapper_coverage() {
-    let wfs = swanflow_knime::parse_knar("/Users/sa/ws/npp/knime/KNIME_study.knar")
+    let wfs = swanflow_knime::parse_knar("/tmp/KNIME_study.knar")
         .expect("Failed to parse");
     
     let mapper = swanflow_knime::KnimeNodeMapper::new();
@@ -175,13 +175,10 @@ fn test_knar_mapper_coverage() {
         for node in &knwf.nodes {
             total += 1;
             let name = node.name.as_deref().unwrap_or("");
+            let factory = node.node_type.as_deref().unwrap_or("");
             let (sw_type, config) = mapper.resolve_node(node.node_type.as_deref(), &node.settings);
             if sw_type == "core.util.unknown" {
-                *unmapped_names.entry(name.to_string()).or_default() += 1;
-                // Also flag WASM fallbacks
-                if config.get("wasm_fallback").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    // Java snippets counted as WASM (semi-mapped)
-                }
+                *unmapped_names.entry(factory.to_string()).or_default() += 1;
             } else {
                 mapped += 1;
             }

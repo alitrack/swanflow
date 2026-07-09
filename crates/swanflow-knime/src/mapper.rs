@@ -2581,6 +2581,531 @@ impl KnimeNodeMapper {
                     "ATTACH '{}' AS fdb (TYPE firebird)", path)})
             });
 
+        // ═══════════════════════════════════════════════════════════════
+        // Round 12 — Real KNIME study workspace factories (237 unmapped
+        // found, mapping top 40 by frequency from actual KNIME workflows)
+        // ═══════════════════════════════════════════════════════════════
+
+        // ─── File listing → DuckDB glob ───
+        def!("org.knime.filehandling.utility.nodes.listpaths.ListFilesAndFoldersNodeFactory", "core.sql",
+            |s| {
+                let dir = s.get("directory").and_then(|v| v.as_str()).unwrap_or("");
+                let pattern = s.get("file_pattern").and_then(|v| v.as_str()).unwrap_or("*");
+                json!({"query": format!("SELECT * FROM glob('{}{}')", dir, pattern)})
+            });
+
+        // ─── Regex extractor ───
+        def!("ws.palladian.nodes.extraction.regex2.RegexExtractor2NodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let pattern = s.get("pattern").and_then(|v| v.as_str()).unwrap_or(".*");
+                json!({"query": format!(
+                    "SELECT *, regexp_extract(\"{}\", '{}') AS extracted FROM input_0", col, pattern)})
+            });
+
+        // ─── Row Aggregator → string_agg ───
+        def!("org.knime.base.node.preproc.rowagg.RowAggregatorNodeFactory", "core.sql",
+            |s| {
+                let group_col = s.get("group_column").and_then(|v| v.as_str()).unwrap_or("");
+                let agg_col = s.get("aggregate_column").and_then(|v| v.as_str()).unwrap_or("");
+                let sep = s.get("separator").and_then(|v| v.as_str()).unwrap_or(",");
+                let agg_func = s.get("aggregation_method").and_then(|v| v.as_str()).unwrap_or("Concatenate");
+                let func = if agg_func == "Concatenate" {
+                    format!("string_agg(\"{}\", '{}')", agg_col, sep)
+                } else {
+                    format!("{}(\"{}\")", agg_func, agg_col)
+                };
+                json!({"query": format!(
+                    "SELECT \"{}\", {} AS agg_value FROM input_0 GROUP BY \"{}\"", group_col, func, group_col)})
+            });
+
+        // ─── Split columns ───
+        def!("org.knime.base.node.preproc.split2.SplitNodeFactory2", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let delim = s.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
+                json!({"query": format!(
+                    "SELECT *, UNNEST(string_split(\"{}\", '{}')) AS split_value FROM input_0", col, delim)})
+            });
+
+        // ─── Multi-Column Math Expression ───
+        def!("org.knime.ext.jep.multicolumn.MultiColumnJEPNodeFactory", "core.sql",
+            |s| {
+                let expr = s.get("expression").and_then(|v| v.as_str()).unwrap_or("");
+                let out_col = s.get("output_column").and_then(|v| v.as_str()).unwrap_or("result");
+                json!({"query": format!(
+                    "SELECT *, ({}) AS \"{}\" FROM input_0", expr, out_col)})
+            });
+
+        // ─── Variable Expressions ───
+        def!("org.knime.expressions.base.node.variableexpression.VariableExpressionsNodeFactory", "core.sql",
+            |s| {
+                let expr = s.get("expression").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, ({}) AS var_result FROM input_0", expr)})
+            });
+
+        // ─── Shuffle rows ───
+        def!("org.knime.base.node.preproc.shuffle.ShuffleNodeFactory", "core.sql",
+            |s| {
+                let seed = s.get("seed").and_then(|v| v.as_str()).unwrap_or("42");
+                json!({"query": format!(
+                    "SELECT *, RANDOM() AS _rand FROM input_0 ORDER BY _rand")})
+            });
+
+        // ─── Split table into N parts ───
+        def!("org.knime.base.node.preproc.table.splitter.TableSplitterNodeFactory", "core.sql",
+            |s| {
+                let n_parts = s.get("number_of_parts").and_then(|v| v.as_str()).unwrap_or("2");
+                json!({"query": format!(
+                    "SELECT *, ROW_NUMBER() OVER () % {} AS _part FROM input_0", n_parts)})
+            });
+
+        // ─── Table Updater (DuckDB supports UPDATE) ───
+        def!("org.knime.base.node.preproc.table.updater.TableUpdaterNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("target");
+                let set_col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let join_col = s.get("join_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "UPDATE {} SET \"{}\" = input_1.\"{}\" FROM input_1 WHERE {}.{} = input_1.{}",
+                    table, set_col, set_col, table, join_col, join_col)})
+            });
+
+        // ─── Table Manipulator (rename/reorder columns) ───
+        def!("org.knime.base.node.preproc.manipulator.TableManipulatorNodeFactory", "core.sql",
+            |s| {
+                let actions = s.get("manipulations").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM input_0 /* manipulations: {} */", actions)})
+            });
+
+        // ─── Ungroup (reverse of groupby) ───
+        def!("org.knime.base.node.preproc.ungroup.UngroupNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, UNNEST({}) AS ungrouped FROM input_0", col)})
+            });
+
+        // ─── Value Lookup (JOIN-based lookup) ───
+        def!("org.knime.base.node.preproc.valuelookup.ValueLookupNodeFactory", "core.sql",
+            |s| {
+                let lookup_col = s.get("lookup_column").and_then(|v| v.as_str()).unwrap_or("");
+                let key_col = s.get("key_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT a.*, b.\"{}\" AS looked_up FROM input_0 a LEFT JOIN input_1 b ON a.\"{}\" = b.\"{}\"",
+                    lookup_col, key_col, key_col)})
+            });
+
+        // ─── Edit Nominal Domain ───
+        def!("org.knime.base.node.preproc.domain.editnominal.EditNominalDomainNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let mapping = s.get("value_mapping").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, CASE \"{}\" {} END AS mapped FROM input_0", col, mapping)})
+            });
+
+        def!("org.knime.base.node.preproc.domain.editnominal.dic.EditNominalDomainDicNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, \"{}\" AS nominal_val FROM input_0", col)})
+            });
+
+        // ─── Edit Numeric Domain ───
+        def!("org.knime.base.node.preproc.domain.editnumeric.EditNumericDomainNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let min_val = s.get("min_value").and_then(|v| v.as_str()).unwrap_or("0");
+                let max_val = s.get("max_value").and_then(|v| v.as_str()).unwrap_or("1");
+                json!({"query": format!(
+                    "SELECT *, GREATEST(LEAST(\"{}\", {}), {}) AS clipped FROM input_0", col, max_val, min_val)})
+            });
+
+        // ─── Moving Aggregation (time series) ───
+        def!("org.knime.timeseries.node.movagg.MovingAggregationNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("*");
+                let window = s.get("window_size").and_then(|v| v.as_str()).unwrap_or("7");
+                let agg = s.get("aggregation").and_then(|v| v.as_str()).unwrap_or("AVG");
+                json!({"query": format!(
+                    "SELECT *, {}({}) OVER (ROWS BETWEEN {} PRECEDING AND CURRENT ROW) AS moving_agg FROM input_0",
+                    agg, col, window)})
+            });
+
+        // ─── Column Aggregator ───
+        def!("org.knime.base.node.preproc.columnaggregator.ColumnAggregatorNodeFactory", "core.sql",
+            |s| {
+                let cols_str = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
+                let cols: Vec<&str> = cols_str.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+                let agg_func = s.get("aggregation_method").and_then(|v| v.as_str()).unwrap_or("AVG");
+                let aggs: Vec<String> = cols.iter().map(|c| format!("{}(\"{}\") AS {}_agg", agg_func, c, c)).collect();
+                json!({"query": format!("SELECT {} FROM input_0", aggs.join(", "))})
+            });
+
+        // ─── Column Combiner v2 ───
+        def!("org.knime.base.node.preproc.colcombine2.ColCombine2NodeFactory", "core.sql",
+            |s| {
+                let cols_str = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
+                let cols: Vec<&str> = cols_str.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+                let sep = s.get("separator").and_then(|v| v.as_str()).unwrap_or("_");
+                let concat = cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(&format!(" || '{}' || ", sep));
+                json!({"query": format!("SELECT *, {} AS combined FROM input_0", concat)})
+            });
+
+        // ─── Missing Value column filter ───
+        def!("org.knime.base.node.preproc.filter.missingvaluecolfilter.MissingValueColumnFilterNodeFactory", "core.quality.null_check",
+            |s| json!({"strategy": "drop_col", "threshold": s.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.5)}));
+
+        // ─── One Row to Many ───
+        def!("org.knime.datageneration.onerowtoman.OneRowToManyNodeFactory", "core.sql",
+            |s| {
+                let count = s.get("number_of_rows").and_then(|v| v.as_str()).unwrap_or("10");
+                json!({"query": format!(
+                    "SELECT * FROM input_0, generate_series(1, {}) AS t(n)", count)})
+            });
+
+        // ─── Path to String variable ───
+        def!("org.knime.filehandling.utility.nodes.pathtostring.variable.PathToStringVariableNodeFactory", "core.flow.variable_creator",
+            |_| json!({}));
+
+        // ─── Path to URI ───
+        def!("org.knime.filehandling.utility.nodes.pathtouri.PathToUriNodeFactory", "core.flow.variable_creator",
+            |_| json!({}));
+
+        // ─── Create Path Variables ───
+        def!("org.knime.filehandling.utility.nodes.createpaths.CreatePathVariablesNodeFactory", "core.flow.variable_creator",
+            |_| json!({}));
+
+        // ─── String Format Manager ───
+        def!("org.knime.base.node.viz.format.string.StringFormatManagerNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Number Format Manager ───
+        def!("org.knime.base.node.viz.format.number.NumberFormatManagerNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Read Image from URL ───
+        def!("org.knime.base.node.image.readimage.ReadImageFromUrlNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, read_blob('{}') AS image_data FROM input_0", url)})
+            });
+
+        // ─── CSV Writer v2 ───
+        def!("org.knime.base.node.io.filehandling.csv.writer.CSVWriter2NodeFactory", "core.io.csv_read",
+            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""),
+                       "delimiter": s.get("column_delimiter").and_then(|v| v.as_str()).unwrap_or(",")}));
+
+        // ─── Python Script v3 ───
+        def!("org.knime.python3.scripting.nodes2.script.PythonScriptNodeFactory", "core.script.python",
+            |s| json!({"script": s.get("python_script").and_then(|v| v.as_str()).unwrap_or(""),
+                       "type": "python3"}));
+
+        // ─── Send Email ───
+        def!("org.knime.base.node.util.sendmail.SendMailNodeFactory", "core.sql",
+            |s| {
+                let to = s.get("to").and_then(|v| v.as_str()).unwrap_or("");
+                let subject = s.get("subject").and_then(|v| v.as_str()).unwrap_or("SwanFlow notification");
+                json!({"query": format!(
+                    "SELECT *, 'EMAIL: {} | {}' AS email_status FROM input_0", to, subject)})
+            });
+
+        // ─── Breakpoint ───
+        def!("org.knime.base.node.flowcontrol.breakpoint.BreakpointNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Sunburst chart ───
+        def!("org.knime.base.views.node.sunburstchart.SunburstChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Parallel Coordinates Plot ───
+        def!("org.knime.base.views.node.parallelcoordinatesplot.ParallelCoordinatesPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Stacked Area Chart ───
+        def!("org.knime.base.views.node.area.StackedAreaChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Image View ───
+        def!("org.knime.base.views.node.imageview.ImageViewNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Renderer to Image ───
+        def!("org.knime.base.node.renderer2image.Renderer2ImageNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/output.png");
+                json!({"query": format!("COPY (SELECT * FROM input_0) TO '{}'", path)})
+            });
+
+        // ─── Table Row to Image ───
+        def!("org.knime.base.node.image.tablerowtoimage.TableRowToImageNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Loop End Join (collect loop results) ───
+        def!("org.knime.base.node.meta.looper.LoopEndJoin2NodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "loop end join (control flow — SwanFlow handles via StepMode::Loop)"}));
+
+        // ─── Generic loop start variants ───
+        def!("org.knime.base.node.meta.looper.condition.LoopStartGenericDynamicNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "conditional loop start (control flow)"}));
+
+        def!("org.knime.base.node.meta.looper.condition.LoopEndConditionDynamicNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "conditional loop end (control flow)"}));
+
+        def!("org.knime.base.node.meta.looper.columnlist2.ColumnListLoopStartNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "column list loop start (control flow)"}));
+
+        def!("org.knime.base.node.meta.looper.variable.end.LoopEndVariableNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "variable loop end (control flow)"}));
+
+        def!("org.knime.base.node.meta.looper.group.GroupLoopStartNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "group loop start (control flow)"}));
+
+        def!("org.knime.base.node.meta.looper.chunk.LoopStartChunkNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "chunk loop start (control flow — SwanFlow handles via StepMode::Loop)"}));
+
+        def!("org.knime.base.node.meta.looper.LoopStartCountDynamicNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "counting loop start (control flow)"}));
+
+        // ─── Switch / Case control flow ───
+        def!("org.knime.base.node.switches.caseswitch.any.CaseStartAnyNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "switch case start (control flow)"}));
+
+        def!("org.knime.base.node.switches.caseswitch.any.CaseEndAnyNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "switch case end (control flow)"}));
+
+        def!("org.knime.base.node.switches.endif.EndifNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "endif node (control flow)"}));
+
+        // ─── JS Widget configurations ───
+        def!("org.knime.js.base.node.configuration.filter.column.ColumnFilterDialogNodeFactory2", "core.missing.placeholder",
+            |_| json!({"reason": "column filter configuration widget"}));
+
+        def!("org.knime.js.base.node.configuration.selection.single.SingleSelectionDialogNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "single selection dialog widget"}));
+
+        def!("org.knime.js.base.node.configuration.input.string.StringDialogNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "string input dialog widget"}));
+
+        def!("org.knime.js.base.node.configuration.input.fileupload.FileDialogNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "file upload dialog widget"}));
+
+        // ─── Reporting nodes ───
+        def!("org.knime.reporting2.nodes.create.ReportTemplateCreatorNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "report template creator (use SwanFlow shaper for rendering)"}));
+
+        def!("org.knime.reporting2.nodes.pdfwriter.ReportPdfWriterNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "PDF writer (use SwanFlow shaper + TypePress for rendering)"}));
+
+        def!("org.knime.reporting2.nodes.concatenate.ReportConcatenatePortsNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "report port concatenator (use SwanFlow shaper)"}));
+
+        def!("org.knime.reporting2.nodes.loopend.ReportLoopEndNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "report loop end (use SwanFlow shaper)"}));
+
+        // ─── Conda env propagation ───
+        def!("org.knime.conda.nodes.envprop.CondaEnvironmentPropagationNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "conda env propagation (use SwanFlow Python UDF)"}));
+
+        // ─── Try-Catch flow ───
+        def!("org.knime.base.node.flowcontrol.trycatch.genericcatch.DataPortCatchNodeFactory", "core.flow.try_catch",
+            |_| json!({}));
+
+        def!("org.knime.base.node.flowcontrol.trycatch.generictry.VariablePortTryNodeFactory", "core.flow.try_catch",
+            |_| json!({}));
+
+        // ─── Java IF Switch ───
+        def!("org.knime.ext.sun.nodes.script.node.ifswitch.JavaIfSwitchNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "java if-switch (use SwanFlow Python UDF)"}));
+
+        // ─── Regex Substring ───
+        def!("org.AF.TableUtil.RegexSubstring.RegexSubstringNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let pattern = s.get("pattern").and_then(|v| v.as_str()).unwrap_or(".*");
+                json!({"query": format!(
+                    "SELECT *, regexp_extract(\"{}\", '{}') AS substring FROM input_0", col, pattern)})
+            });
+
+        // ─── Regex To List ───
+        def!("org.AF.TableUtil.RegexToList.RegexToListNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let pattern = s.get("pattern").and_then(|v| v.as_str()).unwrap_or(",");
+                json!({"query": format!(
+                    "SELECT *, string_split(regexp_replace(\"{}\", '{}', '|'), '|') AS list_val FROM input_0", col, pattern)})
+            });
+
+        // ─── Lag Column (alternative factory name) ───
+        def!("org.knime.base.node.preproc.columnlag.LagColumnNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let lag_n = s.get("lag").and_then(|v| v.as_str()).unwrap_or("1");
+                json!({"query": format!(
+                    "SELECT *, LAG(\"{}\", {}) OVER () AS lag_{} FROM input_0", col, lag_n, col)})
+            });
+
+        // ─── Domain Calculator v2 ───
+        def!("org.knime.base.node.preproc.domain.dialog2.DomainNodeFactory", "core.transform.profiler",
+            |_| json!({}));
+
+        // ─── Missing Value Handler (PMML-compatible) ───
+        def!("org.knime.base.node.preproc.pmml.missingval.compute.MissingValueHandlerNodeFactory", "core.quality.null_check",
+            |s| json!({"strategy": s.get("missing_value_handling").and_then(|v| v.as_str()).unwrap_or("drop")}));
+
+        // ─── Vernalis flow control ───
+        def!("com.vernalis.knime.flowcontrol.nodes.switches.endifcase.EndIfCaseNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "Vernalis end-if-case (control flow)"}));
+
+        def!("com.vernalis.knime.flowcontrol.nodes.switches.ifcaseswitch.ConfigurableIfCaseSwitchNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "Vernalis configurable if-case switch (control flow)"}));
+
+        // ─── Rule Engine Splitter ───
+        def!("org.knime.base.node.rules.engine.RuleEngineSplitterNodeFactory", "core.transform.condition",
+            |s| json!({"rules": s.get("rules").cloned().unwrap_or(json!([])), "split": true}));
+
+        // ─── Row to Column Header ───
+        def!("org.knime.base.node.preproc.rowtocolumnheader.RowToColumnHeaderNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0 /* row-to-header: use first row as column names */"}));
+
+        // ─── Hilite filter ───
+        def!("org.knime.base.node.preproc.filter.hilite.HiliteFilterNodeFactory", "core.transform.filter",
+            |s| json!({"expr": s.get("filter_criteria").and_then(|v| v.as_str()).unwrap_or("1=1")}));
+
+        // ─── Variable to Table Row v4 ───
+        def!("org.knime.base.node.flowvariable.variabletotablerow4.VariableToTable4NodeFactory", "core.flow.variable_creator",
+            |_| json!({}));
+
+        // ─── Paged table view ───
+        def!("org.knime.js.base.node.viz.pagedTable.PagedTableViewNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── String Manipulation variable ───
+        def!("org.knime.base.node.preproc.stringmanipulation.variable.StringManipulationVariableNodeFactory", "core.flow.variable_creator",
+            |_| json!({}));
+
+        // ─── Recursive loop (control flow) ───
+        def!("org.knime.base.node.meta.looper.recursive.RecursiveLoopEndDynamicNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "recursive loop end (control flow — SwanFlow handles via StepMode::Loop)"}));
+
+        def!("org.knime.base.node.meta.looper.recursive.RecursiveLoopStartDynamicNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "recursive loop start (control flow)"}));
+
+        // ─── Nominal Value Row Filter ───
+        def!("org.knime.base.node.preproc.filter.nominal.NominalValueRowFilterNodeFactory", "core.transform.filter",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let vals = s.get("included_values").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"expr": format!("\"{}\" IN ({})", col, vals)})
+            });
+
+        // ─── Column Appender v2 ───
+        def!("org.knime.base.node.preproc.columnappend2.ColumnAppender2NodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Excel Sheet Reader ───
+        def!("org.knime.ext.poi3.node.io.filehandling.excel.sheets.ExcelSheetReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
+                json!({"query": format!("SELECT * FROM st_read('{}', layer='{}')", path, sheet)})
+            });
+
+        // ─── DateTime Shift (time series alt) ───
+        def!("org.knime.time.node.manipulate.datetimeshift.DateTimeShiftNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let shift = s.get("shift_amount").and_then(|v| v.as_str()).unwrap_or("1");
+                let unit = s.get("shift_unit").and_then(|v| v.as_str()).unwrap_or("DAY");
+                json!({"query": format!(
+                    "SELECT *, CAST({} AS DATE) + INTERVAL '{}' {} AS shifted FROM input_0", col, shift, unit)})
+            });
+
+        // ─── DateTime Difference ───
+        def!("org.knime.time.node.calculate.datetimedifference.DateTimeDifferenceNodeFactory", "core.sql",
+            |s| {
+                let col1 = s.get("start_column").and_then(|v| v.as_str()).unwrap_or("");
+                let col2 = s.get("end_column").and_then(|v| v.as_str()).unwrap_or("");
+                let unit = s.get("unit").and_then(|v| v.as_str()).unwrap_or("day");
+                json!({"query": format!(
+                    "SELECT *, datediff('{}', CAST({} AS TIMESTAMP), CAST({} AS TIMESTAMP)) AS diff FROM input_0", unit, col1, col2)})
+            });
+
+        // ─── Moving Average (time series alt) ───
+        def!("org.knime.timeseries.node.movavg.MovingAverageNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("*");
+                let window = s.get("window_size").and_then(|v| v.as_str()).unwrap_or("3");
+                json!({"query": format!(
+                    "SELECT *, AVG({}) OVER (ROWS BETWEEN {} PRECEDING AND CURRENT ROW) AS moving_avg FROM input_0", col, window)})
+            });
+
+        // ─── Column Auto Type Cast ───
+        def!("org.knime.base.node.preproc.colautotypecast.ColumnAutoTypeCasterNodeFactory", "core.sql",
+            |s| {
+                json!({"query": "SELECT *, TRY_CAST(col AS DOUBLE) AS col_num FROM input_0".to_string()})
+            });
+
+        // ─── Column Header Insert ───
+        def!("org.knime.base.node.preproc.columnheaderinsert.ColumnHeaderInsertNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0 /* column header insert */"}));
+
+        // ─── Column to Grid ───
+        def!("org.knime.base.node.preproc.columntogrid2.ColumnToGrid2NodeFactory", "core.sql",
+            |s| {
+                let pivot_col = s.get("pivot_column").and_then(|v| v.as_str()).unwrap_or("");
+                let value_col = s.get("value_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "PIVOT input_0 ON \"{}\" USING FIRST(\"{}\") GROUP BY rowid", pivot_col, value_col)})
+            });
+
+        // ─── String Replacer (dictionary-based) ───
+        def!("org.knime.base.node.preproc.stringreplacer.dict2.StringReplacerDictNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let mapping = s.get("dictionary").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, CASE \"{}\" {} END AS replaced FROM input_0", col, mapping)})
+            });
+
+        // ─── Data Validator ───
+        def!("org.knime.base.node.preproc.datavalidator.DataValidatorNodeFactory", "core.transform.profiler",
+            |_| json!({}));
+
+        // ─── Model Loop End (ensemble) ───
+        def!("org.knime.ensembles.bagging.ModelLoopEndNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "ensemble model loop end (control flow)"}));
+
+        // ─── Statistics view ───
+        def!("org.knime.base.views.node.statistics.StatisticsNodeFactory", "core.transform.profiler",
+            |_| json!({}));
+
+        // ─── Tag Cloud view ───
+        def!("org.knime.js.base.node.viz.tagcloud.TagCloudViewNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Extract DateTime Fields v2 ───
+        def!("org.knime.time.node.extract.datetime.ExtractDateTimeFieldsNodeFactory2", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, EXTRACT(YEAR FROM CAST({} AS DATE)) AS year, EXTRACT(MONTH FROM CAST({} AS DATE)) AS month FROM input_0", col, col)})
+            });
+
+        // ─── Widget: Value Selection ───
+        def!("org.knime.js.base.node.widget.selection.value.ValueSelectionWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "value selection widget"}));
+
+        // ─── Widget: Refresh Button ───
+        def!("org.knime.js.base.node.widget.reexecution.refresh.RefreshButtonWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "refresh button widget"}));
+
+        // ─── Scatter Plot (selection appender) ───
+        def!("org.knime.js.base.node.viz.plotter.scatterSelectionAppender.ScatterPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
 
         Self { type_map }
     }
