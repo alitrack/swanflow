@@ -334,6 +334,446 @@ impl KnimeNodeMapper {
         // ─── Time ───
         def!("org.knime.time.node.create.createdatetime.CreateDateTimeNodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "datetime create"}));
+        def!("org.knime.time.node.extract.datetime.ExtractDateTimeFieldNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let fields = s.get("extracted_fields").and_then(|v| v.as_str()).unwrap_or("year");
+                json!({"query": format!("SELECT *, EXTRACT({} FROM {}) AS extracted_{} FROM input_0", fields, col, fields)})
+            });
+        def!("org.knime.time.node.convert.stringtoduration.StringToDurationNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "string to duration convert"}));
+        def!("org.knime.time.node.shift.time.ShiftTimeNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "time shift"}));
+        def!("org.knime.time.node.create.datetimerange.DateTimeRangeNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "datetime range create"}));
+        def!("org.knime.time.node.extract.timefield.ExtractTimeFieldNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, EXTRACT(HOUR FROM {}) AS hour, EXTRACT(MINUTE FROM {}) AS minute FROM input_0", col, col)})
+            });
+
+        // ─── ETL / DB Write ───
+        def!("org.knime.base.node.io.database.DBWriterNodeFactory", "core.io.db_write",
+            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
+                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or("")}));
+        def!("org.knime.base.node.io.database.DBInsertNodeFactory", "core.io.db_write",
+            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
+                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or(""),
+                       "mode": "insert"}));
+        def!("org.knime.base.node.io.database.DBDeleteNodeFactory", "core.io.db_write",
+            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
+                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or(""),
+                       "mode": "delete"}));
+        def!("org.knime.base.node.io.database.DBUpdateNodeFactory", "core.io.db_write",
+            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
+                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or(""),
+                       "mode": "update"}));
+        def!("org.knime.base.node.io.filestore.FileDownloadNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "file download"}));
+        def!("org.knime.base.node.io.filehandling.node.FileListDirectoryNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "file list directory"}));
+
+        // ─── REST / HTTP ───
+        def!("org.knime.rest.nodes.GETRequestNodeFactory", "core.missing.placeholder",
+            |s| json!({"reason": "REST GET", "url": s.get("url").and_then(|v| v.as_str()).unwrap_or("")}));
+        def!("org.knime.rest.nodes.POSTRequestNodeFactory", "core.missing.placeholder",
+            |s| json!({"reason": "REST POST", "url": s.get("url").and_then(|v| v.as_str()).unwrap_or("")}));
+        def!("org.knime.rest.nodes.PUTRequestNodeFactory", "core.missing.placeholder",
+            |s| json!({"reason": "REST PUT", "url": s.get("url").and_then(|v| v.as_str()).unwrap_or("")}));
+
+        // ─── Transform — String / Regex ───
+        def!("org.knime.base.node.preproc.stringreplacer.StringReplaceNodeFactory", "core.transform.project",
+            |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
+                       "pattern": s.get("pattern").and_then(|v| v.as_str()),
+                       "replacement": s.get("replacement").and_then(|v| v.as_str())}));
+        def!("org.knime.base.node.preproc.regexsplit.RegexSplitNodeFactory", "core.sql",
+            |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
+                       "pattern": s.get("pattern").and_then(|v| v.as_str())}));
+
+        // ─── Transform — Normalize / Scale ───
+        def!("org.knime.base.node.preproc.normalize.NormalizerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "normalizer"}));
+        def!("org.knime.base.node.preproc.normalize.NormalizerNodeFactory2", "core.missing.placeholder",
+            |_| json!({"reason": "normalizer v2"}));
+        def!("org.knime.base.node.preproc.normalize.NormalizerNodeFactory3", "core.missing.placeholder",
+            |_| json!({"reason": "normalizer v3"}));
+
+        // ─── Transform — Round / Number ───
+        def!("org.knime.base.node.preproc.rounddouble.RoundDoubleNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let digits = s.get("decimal_places").and_then(|v| v.as_str()).unwrap_or("0");
+                json!({"query": format!("SELECT *, ROUND({}, {}) AS {}_rounded FROM input_0", col, digits, col)})
+            });
+        def!("org.knime.base.node.util.numberrounder.NumberRounderNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, ROUND({}) FROM input_0", col)})
+            });
+
+        // ─── Transform — Binning ───
+        def!("org.knime.base.node.preproc.binner.BinnerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "binner"}));
+        def!("org.knime.base.node.preproc.autobinner.AutoBinnerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "auto binner"}));
+
+        // ─── Transform — Lag / Moving Average ───
+        def!("org.knime.base.node.preproc.lag.LagColumnNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "lag column"}));
+        def!("org.knime.base.node.preproc.movingaverage.MovingAverageNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "moving average"}));
+
+        // ─── Transform — One-to-Many / Many-to-One ───
+        def!("org.knime.base.node.preproc.one2many.OneToManyNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "one to many expand"}));
+        def!("org.knime.base.node.preproc.many2one.ManyToOneNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "many to one combine"}));
+
+        // ─── Transform — Column Type ───
+        def!("org.knime.base.node.preproc.colconvert.ColumnConverterNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "column type converter"}));
+        def!("org.knime.base.node.preproc.domain.DomainCalculatorNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "domain calculator"}));
+        def!("org.knime.base.node.preproc.colconvert.stringtonumber.StringToNumberNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "string to number"}));
+        def!("org.knime.base.node.preproc.colconvert.numbertostring.NumberToStringNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "number to string"}));
+
+        // ─── Transform — Missing Value variants ───
+        def!("org.knime.base.node.preproc.missingval.handler.MissingValueColumnFilterNodeFactory", "core.quality.null_check",
+            |s| json!({"strategy": "drop_col", "threshold": s.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.5)}));
+        def!("org.knime.base.node.preproc.filter.row.ReferenceRowFilterNodeFactory", "core.transform.filter",
+            |s| json!({"expr": s.get("filter_criteria").and_then(|v| v.as_str()).unwrap_or("1=1")}));
+        def!("org.knime.base.node.preproc.row.filter.NominalValueRowFilterNodeFactory", "core.transform.filter",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let vals = s.get("included_values").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"expr": format!("{} IN ({})", col, vals)})
+            });
+
+        // ─── Flow Control — Switch / IF / Try-Catch ───
+        def!("org.knime.base.node.meta.switchend.SwitchEndNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "switch end"}));
+        def!("org.knime.base.node.meta.extractvariable.ExtractVariableNodeFactory", "core.flow.variable_creator",
+            |_| json!({}));
+        def!("org.knime.base.node.meta.trycatch.TryCatchNodeFactory", "core.flow.try_catch",
+            |_| json!({}));
+        def!("org.knime.base.node.meta.switch3.Switch3NodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "switch case"}));
+
+        // ─── Loop Start variants ───
+        def!("org.knime.base.node.meta.looper.counting.loopstart.LoopStartCountingNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "counting loop start"}));
+        def!("org.knime.base.node.meta.looper.interval.LoopStartIntervalNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "interval loop start"}));
+        def!("org.knime.base.node.meta.looper.generic.LoopStartGenericNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "generic loop start"}));
+        def!("org.knime.base.node.meta.looper.table.LoopStartTableNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "table row loop start"}));
+        def!("org.knime.base.node.meta.looper.file.LoopStartFileNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "file list loop start"}));
+
+        // ─── Loop End variants ───
+        def!("org.knime.base.node.meta.looper.table.LoopEndTableNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "table loop end"}));
+        def!("org.knime.base.node.meta.looper.file.LoopEndFileNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "file loop end"}));
+
+        // ─── Flow Variable nodes ───
+        def!("org.knime.base.node.flowvariable.tablerowtovariable2.TableRowToVariable2NodeFactory", "core.flow.variable_creator",
+            |_| json!({}));
+        def!("org.knime.base.node.flowvariable.tablerowtovariable.TableRowToVariableNodeFactory", "core.flow.variable_creator",
+            |_| json!({}));
+        def!("org.knime.base.node.flowvariable.variabletoreaderow.VariableToTableRowNodeFactory", "core.flow.variable_creator",
+            |_| json!({}));
+
+        // ─── Timer / Wait ───
+        def!("org.knime.base.node.meta.timedloop.TimedLoopStartNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "timer wait"}));
+
+        // ─── Workflow / SSH ───
+        def!("org.knime.base.node.meta.caller.WorkflowExecutorNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "workflow executor"}));
+        def!("org.knime.ext.ssh.SSHConnectionNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "ssh connection"}));
+        def!("org.knime.ext.ssh.SSHCommandNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "ssh command"}));
+
+        // ─── Analysis — Regression ───
+        def!("org.knime.base.node.mine.regression.linear.LinearRegressionNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "linear regression"}));
+        def!("org.knime.base.node.mine.regression.logistic.LogisticRegressionNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "logistic regression"}));
+        def!("org.knime.base.node.mine.regression.polynomial.PolynomialRegressionNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "polynomial regression"}));
+
+        // ─── Analysis — Tree / Ensemble ───
+        def!("org.knime.base.node.mine.decisiontree2.DecisionTreeLearnerNodeFactory2", "core.missing.placeholder",
+            |_| json!({"reason": "decision tree learner"}));
+        def!("org.knime.base.node.mine.decisiontree2.DecisionTreePredictorNodeFactory2", "core.missing.placeholder",
+            |_| json!({"reason": "decision tree predictor"}));
+        def!("org.knime.base.node.mine.treeensemble.randomforest.RandomForestLearnerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "random forest learner"}));
+        def!("org.knime.base.node.mine.treeensemble.randomforest.RandomForestPredictorNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "random forest predictor"}));
+        def!("org.knime.base.node.mine.treeensemble.gradientboost.GradientBoostLearnerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "gradient boost learner"}));
+
+        // ─── Analysis — Clustering ───
+        def!("org.knime.base.node.mine.cluster.kmeans.KMeansNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "k-means clustering"}));
+        def!("org.knime.base.node.mine.cluster.hierarchical.HierarchicalClusterNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "hierarchical clustering"}));
+        def!("org.knime.base.node.mine.cluster.dbscan.DBSCANNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "DBSCAN clustering"}));
+
+        // ─── Analysis — Dimension Reduction ───
+        def!("org.knime.base.node.mine.pca.PCANodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "PCA"}));
+
+        // ─── Analysis — Statistics ───
+        def!("org.knime.base.node.stats.correlation.CorrelationNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "correlation matrix"}));
+        def!("org.knime.base.node.stats.shapiro.ShapiroWilkNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "shapiro-wilk normality test"}));
+        def!("org.knime.base.node.stats.ttest.TTestNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "t-test"}));
+        def!("org.knime.base.node.stats.anova.ANOVANodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "ANOVA"}));
+        def!("org.knime.base.node.stats.chisquare.ChiSquareNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "chi-square test"}));
+
+        // ─── Analysis — Naive Bayes / SVM / MLP ───
+        def!("org.knime.base.node.mine.bayes.naivebayes.NaiveBayesLearnerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "naive bayes learner"}));
+        def!("org.knime.base.node.mine.bayes.naivebayes.NaiveBayesPredictorNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "naive bayes predictor"}));
+        def!("org.knime.base.node.mine.svm.SVMLearnerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "SVM learner"}));
+        def!("org.knime.base.node.mine.svm.SVMPredictorNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "SVM predictor"}));
+        def!("org.knime.base.node.mine.mlp.MLPLearnerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "MLP learner"}));
+        def!("org.knime.base.node.mine.mlp.MLPPredictorNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "MLP predictor"}));
+
+        // ─── Analysis — Scoring / PMML ───
+        def!("org.knime.base.node.mine.scorer.accuracy.AccuracyScorerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "accuracy scorer"}));
+        def!("org.knime.base.node.io.pmml.PMMLWriterNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "PMML writer"}));
+        def!("org.knime.base.node.io.pmml.PMMLReaderNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "PMML reader"}));
+
+        // ─── Scripting ───
+        def!("org.knime.base.node.preproc.r.RSnippetNodeFactory", "core.script.python",
+            |s| json!({"script": s.get("r_script").and_then(|v| v.as_str()).unwrap_or(""), "type": "r"}));
+        def!("org.knime.base.node.preproc.java.JavaSnippetNodeFactory", "core.script.python",
+            |s| json!({"script": s.get("java_script").and_then(|v| v.as_str()).unwrap_or(""), "type": "java"}));
+        def!("org.knime.base.node.preproc.javaedit.JavaEditVariableNodeFactory", "core.script.python",
+            |s| json!({"script": s.get("java_script").and_then(|v| v.as_str()).unwrap_or(""), "type": "java_variable"}));
+
+        // ─── Image / Binary ───
+        def!("org.knime.base.node.viz.image.ImagePortObjectToImageNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.io.imgwriter.ImageWriterNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "image writer"}));
+        def!("org.knime.base.node.io.imgreader.ImageReaderNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "image reader"}));
+
+        // ─── Viz — Classic Views (core.sql passthrough) ───
+        def!("org.knime.base.views.node.lineplot.LinePlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.views.node.scatterplot.ScatterPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.views.node.piechart.PieChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.views.node.histogram.HistogramNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.views.node.boxplot.BoxPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.views.node.heatmap.HeatMapNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Viz — Plotter variants ───
+        def!("org.knime.base.node.viz.plotter.line.LinePlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.scatter.ScatterPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.pie.PieChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.histogram.HistogramNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.box.BoxPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.scattermatrix.ScatterMatrixNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.parallelcoordinates.ParallelCoordinatesNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.heatmap.HeatMapNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.sunburst.SunburstNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.histogram.HistogramNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.radviz.RadVizNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.tagcloud.TagCloudNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Viz — JS (Modern) views ───
+        def!("org.knime.js.base.node.viz.scatter.ScatterPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.line.LinePlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.bar.BarChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.pie.PieChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.histogram.HistogramNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.box.BoxPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.table.TableViewNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.heatmap.HeatMapNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.sunburst.SunburstNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.parallelcoordinates.ParallelCoordinatesNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.scatterplotmatrix.ScatterPlotMatrixNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.tile.TileViewNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.radviz.RadVizNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.tagcloud.TagCloudNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.lift.LiftChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.roc.ROCNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.network.NetworkGraphNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Viz — Color / Shape / Size Manager ───
+        def!("org.knime.base.node.viz.property.color.ColorManagerNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.property.shape.ShapeManagerNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.property.size.SizeManagerNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── IO — Model / ARFF / Parquet ───
+        def!("org.knime.base.node.io.filehandling.ARFFReaderNodeFactory", "core.io.csv_read",
+            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""), "format": "arff"}));
+        def!("org.knime.base.node.io.filehandling.ARFFWriterNodeFactory", "core.missing.placeholder",
+            |s| json!({"reason": "ARFF writer", "path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or("")}));
+        def!("org.knime.base.node.io.table.writer.TableWriterNodeFactory", "core.io.csv_read",
+            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or("")}));
+        def!("org.knime.base.node.io.parquet.ParquetReaderNodeFactory", "core.io.csv_read",
+            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""), "format": "parquet"}));
+        def!("org.knime.base.node.io.parquet.ParquetWriterNodeFactory", "core.io.csv_read",
+            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""), "format": "parquet"}));
+
+        // ─── Column Combiner / Splitter ───
+        def!("org.knime.base.node.preproc.colcombine.ColumnCombinerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "column combiner"}));
+
+        // ─── Nominal / Category nodes ───
+        def!("org.knime.base.node.preproc.category.NumberToCategoryNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "number to category"}));
+        def!("org.knime.base.node.preproc.category.CategoryToNumberNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "category to number"}));
+        def!("org.knime.base.node.preproc.category.CategoryToClassNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "category to class"}));
+
+        // ─── Row Splitter (split by count or percentage) ───
+        def!("org.knime.base.node.preproc.partition.PartitionNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "partition / train-test split"}));
+
+        // ─── Rank ───
+        def!("org.knime.base.node.preproc.rank.RankNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "rank"}));
+
+        // ─── Interactive Widgets ───
+        def!("org.knime.js.base.node.widget.filter.nominal.NominalFilterWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "nominal filter widget"}));
+        def!("org.knime.js.base.node.widget.filter.range.RangeFilterWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "range filter widget"}));
+        def!("org.knime.js.base.node.widget.filter.slider.SliderFilterWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "slider filter widget"}));
+        def!("org.knime.js.base.node.widget.selection.column.ColumnSelectionWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "column selection widget"}));
+        def!("org.knime.js.base.node.widget.selection.single.SingleSelectionWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "single selection widget"}));
+        def!("org.knime.js.base.node.widget.selection.multiple.MultipleSelectionWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "multiple selection widget"}));
+        def!("org.knime.js.base.node.widget.button.ButtonWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "button widget"}));
+        def!("org.knime.js.base.node.widget.text.TextOutputWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "text output widget"}));
+        def!("org.knime.js.base.node.widget.image.ImageOutputWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "image output widget"}));
+        def!("org.knime.js.base.node.widget.file.FileDownloadWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "file download widget"}));
+        def!("org.knime.js.base.node.widget.fileupload.FileUploadWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "file upload widget"}));
+
+        // ─── JSON / XML ───
+        def!("org.knime.json.node.jsonpathtojson.JsonPathToJsonNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "JSON path"}));
+        def!("org.knime.json.node.jsontotable.JsonToTableNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "JSON to table"}));
+        def!("org.knime.json.node.tabletojson.TableToJsonNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "table to JSON"}));
+        def!("org.knime.base.node.io.xml.XMLReaderNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "XML reader"}));
+        def!("org.knime.base.node.io.xml.XMLWriterNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "XML writer"}));
+
+        // ─── Google Sheets / BigQuery ───
+        def!("org.knime.ext.google.sheets.GoogleSheetsReaderNodeFactory", "core.missing.placeholder",
+            |s| json!({"reason": "google sheets reader", "sheet_id": s.get("sheet_id").and_then(|v| v.as_str()).unwrap_or("")}));
+        def!("org.knime.ext.google.bigquery.GoogleBigQueryConnectorNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "Google BigQuery"}));
+
+        // ─── Text Mining / NLP ───
+        def!("org.knime.ext.textprocessing.nodes.preprocessing.documentvector.DocumentVectorNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "document vector"}));
+        def!("org.knime.ext.textprocessing.nodes.transformation.stringstodocument.StringsToDocumentNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "strings to document"}));
+        def!("org.knime.ext.textprocessing.nodes.transformation.documenttostrings.DocumentToStringsNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "document to strings"}));
+        def!("org.knime.ext.textprocessing.nodes.transformation.tf.TermFrequencyNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "term frequency"}));
+        def!("org.knime.ext.textprocessing.nodes.tagging.tagger.DictionaryTaggerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "dictionary tagger"}));
+
+        // ─── Deep Learning / Keras ───
+        def!("org.knime.dl.keras.base.nodes.layers.DLKerasInputLayerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "keras input layer"}));
+        def!("org.knime.dl.keras.base.nodes.layers.DLKerasDenseLayerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "keras dense layer"}));
+        def!("org.knime.dl.keras.base.nodes.learner.DLKerasNetworkLearnerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "keras network learner"}));
+        def!("org.knime.dl.keras.base.nodes.executor.DLKerasNetworkExecutorNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "keras network executor"}));
+
+        // ─── Python Script (v2) ───
+        def!("org.knime.python3.scripting.nodes.script.PythonScriptNodeFactory2", "core.script.python",
+            |s| json!({"script": s.get("python_script").and_then(|v| v.as_str()).unwrap_or(""), "type": "python3"}));
+
+        // ─── Conda / Environment Propagation ───
+        def!("org.knime.python3.scripting.nodes.conda.CondaEnvironmentPropagationNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "conda env propagation"}));
+
+        // ─── Miscellaneous ───
+        def!("org.knime.base.node.logging.LoggingNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "logging"}));
+        def!("org.knime.base.node.util.sendemail.SendEmailNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "send email"}));
 
         // ─── Analysis ───
         def!("org.knime.base.node.preproc.valcounter.ValueCounterNodeFactory", "core.transform.aggregate",
