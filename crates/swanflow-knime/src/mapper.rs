@@ -321,6 +321,139 @@ impl KnimeNodeMapper {
         def!("org.knime.time.node.create.createdatetime.CreateDateTimeNodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "datetime create"}));
 
+        // ─── Analysis ───
+        def!("org.knime.base.node.preproc.valcounter.ValueCounterNodeFactory", "core.transform.aggregate",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"group_by": [col], "aggs": [format!("COUNT({})", col)]})
+            });
+        def!("org.knime.base.node.stats.correlation.LinearCorrelationNodeFactory", "core.transform.profiler",
+            |_| json!({"analysis": "correlation"}));
+        def!("org.knime.base.node.mine.cluster.kmeans.KMeansNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "k-means clustering (use SwanFlow Python UDF)"}));
+        def!("org.knime.base.node.mine.tree.decisiontree2.DecisionTreeNodeFactory2", "core.missing.placeholder",
+            |_| json!({"reason": "decision tree (use SwanFlow Python UDF)"}));
+        def!("org.knime.base.node.mine.regression.linear.LinearRegressionNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "linear regression (use SwanFlow Python UDF)"}));
+        def!("org.knime.base.node.preproc.pca.PCA2NodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "PCA (use SwanFlow Python UDF)"}));
+        def!("org.knime.base.node.preproc.normalize.Normalizer2NodeFactory", "core.transform.project",
+            |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
+                       "method": s.get("method").and_then(|v| v.as_str()).unwrap_or("minmax")}));
+        def!("org.knime.base.node.preproc.normalize.NormalizerNodeFactory", "core.transform.project",
+            |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
+                       "method": s.get("method").and_then(|v| v.as_str()).unwrap_or("minmax")}));
+        def!("org.knime.base.node.preproc.category.number2category.NumberToCategoryNodeFactory2", "core.transform.project",
+            |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
+                       "bins": s.get("bins")}));
+        def!("org.knime.base.node.preproc.category.category2number.CategoryToNumber2NodeFactory", "core.transform.project",
+            |s| json!({"column": s.get("column_name").and_then(|v| v.as_str())}));
+        def!("org.knime.base.node.preproc.category.category2number.CategoryToNumberNodeFactory", "core.transform.project",
+            |s| json!({"column": s.get("column_name").and_then(|v| v.as_str())}));
+        def!("org.knime.base.node.mine.distance.matrix.DistanceMatrixNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "distance matrix (compute with SQL)"}));
+        def!("org.knime.base.node.mine.cluster.hierarchical.HierarchicalClusterNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "hierarchical clustering (use SwanFlow Python UDF)"}));
+        def!("org.knime.base.node.mine.association.AssociationRuleLearnerNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "association rules (use SwanFlow Python UDF)"}));
+
+        // ─── Visualization ───
+        def!("org.knime.base.node.viz.plotter.pie.PieChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.views.node.piechart.PieChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.line.LineChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.views.node.lineplot.LinePlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.scatter.ScatterPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.scatter.ScatterMatrixNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.histogram.HistogramNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.views.node.histogram.HistogramChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.box.BoxPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.views.node.boxplot.BoxPlotChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.heatmap.HeatMapNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.bubble.BubbleChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.sunburst.SunburstNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.parallel.ParallelCoordinatesNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.density.DensityPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.views.node.scatter.ScatterTableViewNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.radar.RadarPlotNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.tagcloud.TagCloudNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.heatmap.HeatMapJSNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.scatter.ScatterPlotterNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.bar.BarChartJFreeChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Row/Table Ops ───
+        def!("org.knime.base.node.preproc.row.filter.RowSplitterNodeFactory", "core.transform.filter",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let op = s.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
+                let val = s.get("filter_value").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"expr": format!("{} {} {}", col, op, val), "split": true})
+            });
+        def!("org.knime.base.node.preproc.row.split.RowSplitter2NodeFactory", "core.transform.filter",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let op = s.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
+                let val = s.get("filter_value").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"expr": format!("{} {} {}", col, op, val), "split": true})
+            });
+        def!("org.knime.base.node.preproc.filter.row.RowSamplingNodeFactory", "core.transform.filter",
+            |s| json!({"sample_size": s.get("sample_size"),
+                       "seed": s.get("seed"),
+                       "method": s.get("sampling_method").and_then(|v| v.as_str()).unwrap_or("random")}));
+        def!("org.knime.base.node.preproc.cell.replace.CellReplacerNodeFactory", "core.sql",
+            |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
+                       "pattern": s.get("pattern").and_then(|v| v.as_str()),
+                       "replacement": s.get("replacement").and_then(|v| v.as_str())}));
+
+        // ─── Ranking ───
+        def!("org.knime.base.node.preproc.rank.RankNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, ROW_NUMBER() OVER (ORDER BY {} DESC) AS rank FROM input_0", col)})
+            });
+
+        // ─── Window ───
+        def!("org.knime.base.node.preproc.windowing.WindowingNodeFactory", "core.sql",
+            |s| json!({"query": Self::build_window_sql(s)}));
+
+        // ─── Reference Row ───
+        def!("org.knime.base.node.preproc.reference.ReferenceRowNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "reference row filter"}));
+
+        // ─── Extract Column Header ───
+        def!("org.knime.base.node.preproc.colheader.ExtractColumnHeaderNodeFactory", "core.transform.project",
+            |_| json!({"extract_header": true}));
+
+        // ─── Interactive / Web Views ───
+        def!("org.knime.js.base.node.viz.chart.GenericChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.viz.chart.GenericEChartsNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── One to Many ───
+        def!("org.knime.base.node.preproc.onetomany.OneToManyNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "one-to-many expansion"}));
+
         Self { type_map }
     }
 
@@ -468,6 +601,44 @@ impl KnimeNodeMapper {
             "LIKE" | "CONTAINS" => "LIKE",
             _ => knime_op,
         }
+    }
+
+    /// Build a SQL window query from KNIME windowing settings.
+    fn build_window_sql(s: &serde_json::Value) -> String {
+        let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("*");
+        let agg = s.get("aggregation_method").and_then(|v| v.as_str()).unwrap_or("AVG");
+        let partition = s
+            .get("partition_columns")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let order = s
+            .get("order_column")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let frame = s
+            .get("window_size")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNBOUNDED PRECEDING");
+
+        let mut sql = format!(
+            "SELECT *, {}({}) OVER (",
+            agg, col
+        );
+        if !partition.is_empty() {
+            sql.push_str(&format!("PARTITION BY {} ", partition));
+        }
+        if !order.is_empty() {
+            sql.push_str(&format!("ORDER BY {} ", order));
+        }
+        sql.push_str(&format!("ROWS BETWEEN {} AND CURRENT ROW", frame));
+        sql.push_str(") AS window_result FROM input_0");
+        sql
     }
 
     /// List all registered mappings for reporting/coverage analysis.
