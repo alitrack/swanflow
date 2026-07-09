@@ -208,14 +208,28 @@ impl KnimeNodeMapper {
             |s| json!({"sample_size": s.get("sample_size"), "seed": s.get("seed")}));
 
         // ─── Loop / Flow ───
-        def!("org.knime.base.node.meta.looper.LoopEndDynamicNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "loop end"}));
+        // KNIME loop nodes are metanodes that contain the loop body as sub-workflow.
+        // They map to SwanFlow's StepMode::Loop with sub_workflow resolved from archive.metanodes.
+        def!("org.knime.base.node.meta.looper.LoopEndDynamicNodeFactory", "core.flow.loop",
+            |_| json!({"loop_kind": "generic"}));
         def!("org.knime.base.node.flowvariable.tablerowtovariable3.TableToVariable3NodeFactory", "core.flow.variable_creator",
             |_| json!({}));
         def!("org.knime.base.node.util.mergevariables.MergeVariables2NodeFactory", "core.flow.variable_creator",
             |_| json!({}));
-        def!("org.knime.base.node.meta.looper.variable.start.LoopStartVariable3NodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "loop start"}));
+        def!("org.knime.base.node.meta.looper.variable.start.LoopStartVariable3NodeFactory", "core.flow.loop",
+            |_| json!({"loop_kind": "variable"}));
+        def!("org.knime.base.node.meta.looper.LoopStartNodeFactory", "core.flow.loop",
+            |_| json!({"loop_kind": "generic"}));
+        def!("org.knime.base.node.meta.looper.LoopEndNodeFactory", "core.flow.loop",
+            |_| json!({"loop_kind": "generic"}));
+        def!("org.knime.base.node.meta.looper.ChunkLoopStartNodeFactory", "core.flow.loop",
+            |s| json!({"loop_kind": "chunk", "chunk_size": s.get("chunk_size").and_then(|v| v.as_str()).and_then(|v| v.parse::<u32>().ok()).unwrap_or(100)}));
+        def!("org.knime.base.node.meta.looper.CountingLoopStartNodeFactory", "core.flow.loop",
+            |s| json!({"loop_kind": "counting", "iterations": s.get("number_of_iterations").and_then(|v| v.as_str()).and_then(|v| v.parse::<u32>().ok()).unwrap_or(10)}));
+        def!("org.knime.base.node.meta.looper.RecursiveLoopStartNodeFactory", "core.flow.loop",
+            |s| json!({"loop_kind": "recursive", "max_depth": s.get("max_recursion_depth").and_then(|v| v.as_str()).and_then(|v| v.parse::<u32>().ok()).unwrap_or(10)}));
+        def!("org.knime.base.node.meta.looper.RecursiveLoopEndNodeFactory", "core.flow.loop",
+            |_| json!({"loop_kind": "recursive"}));
 
         // ─── Viz / View / Dialog (passthrough data — Shaper handles visualization)
         def!("org.knime.base.views.node.textview.TextViewNodeFactory", "core.sql",
@@ -492,10 +506,10 @@ impl KnimeNodeMapper {
                 ("pass_through".to_string(), json!({}))
             };
 
-            let instance = NodeInstance {
+            let mut instance = NodeInstance {
                 id: Uuid::new_v4(),
-                type_id: swanflow_type,
-                config,
+                type_id: swanflow_type.clone(),
+                config: config.clone(),
                 state: NodeState::Configured,
                 materialize: false,
                 sub_workflow: None,
@@ -508,6 +522,53 @@ impl KnimeNodeMapper {
                 when: None,
                 output_var: knime_node.name.clone(),
             };
+
+            // If this is a loop metanode, resolve its sub-workflow
+            if knime_node.is_metanode && swanflow_type == "core.flow.loop" {
+                if let Some(sub_archive) = archive.metanodes.get(&knime_node.id) {
+                    match self.convert(sub_archive.clone()).await {
+                        Ok(sub_wf) => {
+                            let loop_kind = config
+                                .get("loop_kind")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("generic");
+
+                            // Configure loop parameters from KNIME settings
+                            match loop_kind {
+                                "chunk" => {
+                                    if let Some(size) = config.get("chunk_size").and_then(|v| v.as_u64()) {
+                                        instance.max_iterations = size as u32;
+                                    }
+                                }
+                                "counting" | "recursive" => {
+                                    if let Some(n) = config.get("iterations")
+                                        .or_else(|| config.get("max_depth"))
+                                        .and_then(|v| v.as_u64())
+                                    {
+                                        instance.max_iterations = n as u32;
+                                    }
+                                }
+                                _ => {}
+                            }
+
+                            instance.sub_workflow = Some(Box::new(sub_wf));
+                            instance.mode = StepMode::Loop;
+                            instance.materialize = true; // Collect loop results
+                            tracing::info!(
+                                "Loop node {} (kind={}, max_iter={}): resolved sub-workflow with {} nodes",
+                                &knime_node.id, loop_kind, instance.max_iterations,
+                                instance.sub_workflow.as_ref().map(|w| w.graph.node_count()).unwrap_or(0)
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to convert sub-workflow for metanode {}: {}",
+                                knime_node.id, e
+                            );
+                        }
+                    }
+                }
+            }
 
             let idx = graph.add_node(instance);
             id_to_idx.insert(knime_node.id.clone(), idx);
@@ -696,6 +757,7 @@ impl KnimeNodeMapper {
         match sw_type {
             "core.missing.placeholder" => "Unsupported",
             "pass_through" => "Passthrough",
+            "core.flow.loop" => "Full",
             t if t.starts_with("core.transform.profiler") => "Degraded",
             t if t == "core.sql" => "Emulated",
             _ => "Full",
