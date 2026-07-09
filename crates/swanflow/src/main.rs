@@ -88,6 +88,8 @@ enum KnimeCommands {
         /// Path(s) to KNIME workflow files (.knwf/.knar) or directories
         inputs: Vec<PathBuf>,
     },
+    /// List all KNIME→SwanFlow factory mappings and their compatibility
+    ListMappings,
 }
 
 #[derive(Subcommand)]
@@ -468,6 +470,15 @@ async fn main() -> anyhow::Result<()> {
                 sorted.sort_by(|a, b| b.1.cmp(&a.1));
                 for (factory, count) in sorted.iter().take(20) {
                     println!("  {} ({} occurrences)", factory, count);
+                }
+            }
+            KnimeCommands::ListMappings => {
+                use swanflow_knime::KnimeNodeMapper;
+                let mapper = KnimeNodeMapper::new();
+                let mappings = mapper.list_all();
+                println!("\"factory\",\"swanflow_type\",\"category\",\"compat\"");
+                for m in &mappings {
+                    println!("\"{}\",\"{}\",\"{}\",\"{}\"", m.factory, m.sw_type, m.category, m.compat);
                 }
             }
             KnimeCommands::Shaper {

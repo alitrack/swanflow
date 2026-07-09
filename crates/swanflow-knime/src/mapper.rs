@@ -31,6 +31,15 @@ fn extract_factory(node_type: Option<&str>, settings: &serde_json::Value) -> Str
     node_type.unwrap_or("unknown").to_string()
 }
 
+/// A single mapping entry for reporting/listing.
+#[derive(Debug, Clone)]
+pub struct MappingEntry {
+    pub factory: String,
+    pub sw_type: String,
+    pub category: String,
+    pub compat: String,
+}
+
 /// Maps KNIME node types to SwanFlow native nodes.
 pub struct KnimeNodeMapper {
     type_map: HashMap<String, SwanFlowNodeDef>,
@@ -458,6 +467,67 @@ impl KnimeNodeMapper {
             "GE" | ">=" => ">=",
             "LIKE" | "CONTAINS" => "LIKE",
             _ => knime_op,
+        }
+    }
+
+    /// List all registered mappings for reporting/coverage analysis.
+    pub fn list_all(&self) -> Vec<MappingEntry> {
+        self.type_map
+            .iter()
+            .map(|(factory, def)| MappingEntry {
+                factory: factory.clone(),
+                sw_type: def.swanflow_type.clone(),
+                category: Self::categorize(factory).to_string(),
+                compat: Self::compat_level(&def.swanflow_type).to_string(),
+            })
+            .collect()
+    }
+
+    fn categorize(factory: &str) -> &'static str {
+        if factory.contains(".io.") || factory.contains(".filehandling.") {
+            "IO"
+        } else if factory.contains(".preproc.") || factory.contains("transform") {
+            "Transform"
+        } else if factory.contains("statistics")
+            || factory.contains("mining")
+            || factory.contains("cluster")
+        {
+            "Analysis"
+        } else if factory.contains("views")
+            || factory.contains("viz")
+            || factory.contains("plotter")
+            || factory.contains("chart")
+        {
+            "Visualization"
+        } else if factory.contains("loop")
+            || factory.contains("flowvariable")
+            || factory.contains("variable")
+            || factory.contains("meta")
+            || factory.contains("collection")
+        {
+            "FlowControl"
+        } else if factory.contains("python")
+            || factory.contains("script")
+            || factory.contains("jep")
+        {
+            "Script"
+        } else if factory.contains("quickform")
+            || factory.contains("dialog")
+            || factory.contains("css")
+        {
+            "UIWidget"
+        } else {
+            "Other"
+        }
+    }
+
+    fn compat_level(sw_type: &str) -> &'static str {
+        match sw_type {
+            "core.missing.placeholder" => "Unsupported",
+            "pass_through" => "Passthrough",
+            t if t.starts_with("core.transform.profiler") => "Degraded",
+            t if t == "core.sql" => "Emulated",
+            _ => "Full",
         }
     }
 }

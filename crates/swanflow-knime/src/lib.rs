@@ -29,8 +29,8 @@ pub use error::{KnimeError, KnimeResult};
 pub use parser::KnwfParser;
 pub use mapper::KnimeNodeMapper;
 pub use mapper::KnimeNodeMapper as Mapper;
+pub use mapper::MappingEntry;
 pub use types::KnwfArchive;
-pub use shaper;
 
 use swanflow_core::graph::Workflow;
 
