@@ -650,8 +650,70 @@ impl SwanFlowEngine {
                     step_context.insert(output_var.clone(), serde_json::Value::Null);
                 }
 
-                // Execute based on mode
-                let result = Self::execute_node_with_mode(
+                // Handle loop nodes by iterating their sub-workflow
+                let result = if node.mode == crate::core::graph::StepMode::Loop
+                    && node.sub_workflow.is_some()
+                {
+                    let sub_wf = node.sub_workflow.as_ref().unwrap();
+                    let max_iter = node.max_iterations.max(1);
+                    let mut all_events = Vec::new();
+                    let mut last_err: Option<String> = None;
+
+                    for iter in 0..max_iter {
+                        let _ = tx.send(NodeEvent::StateChanged {
+                            node_id: node.id,
+                            state: crate::nodes::NodeState::Running,
+                        });
+                        step_context
+                            .insert("iteration".to_string(), serde_json::json!(iter + 1));
+
+                        // Clone engine pieces for sub-workflow execution
+                        let sub_engine = SwanFlowEngine {
+                            ctx: ctx_shared.clone(),
+                            registry: registry_clone.clone(),
+                            cache_dir: cache_dir.clone(),
+                            hook: hook_shared.clone(),
+                            mode: crate::core::engine::EngineMode::Auto,
+                            duckdb_conn: None,
+                            materialize_nodes: false,
+                        };
+
+                        match sub_engine.execute_workflow(sub_wf).await {
+                            Ok(mut sub_rx) => {
+                                while let Some(evt) = sub_rx.recv().await {
+                                    all_events.push(evt);
+                                }
+                            }
+                            Err(e) => {
+                                last_err = Some(e.to_string());
+                                break;
+                            }
+                        }
+
+                        // Check until condition
+                        if let Some(until) = &node.until {
+                            let combined: String = all_events
+                                .iter()
+                                .filter_map(|e| match e {
+                                    NodeEvent::Materialized { .. } => Some("done"),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("");
+                            if combined.contains(until) {
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(err) = last_err {
+                        Err(datafusion::error::DataFusionError::Plan(err))
+                    } else {
+                        Ok("loop_complete".to_string())
+                    }
+                } else {
+                    // Execute based on mode
+                    Self::execute_node_with_mode(
                     &node,
                     &node_map,
                     &workflow,
@@ -663,7 +725,8 @@ impl SwanFlowEngine {
                     &tx,
                     &hook_shared,
                 )
-                .await;
+                .await
+                };
 
                 let _ = tx.send(NodeEvent::StateChanged {
                     node_id: node.id,
