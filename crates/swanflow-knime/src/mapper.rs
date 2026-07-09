@@ -208,9 +208,9 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.meta.looper.variable.start.LoopStartVariable3NodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "loop start"}));
 
-        // ─── Viz / View / Dialog (passthrough data) ───
-        def!("org.knime.base.views.node.textview.TextViewNodeFactory", "core.transform.profiler",
-            |_| json!({}));
+        // ─── Viz / View / Dialog (passthrough data — Shaper handles visualization)
+        def!("org.knime.base.views.node.textview.TextViewNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
         def!("org.knime.js.base.node.configuration.input.integer.IntegerDialogNodeFactory", "core.flow.variable_creator",
             |_| json!({}));
         def!("org.knime.js.base.node.configuration.selection.value.ValueSelectionDialogNodeFactory", "core.flow.variable_creator",
@@ -218,8 +218,8 @@ impl KnimeNodeMapper {
         def!("org.knime.dynamic.js.v30.DynamicJSNodeFactory", "core.script.python",
             |s| json!({"script": s.get("js_script").and_then(|v| v.as_str()).unwrap_or(""),
                        "type": "javascript"}));
-        def!("org.knime.base.node.viz.property.color.ColorManager2NodeFactory", "core.transform.profiler",
-            |_| json!({}));
+        def!("org.knime.base.node.viz.property.color.ColorManager2NodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Virtual / Infra (pass-through) ───
         def!("org.knime.core.node.workflow.virtual.subnode.VirtualSubNodeInputNodeFactory", "core.transform.project",
@@ -293,12 +293,12 @@ impl KnimeNodeMapper {
             |_| json!({}));
 
         // ─── Viz / View ───
-        def!("org.knime.base.views.node.tableview.TableViewNodeFactory", "core.transform.profiler",
-            |_| json!({}));
-        def!("org.knime.base.views.node.barchart.BarChartNodeFactory", "core.transform.profiler",
-            |_| json!({}));
-        def!("org.knime.base.node.viz.plotter.bar.BarChartNodeFactory", "core.transform.profiler",
-            |_| json!({}));
+        def!("org.knime.base.views.node.tableview.TableViewNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.views.node.barchart.BarChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.viz.plotter.bar.BarChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── QuickForm / JS Widgets ───
         def!("org.knime.js.base.node.quickform.input.integer.IntInputQuickFormNodeFactory", "core.flow.variable_creator",
