@@ -284,8 +284,11 @@ impl KnimeNodeMapper {
         // ─── Row Ops ───
         def!("org.knime.base.node.preproc.append.row.AppendedRowsNodeFactory", "core.sql",
             |_| json!({"query": "SELECT * FROM input_0 UNION ALL SELECT * FROM input_1"}));
-        def!("org.knime.base.node.preproc.duplicates.DuplicateRowFilterNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "dedup"}));
+        def!("org.knime.base.node.preproc.duplicates.DuplicateRowFilterNodeFactory", "core.sql",
+            |s| {
+                let cols = s.get("column_names").and_then(|v| v.as_str()).unwrap_or("*");
+                json!({"query": format!("SELECT DISTINCT ON ({}) * FROM input_0", cols)})
+            });
         def!("org.knime.base.node.preproc.filter.row.RowFilter2PortNodeFactory", "core.transform.filter",
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
@@ -391,12 +394,27 @@ impl KnimeNodeMapper {
                        "pattern": s.get("pattern").and_then(|v| v.as_str())}));
 
         // ─── Transform — Normalize / Scale ───
-        def!("org.knime.base.node.preproc.normalize.NormalizerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "normalizer"}));
-        def!("org.knime.base.node.preproc.normalize.NormalizerNodeFactory2", "core.missing.placeholder",
-            |_| json!({"reason": "normalizer v2"}));
-        def!("org.knime.base.node.preproc.normalize.NormalizerNodeFactory3", "core.missing.placeholder",
-            |_| json!({"reason": "normalizer v3"}));
+        def!("org.knime.base.node.preproc.normalize.NormalizerNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let method = s.get("normalization_method").and_then(|v| v.as_str()).unwrap_or("minmax");
+                let q = if method == "zscore" {
+                    format!("SELECT *, ({} - AVG({}) OVER()) / STDDEV({}) OVER() AS {}_norm FROM input_0", col, col, col, col)
+                } else {
+                    format!("SELECT *, ({} - MIN({}) OVER()) / NULLIF(MAX({}) OVER() - MIN({}) OVER(), 0) AS {}_norm FROM input_0", col, col, col, col, col)
+                };
+                json!({"query": q})
+            });
+        def!("org.knime.base.node.preproc.normalize.NormalizerNodeFactory2", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, ({} - MIN({}) OVER()) / NULLIF(MAX({}) OVER() - MIN({}) OVER(), 0) AS {}_norm FROM input_0", col, col, col, col, col)})
+            });
+        def!("org.knime.base.node.preproc.normalize.NormalizerNodeFactory3", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, ({} - AVG({}) OVER()) / NULLIF(STDDEV({}) OVER(), 0) AS {}_zscore FROM input_0", col, col, col, col)})
+            });
 
         // ─── Transform — Round / Number ───
         def!("org.knime.base.node.preproc.rounddouble.RoundDoubleNodeFactory", "core.sql",
@@ -411,17 +429,40 @@ impl KnimeNodeMapper {
                 json!({"query": format!("SELECT *, ROUND({}) FROM input_0", col)})
             });
 
-        // ─── Transform — Binning ───
-        def!("org.knime.base.node.preproc.binner.BinnerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "binner"}));
-        def!("org.knime.base.node.preproc.autobinner.AutoBinnerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "auto binner"}));
+        // ─── Transform — Binning / Rank ───
+        def!("org.knime.base.node.preproc.binner.BinnerNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let bins = s.get("bins").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, CASE {} END AS {}_bin FROM input_0", bins, col)})
+            });
+        def!("org.knime.base.node.preproc.autobinner.AutoBinnerNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let n = s.get("num_bins").and_then(|v| v.as_str()).unwrap_or("10");
+                json!({"query": format!("SELECT *, WIDTH_BUCKET({}, MIN({}) OVER(), MAX({}) OVER() + 1, {}) AS {}_bin FROM input_0", col, col, col, n, col)})
+            });
+        def!("org.knime.base.node.preproc.rank.RankNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let asc = !s.get("sort_descending").and_then(|v| v.as_bool()).unwrap_or(false);
+                let order = if asc { "ASC" } else { "DESC" };
+                json!({"query": format!("SELECT *, ROW_NUMBER() OVER (ORDER BY {} {}) AS rank FROM input_0", col, order)})
+            });
 
         // ─── Transform — Lag / Moving Average ───
-        def!("org.knime.base.node.preproc.lag.LagColumnNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "lag column"}));
-        def!("org.knime.base.node.preproc.movingaverage.MovingAverageNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "moving average"}));
+        def!("org.knime.base.node.preproc.lag.LagColumnNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let n = s.get("lag").and_then(|v| v.as_str()).unwrap_or("1");
+                json!({"query": format!("SELECT *, LAG({}, {}) OVER () AS {}_lag FROM input_0", col, n, col)})
+            });
+        def!("org.knime.base.node.preproc.movingaverage.MovingAverageNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let window = s.get("window_size").and_then(|v| v.as_str()).unwrap_or("3");
+                json!({"query": format!("SELECT *, AVG({}) OVER (ROWS BETWEEN {} PRECEDING AND CURRENT ROW) AS {}_ma FROM input_0", col, window, col)})
+            });
 
         // ─── Transform — One-to-Many / Many-to-One ───
         def!("org.knime.base.node.preproc.one2many.OneToManyNodeFactory", "core.missing.placeholder",
@@ -430,14 +471,24 @@ impl KnimeNodeMapper {
             |_| json!({"reason": "many to one combine"}));
 
         // ─── Transform — Column Type ───
-        def!("org.knime.base.node.preproc.colconvert.ColumnConverterNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "column type converter"}));
-        def!("org.knime.base.node.preproc.domain.DomainCalculatorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "domain calculator"}));
-        def!("org.knime.base.node.preproc.colconvert.stringtonumber.StringToNumberNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "string to number"}));
-        def!("org.knime.base.node.preproc.colconvert.numbertostring.NumberToStringNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "number to string"}));
+        def!("org.knime.base.node.preproc.colconvert.ColumnConverterNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let target = s.get("target_type").and_then(|v| v.as_str()).unwrap_or("VARCHAR");
+                json!({"query": format!("SELECT *, CAST({} AS {}) AS {}_cast FROM input_0", col, target, col)})
+            });
+        def!("org.knime.base.node.preproc.domain.DomainCalculatorNodeFactory", "core.transform.profiler",
+            |_| json!({}));
+        def!("org.knime.base.node.preproc.colconvert.stringtonumber.StringToNumberNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, CAST({} AS DOUBLE) AS {}_num FROM input_0", col, col)})
+            });
+        def!("org.knime.base.node.preproc.colconvert.numbertostring.NumberToStringNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, CAST({} AS VARCHAR) AS {}_str FROM input_0", col, col)})
+            });
 
         // ─── Transform — Missing Value variants ───
         def!("org.knime.base.node.preproc.missingval.handler.MissingValueColumnFilterNodeFactory", "core.quality.null_check",
@@ -690,12 +741,11 @@ impl KnimeNodeMapper {
             |_| json!({"reason": "category to class"}));
 
         // ─── Row Splitter (split by count or percentage) ───
-        def!("org.knime.base.node.preproc.partition.PartitionNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "partition / train-test split"}));
-
-        // ─── Rank ───
-        def!("org.knime.base.node.preproc.rank.RankNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "rank"}));
+        def!("org.knime.base.node.preproc.partition.PartitionNodeFactory", "core.sql",
+            |s| {
+                let pct = s.get("percentage").and_then(|v| v.as_str()).unwrap_or("70");
+                json!({"query": format!("SELECT *, CASE WHEN ROW_NUMBER() OVER () % 100 < {} THEN 'train' ELSE 'test' END AS _partition FROM input_0", pct)})
+            });
 
         // ─── Interactive Widgets ───
         def!("org.knime.js.base.node.widget.filter.nominal.NominalFilterWidgetNodeFactory", "core.missing.placeholder",
@@ -878,13 +928,6 @@ impl KnimeNodeMapper {
             |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
                        "pattern": s.get("pattern").and_then(|v| v.as_str()),
                        "replacement": s.get("replacement").and_then(|v| v.as_str())}));
-
-        // ─── Ranking ───
-        def!("org.knime.base.node.preproc.rank.RankNodeFactory", "core.sql",
-            |s| {
-                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT *, ROW_NUMBER() OVER (ORDER BY {} DESC) AS rank FROM input_0", col)})
-            });
 
         // ─── Window ───
         def!("org.knime.base.node.preproc.windowing.WindowingNodeFactory", "core.sql",
