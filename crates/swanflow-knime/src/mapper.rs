@@ -2197,6 +2197,419 @@ impl KnimeNodeMapper {
                     func_name, py_code)})
             });
 
+        // ═══════════════════════════════════════════════════════════════
+        // Round 11 — Remaining community extensions: zim, osmium, pic2vec,
+        // infera, fts, jsonata, dbf, anndata, eurostat, prql, crawler,
+        // webbed, sitemap, tera, substrait, ulid, libpostal, vindex,
+        // hnsw_acorn, rawduck, chsql, ion, shellfs, tarfs, vortex,
+        // altertable, hive_metastore, delta_sharing, duck_lineage
+        // ═══════════════════════════════════════════════════════════════
+
+        // ─── ZIM (offline Wikipedia / Stack Exchange) ───
+        def!("org.knime.base.node.io.filehandling.ZIMReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM read_zim('{}')", path)})
+            });
+
+        // ─── OpenStreetMap (osmium) ───
+        def!("org.knime.geospatial.nodes.osm.OSMReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM read_osm('{}')", path)})
+            });
+
+        // ─── Image → Vector Embeddings (pic2vec) ───
+        def!("org.knime.base.node.mine.vision.ImageEmbeddingNodeFactory", "core.sql",
+            |s| {
+                let path_col = s.get("image_path_column").and_then(|v| v.as_str()).unwrap_or("image_path");
+                let model = s.get("model").and_then(|v| v.as_str()).unwrap_or("vit_base_patch16_224");
+                json!({"query": format!(
+                    "SELECT *, pic2vec({}, '{}') AS img_embedding FROM input_0", path_col, model)})
+            });
+
+        // ─── In-Database Inference (infera) ───
+        def!("org.knime.base.node.mine.inference.InferaInferenceNodeFactory", "core.sql",
+            |s| {
+                let model_path = s.get("model_path").and_then(|v| v.as_str()).unwrap_or("/tmp/model.onnx");
+                let feat_cols = Self::parse_feats(s, "feature_columns");
+                let feat_args: Vec<String> = feat_cols.iter().map(|f| format!("\"{}\"", f)).collect();
+                json!({"query": format!(
+                    "SELECT *, infera_predict('{}', {}) AS prediction FROM input_0",
+                    model_path, feat_args.join(", "))})
+            });
+
+        // ─── Full-Text Search (DuckDB built-in FTS) ───
+        def!("org.knime.base.node.text.FTSIndexNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("documents");
+                let col = s.get("text_column").and_then(|v| v.as_str()).unwrap_or("content");
+                json!({"query": format!(
+                    "PRAGMA create_fts_index('{}', '{}', '*'); SELECT 'fts_index_created' AS status", table, col)})
+            });
+
+        def!("org.knime.base.node.text.FTSSearchNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("documents");
+                let query = s.get("search_query").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, fts_main_{}.match_bm25({}, '{}') AS score FROM {} WHERE score IS NOT NULL ORDER BY score DESC",
+                    table, "name", query, table)})
+            });
+
+        // ─── JSONata — JSON transformation ───
+        def!("org.knime.json.node.transform.JsonataTransformNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let expr = s.get("jsonata_expression").and_then(|v| v.as_str()).unwrap_or("$");
+                json!({"query": format!(
+                    "SELECT *, jsonata({}, '{}') AS jsonata_result FROM input_0", col, expr)})
+            });
+
+        // ─── DBF (dBase file) — read_dbf extension ───
+        def!("org.knime.base.node.io.filehandling.DBFFileReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_dbf('{}')", path)})
+            });
+
+        // ─── AnnData (single-cell genomics) — anndata extension ───
+        def!("org.knime.bioinformatics.node.io.AnnDataReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_h5ad('{}')", path)})
+            });
+
+        // ─── Eurostat ───
+        def!("org.knime.base.node.io.eurostat.EurostatReaderNodeFactory", "core.sql",
+            |s| {
+                let dataset = s.get("dataset_code").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM eurostat('{}')", dataset)})
+            });
+
+        // ─── PRQL — alternative query language ───
+        def!("org.knime.base.node.query.PRQLQueryNodeFactory", "core.sql",
+            |s| {
+                let prql = s.get("prql_query").and_then(|v| v.as_str()).unwrap_or("from input_0");
+                json!({"query": format!("PRQL '{}' AS (SELECT * FROM input_0)", prql)})
+            });
+
+        // ─── Substrait — query plan serialization ───
+        def!("org.knime.base.node.query.SubstraitExportNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/plan.substrait");
+                json!({"query": format!(
+                    "CALL get_substrait('SELECT * FROM input_0'); COPY (SELECT get_substrait('SELECT * FROM input_0')) TO '{}'", path)})
+            });
+
+        // ─── Web Crawler — duckdb crawler extension ───
+        def!("org.knime.base.node.io.web.WebCrawlerNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("start_url").and_then(|v| v.as_str()).unwrap_or("");
+                let depth = s.get("max_depth").and_then(|v| v.as_str()).unwrap_or("2");
+                json!({"query": format!(
+                    "SELECT * FROM crawl('{}', max_depth={})", url, depth)})
+            });
+
+        // ─── Sitemap Parser ───
+        def!("org.knime.base.node.io.web.SitemapReaderNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("sitemap_url").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM read_sitemap('{}')", url)})
+            });
+
+        // ─── Web Markup Parser (webbed — HTML/XML SAX) ───
+        def!("org.knime.base.node.io.web.HTMLTableExtractorNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let xpath = s.get("xpath").and_then(|v| v.as_str()).unwrap_or("//table");
+                json!({"query": format!("SELECT * FROM webbed('{}', '{}')", url, xpath)})
+            });
+
+        // ─── Tera Templating ───
+        def!("org.knime.base.node.report.TeraReportNodeFactory", "core.sql",
+            |s| {
+                let template = s.get("template").and_then(|v| v.as_str()).unwrap_or("");
+                let data_col = s.get("data_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, tera_render('{}', {}) AS report FROM input_0", template, data_col)})
+            });
+
+        // ─── ULID Generation ───
+        def!("org.knime.base.node.preproc.id.ULIDGeneratorNodeFactory", "core.sql",
+            |s| {
+                json!({"query": "SELECT *, ulid() AS ulid FROM input_0".to_string()})
+            });
+
+        // ─── Address Parsing (libpostal) ───
+        def!("org.knime.base.node.text.AddressParserNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("address_column").and_then(|v| v.as_str()).unwrap_or("address");
+                json!({"query": format!(
+                    "SELECT *, parse_address({}) AS parsed_address FROM input_0", col)})
+            });
+
+        // ─── VIndex — advanced vector indexes (HNSW/IVF/DiskANN) ───
+        def!("org.knime.base.node.mine.similarity.VIndexCreateNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("vectors");
+                let col = s.get("embedding_column").and_then(|v| v.as_str()).unwrap_or("embedding");
+                let idx_type = s.get("index_type").and_then(|v| v.as_str()).unwrap_or("HNSW");
+                json!({"query": format!(
+                    "CREATE INDEX vindex_{} ON {} USING {} ({})",
+                    table, table, idx_type, col)})
+            });
+
+        // ─── HNSW ACORN — filtered vector search ───
+        def!("org.knime.base.node.mine.similarity.FilteredVectorSearchNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("embedding_column").and_then(|v| v.as_str()).unwrap_or("embedding");
+                let query = s.get("query_vector").and_then(|v| v.as_str()).unwrap_or("");
+                let filter = s.get("filter_condition").and_then(|v| v.as_str()).unwrap_or("1=1");
+                let k = s.get("top_k").and_then(|v| v.as_str()).unwrap_or("10");
+                json!({"query": format!(
+                    "SELECT *, hnsw_search({}, {}::FLOAT[128]) AS _score FROM input_0 WHERE {} ORDER BY _score LIMIT {}",
+                    col, query, filter, k)})
+            });
+
+        // ─── RawDuck — JSON/OTEL ingestion ───
+        def!("org.knime.base.node.io.streaming.RawJSONIngestNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM rawduck_ingest('{}')", path)})
+            });
+
+        // ─── Chinese SQL (chsql) ───
+        def!("org.knime.base.node.query.ChineseSQLNodeFactory", "core.sql",
+            |s| {
+                let cn_query = s.get("chinese_query").and_then(|v| v.as_str()).unwrap_or("选择所有列");
+                json!({"query": format!(
+                    "CHSQL '{}' AS (SELECT * FROM input_0)", cn_query)})
+            });
+
+        // ─── AWS Ion format ───
+        def!("org.knime.base.node.io.filehandling.IonReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_ion('{}')", path)})
+            });
+
+        // ─── ShellFS — read shell command output as table ───
+        def!("org.knime.base.node.io.system.ShellCommandReaderNodeFactory", "core.sql",
+            |s| {
+                let cmd = s.get("command").and_then(|v| v.as_str()).unwrap_or("ls -la");
+                json!({"query": format!(
+                    "SELECT * FROM read_csv_auto('shellfs://{}')", cmd)})
+            });
+
+        // ─── TAR Archive reader (tarfs) ───
+        def!("org.knime.base.node.io.filehandling.TARReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM 'tarfs://{}'", path)})
+            });
+
+        // ─── Vortex format reader ───
+        def!("org.knime.base.node.io.filehandling.VortexReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_vortex('{}')", path)})
+            });
+
+        // ─── Altertable Lakehouse ───
+        def!("org.knime.base.node.io.lake.AltertableReaderNodeFactory", "core.sql",
+            |s| {
+                let endpoint = s.get("endpoint").and_then(|v| v.as_str()).unwrap_or("");
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM altertable_scan('{}', '{}')", endpoint, table)})
+            });
+
+        // ─── Hive Metastore ───
+        def!("org.knime.base.node.io.lake.HiveMetastoreReaderNodeFactory", "core.sql",
+            |s| {
+                let uri = s.get("metastore_uri").and_then(|v| v.as_str()).unwrap_or("thrift://localhost:9083");
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "ATTACH '{}' AS hive (TYPE hive); SELECT * FROM hive.{}", uri, table)})
+            });
+
+        // ─── Delta Sharing ───
+        def!("org.knime.base.node.io.lake.DeltaSharingReaderNodeFactory", "core.sql",
+            |s| {
+                let endpoint = s.get("sharing_endpoint").and_then(|v| v.as_str()).unwrap_or("");
+                let share = s.get("share_name").and_then(|v| v.as_str()).unwrap_or("");
+                let schema = s.get("schema_name").and_then(|v| v.as_str()).unwrap_or("default");
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM delta_share_scan('{}', '{}', '{}.{}')", endpoint, share, schema, table)})
+            });
+
+        // ─── DuckDB Lineage — OpenLineage emission ───
+        def!("org.knime.base.node.monitor.DataLineageNodeFactory", "core.sql",
+            |s| {
+                let backend = s.get("openlineage_backend").and_then(|v| v.as_str()).unwrap_or("http://localhost:5000");
+                json!({"query": format!(
+                    "SET duck_lineage_backend='{}'; SELECT * FROM input_0", backend)})
+            });
+
+        // ─── Additional KNIME factory variants ───
+        def!("org.knime.base.node.preproc.filter.row.RowFilterNodeFactory", "core.transform.filter",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let op = Self::map_op(s.get("operator").and_then(|v| v.as_str()).unwrap_or("="));
+                let val = s.get("filter_value").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"expr": format!("{} {} {}", col, op, val)})
+            });
+
+        def!("org.knime.base.node.statistics.StatisticsNodeFactory", "core.transform.profiler",
+            |_| json!({}));
+
+        // ─── KNIME Chemistry / Cheminformatics ───
+        def!("org.knime.chem.base.node.smiles.SmilesReaderNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("smiles_column").and_then(|v| v.as_str()).unwrap_or("SMILES");
+                json!({"query": format!(
+                    "SELECT *, {} AS molecule FROM input_0", col)})
+            });
+
+        // ─── KNIME Network Mining ───
+        def!("org.knime.network.base.node.centrality.CentralityNodeFactory", "core.sql",
+            |s| {
+                let graph = s.get("graph_name").and_then(|v| v.as_str()).unwrap_or("knime_graph");
+                json!({"query": format!(
+                    "SELECT * FROM GRAPH_TABLE({} MATCH (a)-[e]->(b) COLUMNS (a.id, COUNT(e) AS degree)) ORDER BY degree DESC",
+                    graph)})
+            });
+
+        // ─── KNIME Web Mining ───
+        def!("org.knime.webmining.node.htmlparser.HTMLParserNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("html_column").and_then(|v| v.as_str()).unwrap_or("html");
+                let selector = s.get("css_selector").and_then(|v| v.as_str()).unwrap_or("body");
+                json!({"query": format!(
+                    "SELECT *, webbed_extract({}, '{}') AS extracted FROM input_0", col, selector)})
+            });
+
+        // ─── KNIME Big Data / Spark bridge ───
+        def!("org.knime.bigdata.node.spark.SparkReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM read_parquet('{}')", path)})
+            });
+
+        // ─── KNIME Image Processing ───
+        def!("org.knime.image.base.node.reader.ImageReader2NodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, read_blob('{}') AS image_data FROM input_0", path)})
+            });
+
+        // ─── JSON Schema validation ───
+        def!("org.knime.json.node.validate.JsonSchemaValidatorNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("json_column").and_then(|v| v.as_str()).unwrap_or("");
+                let schema = s.get("json_schema").and_then(|v| v.as_str()).unwrap_or("{}");
+                json!({"query": format!(
+                    "SELECT *, json_schema_valid({}, '{}') AS is_valid FROM input_0", col, schema)})
+            });
+
+        // ─── DuckDB Table Inspector ───
+        def!("org.knime.base.node.meta.dbinspector.TableInspectorNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("input_0");
+                json!({"query": format!(
+                    "SELECT * FROM table_inspector('{}')", table)})
+            });
+
+        // ─── DryRun — estimate scan cost ───
+        def!("org.knime.base.node.optimizer.DryRunEstimatorNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("input_0");
+                json!({"query": format!(
+                    "SELECT dryrun_estimate('SELECT * FROM {}') AS scan_bytes", table)})
+            });
+
+        // ─── LabKey Server reader ───
+        def!("org.knime.base.node.io.labkey.LabKeyReaderNodeFactory", "core.sql",
+            |s| {
+                let server = s.get("server_url").and_then(|v| v.as_str()).unwrap_or("");
+                let schema = s.get("schema_name").and_then(|v| v.as_str()).unwrap_or("study");
+                let query = s.get("query_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM duck_lk('{}', '{}', '{}')", server, schema, query)})
+            });
+
+        // ─── GSheet — Google Sheets native reader ───
+        def!("org.knime.ext.google.sheets.GoogleSheetsNativeReaderNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("sheet_url").and_then(|v| v.as_str()).unwrap_or("");
+                let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
+                json!({"query": format!(
+                    "SELECT * FROM gsheet('{}', '{}')", url, sheet)})
+            });
+
+        // ─── IP Network functions — duckdb inet extension ───
+        def!("org.knime.base.node.network.IPAnalyzerNodeFactory", "core.sql",
+            |s| {
+                let ip_col = s.get("ip_column").and_then(|v| v.as_str()).unwrap_or("ip");
+                json!({"query": format!(
+                    "SELECT *, inet_contains('10.0.0.0/8', {}) AS is_private, inet_is_ipv4({}) AS is_v4 FROM input_0",
+                    ip_col, ip_col)})
+            });
+
+        // ─── CloudFront signed URL reader ───
+        def!("org.knime.base.node.io.cloud.CloudFrontReaderNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let key_id = s.get("key_pair_id").and_then(|v| v.as_str()).unwrap_or("");
+                let key_path = s.get("private_key_path").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM read_csv_auto('{}')", url)})
+            });
+
+        // ─── DuckDB HTTPFS with caching ───
+        def!("org.knime.base.node.io.filehandling.CachedHTTPReaderNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let ttl = s.get("cache_ttl_seconds").and_then(|v| v.as_str()).unwrap_or("3600");
+                json!({"query": format!(
+                    "SELECT * FROM read_parquet('cache_httpfs://{}?ttl={}')", url, ttl)})
+            });
+
+        // ─── Geo-tagged raster analytics (raquet) ───
+        def!("org.knime.geospatial.nodes.raster.RasterReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                let band = s.get("band").and_then(|v| v.as_str()).unwrap_or("1");
+                json!({"query": format!(
+                    "SELECT *, raquet_read('{}', band={}) AS raster_data FROM input_0", path, band)})
+            });
+
+        // ─── Astro — astronomical calculations ───
+        def!("org.knime.science.nodes.astro.SkyCoordTransformNodeFactory", "core.sql",
+            |s| {
+                let ra = s.get("ra_column").and_then(|v| v.as_str()).unwrap_or("ra");
+                let dec = s.get("dec_column").and_then(|v| v.as_str()).unwrap_or("dec");
+                json!({"query": format!(
+                    "SELECT *, astro_icrs_to_galactic({}, {}) AS gal FROM input_0", ra, dec)})
+            });
+
+        // ─── Firebird DB connector ───
+        def!("org.knime.base.node.io.database.FirebirdConnectorNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("database_path").and_then(|v| v.as_str()).unwrap_or("/tmp/db.fdb");
+                json!({"query": format!(
+                    "ATTACH '{}' AS fdb (TYPE firebird)", path)})
+            });
+
 
         Self { type_map }
     }
