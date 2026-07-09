@@ -1724,6 +1724,82 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.preproc.javasnippet.JavaSnippetNodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "java snippet (use SwanFlow Python UDF)"}));
 
+
+        // ─── Graph / Network Analysis (DuckDB duckpgq extension) ───
+        def!("org.knime.base.node.mine.graph.GraphAnalyzerNodeFactory", "core.sql",
+            |s| {
+                let edge_table = s.get("edge_table").and_then(|v| v.as_str()).unwrap_or("edges");
+                let src = s.get("source_column").and_then(|v| v.as_str()).unwrap_or("src");
+                let tgt = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("tgt");
+                json!({"query": format!(
+                    "CREATE PROPERTY GRAPH knime_graph VERTEX TABLES (SELECT DISTINCT {} AS id FROM {}) EDGE TABLES (SELECT {} AS src, {} AS dst FROM {})",
+                    src, edge_table, src, tgt, edge_table)})
+            });
+        def!("org.knime.base.node.mine.graph.ShortestPathNodeFactory", "core.sql",
+            |s| {
+                let graph = s.get("graph_name").and_then(|v| v.as_str()).unwrap_or("knime_graph");
+                let start = s.get("start_node").and_then(|v| v.as_str()).unwrap_or("0");
+                let end = s.get("end_node").and_then(|v| v.as_str()).unwrap_or("0");
+                json!({"query": format!(
+                    "SELECT * FROM GRAPH_TABLE({} MATCH (a)-[e* SHORTEST 1]->(b) WHERE a.id = {} AND b.id = {} COLUMNS (a.id, b.id, SUM(e.weight)))", 
+                    graph, start, end)})
+            });
+        def!("org.knime.base.node.mine.graph.PageRankNodeFactory", "core.sql",
+            |s| {
+                let graph = s.get("graph_name").and_then(|v| v.as_str()).unwrap_or("knime_graph");
+                json!({"query": format!(
+                    "SELECT * FROM GRAPH_TABLE({} MATCH (a)-[e]->(b) COLUMNS (a.id, b.id, COUNT(*)))",
+                    graph)})
+            });
+
+        // ─── Remote Access (quack / harbor) ───
+        def!("org.knime.base.node.io.remote.RemoteExecutorNodeFactory", "core.sql",
+            |s| {
+                let host = s.get("host").and_then(|v| v.as_str()).unwrap_or("localhost");
+                let port = s.get("port").and_then(|v| v.as_str()).unwrap_or("5432");
+                let query = s.get("sql_query").and_then(|v| v.as_str()).unwrap_or("SELECT 1");
+                json!({"query": format!(
+                    "ATTACH 'host={} port={}' AS remote_duckdb (TYPE quack); SELECT * FROM remote_duckdb.({})",
+                    host, port, query)})
+            });
+        def!("org.knime.base.node.io.remote.RemoteFileReaderNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM '{}'", url)})
+            });
+
+        // ─── Additional KNIME base nodes ───
+        def!("org.knime.base.node.preproc.outlier.OutlierDetectorNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, CASE WHEN ABS({0} - AVG({0}) OVER()) > 3 * STDDEV({0}) OVER() THEN 'outlier' ELSE 'normal' END AS outlier_flag FROM input_0",
+                    col)})
+            });
+        def!("org.knime.base.node.preproc.discretize.DiscretizeNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let bins = s.get("number_of_bins").and_then(|v| v.as_str()).unwrap_or("5");
+                json!({"query": format!(
+                    "SELECT *, WIDTH_BUCKET({0}, MIN({0}) OVER(), MAX({0}) OVER() + 1, {1}) AS {0}_bin FROM input_0",
+                    col, bins)})
+            });
+        def!("org.knime.base.node.preproc.one2many.CellSplitterNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let delim = s.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
+                json!({"query": format!("SELECT *, UNNEST(string_split(\"{}\", '{}')) AS split_value FROM input_0", col, delim)})
+            });
+        def!("org.knime.base.node.preproc.missingval.MissingValueReplacerNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let val = s.get("replacement_value").and_then(|v| v.as_str()).unwrap_or("0");
+                json!({"query": format!("SELECT *, COALESCE(\"{}\", {}) AS {}_filled FROM input_0", col, val, col)})
+            });
+        def!("org.knime.base.node.util.memory.MemoryMonitorNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT duckdb_memory() AS memory_usage, * FROM input_0"}));
+
+
         Self { type_map }
     }
 
