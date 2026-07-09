@@ -486,6 +486,7 @@ impl KnimeNodeMapper {
         }
     }
 
+    #[async_recursion::async_recursion]
     pub async fn convert(&self, archive: KnwfArchive) -> KnimeResult<Workflow> {
         let mut graph = petgraph::stable_graph::StableGraph::<NodeInstance, EdgeInstance>::new();
         let mut id_to_idx: HashMap<String, NodeIndex> = HashMap::new();
