@@ -55,6 +55,9 @@ enum KnimeCommands {
     Run {
         /// Path to KNIME workflow file (.knwf or .knar)
         input: PathBuf,
+        /// Execution engine: datafusion, duckdb, or auto (default: auto)
+        #[arg(long, default_value = "auto")]
+        engine: String,
     },
     /// Convert KNIME workflow (.knwf/.knar) to Shaper SQL dashboard queries
     Shaper {
@@ -238,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Knime { command } => match command {
-            KnimeCommands::Run { input } => {
+            KnimeCommands::Run { input, engine } => {
                 println!("🧩 Parsing KNIME workflow: {:?}", input);
                 let archive = KnwfParser::parse_file(&input)?;
                 println!(
@@ -258,15 +261,28 @@ async fn main() -> anyhow::Result<()> {
                 let workflow: Workflow = serde_json::from_value(json)?;
 
                 println!(
-                    "🚀 Executing Workflow: {} ({} nodes)",
+                    "🚀 Executing Workflow: {} ({} nodes) [engine={}]",
                     workflow.name,
-                    workflow.graph.node_count()
+                    workflow.graph.node_count(),
+                    engine,
                 );
 
                 let registry = Arc::new(NodeRegistry::default());
-                let engine = SwanFlowEngine::new(registry);
+                let mut swan_engine = SwanFlowEngine::new(registry);
 
-                let mut rx = engine.execute_workflow(&workflow).await?;
+                // Configure engine mode
+                if engine == "duckdb" {
+                    use swanflow::core::engine::DuckDBEngine;
+                    let duckdb = DuckDBEngine::new_in_memory()
+                        .map_err(|e| anyhow::anyhow!("DuckDB: {}", e))?;
+                    swan_engine = swan_engine.with_engine(Arc::new(duckdb));
+                } else if engine == "datafusion" {
+                    swan_engine = swan_engine
+                        .with_engine_mode(swanflow::core::engine::EngineMode::DataFusion);
+                }
+                // "auto" is default — no explicit mode needed
+
+                let mut rx = swan_engine.execute_workflow(&workflow).await?;
 
                 let mut executed = 0;
                 let mut errors = 0;

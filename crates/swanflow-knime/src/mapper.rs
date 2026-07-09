@@ -94,12 +94,28 @@ impl KnimeNodeMapper {
 
         // ─── Aggregate ───
         def!("org.knime.base.node.preproc.groupby.GroupByNodeFactory", "core.transform.aggregate",
-            |s| json!({
-                "group_by": s.get("group_column_names").and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
-                "aggregates": s.get("aggregate_column_names").and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
-            }));
+            |s| {
+                // KNIME stores column names as comma-separated string, not JSON array
+                let parse_cols = |key: &str| -> Vec<&str> {
+                    s.get(key)
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect())
+                        .or_else(|| {
+                            s.get(key).and_then(|v| v.as_array())
+                                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                        })
+                        .unwrap_or_default()
+                };
+                let group_cols = parse_cols("group_column_names");
+                let agg_cols = parse_cols("aggregate_column_names");
+                let aggs: Vec<String> = agg_cols.iter()
+                    .map(|c| format!("AVG({})", c))
+                    .collect();
+                json!({
+                    "group_by": group_cols,
+                    "aggs": aggs,
+                })
+            });
 
         // ─── Join ───
         def!("org.knime.base.node.preproc.joiner.JoinerNodeFactory", "core.sql",
