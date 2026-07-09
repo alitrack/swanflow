@@ -933,6 +933,85 @@ impl KnimeNodeMapper {
             |s| json!({"query": format!("ATTACH '{}' AS knime_db (TYPE postgres)",
                 s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""))}));
 
+
+        // ─── Federated DB Connectors (DuckDB ATTACH extensions) ───
+        def!("org.knime.base.node.io.database.DBConnectorMySQLNodeFactory", "core.sql",
+            |s| json!({"query": format!("ATTACH '{}' AS mysql_db (TYPE mysql)",
+                s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""))}));
+        def!("org.knime.base.node.io.database.DBConnectorPostgreSQLNodeFactory", "core.sql",
+            |s| json!({"query": format!("ATTACH '{}' AS pg_db (TYPE postgres)",
+                s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""))}));
+        def!("org.knime.base.node.io.database.DBConnectorSQLiteNodeFactory", "core.sql",
+            |s| json!({"query": format!("ATTACH '{}' AS sqlite_db (TYPE sqlite)",
+                s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""))}));
+        def!("org.knime.base.node.io.database.DBConnectorMSSQLNodeFactory", "core.sql",
+            |s| json!({"query": format!("ATTACH '{}' AS mssql_db (TYPE sqlserver)",
+                s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""))}));
+        def!("org.knime.base.node.io.database.DBConnectorMongoDBNodeFactory", "core.sql",
+            |s| json!({"query": format!("ATTACH '{}' AS mongo_db (TYPE mongodb)",
+                s.get("connection_string").and_then(|v| v.as_str()).unwrap_or(""))}));
+        def!("org.knime.base.node.io.database.DBConnectorSalesforceNodeFactory", "core.sql",
+            |s| json!({"query": format!("ATTACH '' AS sf (TYPE salesforce)",
+                )}));
+
+        // ─── Spatial / Geo (DuckDB spatial extension) ───
+        def!("org.knime.base.node.io.spatial.SPATIALReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM ST_Read('{}')", path)})
+            });
+        def!("org.knime.base.node.io.spatial.GeoJSONReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM ST_Read('{}')", path)})
+            });
+        def!("org.knime.base.node.io.spatial.ShapeFileReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM ST_Read('{}')", path)})
+            });
+        def!("org.knime.geospatial.nodes.coordinate.CoordinateTransformNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("geometry_column").and_then(|v| v.as_str()).unwrap_or("");
+                let from_srid = s.get("source_crs").and_then(|v| v.as_str()).unwrap_or("4326");
+                let to_srid = s.get("target_crs").and_then(|v| v.as_str()).unwrap_or("3857");
+                json!({"query": format!("SELECT *, ST_Transform({}, 'EPSG:{}', 'EPSG:{}') AS {}_transformed FROM input_0", col, from_srid, to_srid, col)})
+            });
+        def!("org.knime.geospatial.nodes.buffer.BufferNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("geometry_column").and_then(|v| v.as_str()).unwrap_or("");
+                let dist = s.get("distance").and_then(|v| v.as_str()).unwrap_or("100");
+                json!({"query": format!("SELECT *, ST_Buffer({}, {}) AS {}_buffered FROM input_0", col, dist, col)})
+            });
+        def!("org.knime.geospatial.nodes.intersection.IntersectionNodeFactory", "core.sql",
+            |s| {
+                let col1 = s.get("geometry_column_1").and_then(|v| v.as_str()).unwrap_or("");
+                let col2 = s.get("geometry_column_2").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, ST_Intersection({}, {}) AS intersection FROM input_0", col1, col2)})
+            });
+
+        // ─── Faker / Test Data (DuckDB faker extension) ───
+        def!("org.knime.base.node.util.sampledata.SampleDataNodeFactory", "core.sql",
+            |s| {
+                let rows = s.get("sample_size").and_then(|v| v.as_str()).unwrap_or("100");
+                json!({"query": format!("SELECT * FROM faker('fake', {})", rows)})
+            });
+
+        // ─── OData / GraphQL reader (erpl-web extension) ───
+        def!("org.knime.base.node.io.odata.ODataReaderNodeFactory", "core.sql",
+            |s| {
+                let url = s.get("service_url").and_then(|v| v.as_str()).unwrap_or("");
+                let entity = s.get("entity_set").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_json_auto('{}/{}')", url, entity)})
+            });
+
+        // ─── FTP / SFTP reader (cloudfs) ───
+        def!("org.knime.base.node.io.filehandling.FTPFileReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_csv_auto('sftp://{}')", path)})
+            });
+
         // ─── Scripting ───
         def!("org.knime.base.node.preproc.r.RSnippetNodeFactory", "core.script.python",
             |s| json!({"script": s.get("r_script").and_then(|v| v.as_str()).unwrap_or(""), "type": "r"}));
