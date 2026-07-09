@@ -9,9 +9,10 @@ SwanFlow is a high-performance data science engine built on **Apache DataFusion 
 | 能力 | SwanFlow | Pandas | KNIME | Airflow |
 |---|---|---|---|---|
 | **DAG + AI Agent** | ✅ 融合 | ❌ | ❌ | ❌ |
+| **KNIME 兼容** | ✅ .knwf 导入执行 | ❌ | ✅ 原生 | ❌ |
 | **WASM UDF** | ✅ 浏览器级沙箱 | ❌ | ❌ | ❌ |
 | **MCP 双通道** | ✅ Server + Client | ❌ | ❌ | ❌ |
-| **DBX 配置兼容** | ✅ 共享连接配置 | ❌ | ❌ | ❌ |
+| **Shaper 仪表板** | ✅ DuckDB push | ❌ | ❌ | ❌ |
 | **单二进制** | ✅ 编译即用 | ❌ | ❌ | ❌ |
 | **零拷贝 Python** | ✅ Arrow FFI | ❌ | ❌ | ❌ |
 | **Late-Binding SQL** | ✅ DataFusion | ❌ | ❌ | ❌ |
@@ -68,6 +69,34 @@ ssl: true
 read_only: true
 ```
 
+### KNIME 工作流兼容
+
+SwanFlow 可直接运行 KNIME 工作流（`.knwf`），120 个节点工厂映射，覆盖 IO/Transform/Analysis/Visualization/FlowControl 五大类。
+
+```bash
+# 导入并执行 KNIME 工作流
+swanflow knime run sales_analysis.knwf
+
+# 预览输出前 5 行
+swanflow knime run pipeline.knwf --print
+
+# 选择执行引擎
+swanflow knime run pipeline.knwf --engine duckdb
+
+# 执行后推送到 Shaper 仪表板
+swanflow knime run pipeline.knwf --push-shaper
+
+# 查看当前映射覆盖率
+swanflow knime list-mappings
+
+# 扫描 KNIME 安装目录，了解节点类型
+swanflow knime scan ~/knime-workspace/
+```
+
+**支持能力：** CSV/Excel 读写 · 过滤/排序/分组/聚合 · JOIN/Pivot · SQL · 可视化（Bar/Pie/Line/Scatter/Heatmap 等 28 种 VIZ） · 循环（Loop/Chunk/Counting/Recursive） · 流变量 · Python 脚本
+
+**覆盖率：** 120 个工厂映射，61 Full (51%)，41 Emulated (34%)，15 Unsupported (12%)，3 Degraded (3%)
+
 ### MCP 集成
 
 SwanFlow 可嵌入任何支持 MCP 的平台（LangFlow · Claude Code · Dify · n8n）：
@@ -115,18 +144,19 @@ cargo run -- mcp call -- python /path/to/mcp-server.py tool_name '{"arg": 42}'
 ## 🏗 架构
 
 ```
-┌─────────────────────────────────────────────┐
-│              CLI (swanflow run/inspect/...)  │
-├─────────────────────────────────────────────┤
-│  MCP Server  │  MCP Client  │  AI Agent     │
-├─────────────────────────────────────────────┤
-│  DAG Engine (petgraph + tokio)              │
-├─────────────────────────────────────────────┤
-│  DataFusion Query Engine                    │
-├───────┬──────────┬────────────┬─────────────┤
-│ Arrow │  Connectors  │  WASM  │  Python     │
-│       │  (DBX compat)│  UDF   │  Bridge     │
-└───────┴──────────┴────────────┴─────────────┘
+┌─────────────────────────────────────────────────────────┐
+│          CLI (swanflow run/inspect/knime/...)            │
+├─────────────────────────────────────────────────────────┤
+│  MCP Server  │  MCP Client  │  AI Agent  │  KNIME Importer │
+├─────────────────────────────────────────────────────────┤
+│  DAG Engine (petgraph + tokio)                          │
+│  StepMode: Sequential / FanOut / Collect / Conditional / Loop
+├─────────────────────────────────────────────────────────┤
+│  DataFusion + DuckDB Query Engines                      │
+├───────┬──────────┬────────────┬─────────────┬──────────┤
+│ Arrow │Connectors│   WASM     │   Python    │  Shaper  │
+│       │(DBX)     │   UDF      │   Bridge    │  Push    │
+└───────┴──────────┴────────────┴─────────────┴──────────┘
 ```
 
 ## 技术栈
@@ -146,20 +176,18 @@ cargo run -- mcp call -- python /path/to/mcp-server.py tool_name '{"arg": 42}'
 ## 📁 项目结构
 
 ```
-src/
-├── core/              # 引擎核心
-│   ├── connection_config.rs   # DBX兼容连接配置
-│   ├── datasource.rs          # SQLx/DuckDB扫描器
-│   ├── engine.rs              # SwanFlowEngine
-│   ├── graph.rs               # Workflow DAG定义
-│   └── templating.rs          # 模板变量引擎
-├── nodes/
-│   ├── connectors/            # 数据库连接器
-│   ├── wasm.rs                # WASM UDF节点
-│   └── ai/                    # AI Agent节点
-├── mcp/                       # MCP Server + Client
-└── agent/                     # AI Agent引擎
+crates/
+├── swanflow/          # CLI + 引擎主机
+│   └── src/
+│       ├── core/      # 引擎核心 (DataFusion + DuckDB)
+│       ├── nodes/     # 原生节点 (IO/Transform/AI/Script)
+│       ├── mcp/       # MCP Server + Client
+│       └── agent/     # AI Agent 引擎
+├── swanflow-core/     # 核心抽象 (Workflow, NodeBehavior trait)
+├── swanflow-knime/    # KNIME 互操作 (.knwf 解析/映射/执行)
+├── swanflow-ai/       # AI 能力 (Analyst Agent)
+└── swanflow-plugin-sdk/ # 插件 SDK
 
 examples/              # 示例工作流
-connections/           # DBX兼容连接配置
+connections/           # DBX 兼容连接配置
 ```
