@@ -673,9 +673,8 @@ impl SwanFlowEngine {
                             registry: registry_clone.clone(),
                             cache_dir: cache_dir.clone(),
                             hook: hook_shared.clone(),
-                            mode: crate::core::engine::EngineMode::Auto,
-                            duckdb_conn: None,
-                            materialize_nodes: false,
+                            engine: None,
+                            engine_mode: crate::core::engine::EngineMode::Auto,
                         };
 
                         match sub_engine.execute_workflow(sub_wf).await {
