@@ -297,6 +297,8 @@ impl KnimeNodeMapper {
             |_| json!({}));
         def!("org.knime.base.views.node.barchart.BarChartNodeFactory", "core.transform.profiler",
             |_| json!({}));
+        def!("org.knime.base.node.viz.plotter.bar.BarChartNodeFactory", "core.transform.profiler",
+            |_| json!({}));
 
         // ─── QuickForm / JS Widgets ───
         def!("org.knime.js.base.node.quickform.input.integer.IntInputQuickFormNodeFactory", "core.flow.variable_creator",

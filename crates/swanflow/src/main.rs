@@ -58,6 +58,12 @@ enum KnimeCommands {
         /// Execution engine: datafusion, duckdb, or auto (default: auto)
         #[arg(long, default_value = "auto")]
         engine: String,
+        /// After execution, also push Shaper dashboard to SQLite
+        #[arg(long)]
+        push_shaper: bool,
+        /// Override Shaper SQLite path (used with --push-shaper)
+        #[arg(long, default_value_t = default_shaper_db())]
+        shaper_db: String,
     },
     /// Convert KNIME workflow (.knwf/.knar) to Shaper SQL dashboard queries
     Shaper {
@@ -241,7 +247,7 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Knime { command } => match command {
-            KnimeCommands::Run { input, engine } => {
+            KnimeCommands::Run { input, engine, push_shaper, shaper_db } => {
                 println!("🧩 Parsing KNIME workflow: {:?}", input);
                 let archive = KnwfParser::parse_file(&input)?;
                 println!(
@@ -322,6 +328,48 @@ async fn main() -> anyhow::Result<()> {
                     "✅ Done — {} executed, {} errors",
                     executed, errors
                 );
+
+                if push_shaper {
+                    if errors > 0 {
+                        println!("\n⚠️  {} execution errors — pushing dashboard anyway", errors);
+                    }
+                    println!("\n📊 Generating Shaper dashboard...");
+                    let queries = swanflow_knime::shaper::generate_shaper_queries(&archive);
+                    if queries.is_empty() {
+                        println!("   No visualization nodes found — nothing pushed.");
+                    } else {
+                        let db = duckdb::Connection::open_in_memory()
+                            .map_err(|e| anyhow::anyhow!("DuckDB: {}", e))?;
+                        db.execute_batch("INSTALL sqlite; LOAD sqlite;")
+                            .map_err(|e| anyhow::anyhow!("sqlite ext: {}", e))?;
+                        db.execute_batch(&format!(
+                            "ATTACH '{}' AS shaper (TYPE SQLITE);",
+                            shaper_db
+                        ))?;
+
+                        let content: String = queries
+                            .iter()
+                            .map(|q| format!("-- [{}] {}\n{};\n", q.chart_type, q.node_name, q.sql))
+                            .collect();
+                        let id = uuid::Uuid::new_v4().simple().to_string();
+                        let name = format!(
+                            "SwanFlow {}",
+                            archive.workflow_meta.name.as_deref().unwrap_or("Untitled")
+                        );
+
+                        db.execute(
+                            "INSERT INTO shaper.apps (id, name, content, created_at, updated_at, type, visibility)
+                             VALUES (?, ?, ?, now(), now(), 'dashboard', 'private')",
+                            duckdb::params![id, name, content],
+                        )?;
+
+                        println!(
+                            "✅ Pushed dashboard '{}' to Shaper SQLite ({} charts)",
+                            name,
+                            queries.len()
+                        );
+                    }
+                }
             }
             KnimeCommands::Scan { inputs } => {
                 println!("🔍 Scanning {} workflow(s) for factory types...", inputs.len());
