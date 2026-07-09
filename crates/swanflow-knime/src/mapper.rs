@@ -280,8 +280,11 @@ impl KnimeNodeMapper {
             |_| json!({}));
 
         // ─── Collection / Loop ───
-        def!("org.knime.base.collection.list.create2.CollectionCreate2NodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "collection create"}));
+        def!("org.knime.base.collection.list.create2.CollectionCreate2NodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT list(\"{}\") AS collection FROM input_0", col)})
+            });
 
         // ─── Sort (alt namespace) ───
         def!("org.knime.base.node.preproc.sorter.SorterNodeFactory", "core.sql",
@@ -357,8 +360,8 @@ impl KnimeNodeMapper {
             |_| json!({}));
         def!("org.knime.js.base.node.quickform.input.string.StringInputQuickFormNodeFactory", "core.flow.variable_creator",
             |_| json!({}));
-        def!("org.knime.js.base.node.css.editor.CSSEditorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "css editor"}));
+        def!("org.knime.js.base.node.css.editor.CSSEditorNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Time ───
         def!("org.knime.time.node.create.createdatetime.CreateDateTimeNodeFactory", "core.sql",
@@ -633,16 +636,19 @@ impl KnimeNodeMapper {
             |_| json!({}));
 
         // ─── Timer / Wait ───
-        def!("org.knime.base.node.meta.timedloop.TimedLoopStartNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "timer wait"}));
+        def!("org.knime.base.node.meta.timedloop.TimedLoopStartNodeFactory", "core.sql",
+            |s| {
+                let seconds = s.get("interval_seconds").and_then(|v| v.as_str()).unwrap_or("60");
+                json!({"query": format!("SELECT pg_sleep({}) AS waited, * FROM input_0", seconds)})
+            });
 
         // ─── Workflow / SSH ───
         def!("org.knime.base.node.meta.caller.WorkflowExecutorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "workflow executor"}));
+            |_| json!({"reason": "sub-workflow executor (use SwanFlow sub_workflow)"}));
         def!("org.knime.ext.ssh.SSHConnectionNodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "ssh connection"}));
         def!("org.knime.ext.ssh.SSHCommandNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "ssh command"}));
+            |_| json!({"reason": "SSH command → use ducklink WASM component or SwanFlow Python UDF with paramiko"}));
 
         // ─── Analysis — Regression (duckdb-ml powered) ───
         // ml_train() takes: model_name, algorithm, target_json, features_json, params_json
@@ -1120,13 +1126,13 @@ impl KnimeNodeMapper {
 
         // ─── Deep Learning / Keras ───
         def!("org.knime.dl.keras.base.nodes.layers.DLKerasInputLayerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "keras input layer"}));
+            |_| json!({"reason": "keras input layer → export to ONNX → use ml_load_onnx()"}));
         def!("org.knime.dl.keras.base.nodes.layers.DLKerasDenseLayerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "keras dense layer"}));
+            |_| json!({"reason": "keras dense layer → export to ONNX → use ml_load_onnx()"}));
         def!("org.knime.dl.keras.base.nodes.learner.DLKerasNetworkLearnerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "keras network learner"}));
+            |_| json!({"reason": "keras network learner → train in Python, export ONNX → ml_load_onnx()"}));
         def!("org.knime.dl.keras.base.nodes.executor.DLKerasNetworkExecutorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "keras network executor"}));
+            |_| json!({"reason": "keras executor → ml_predict() with ONNX model loaded via ml_load_onnx()"}));
 
         // ─── Python Script (v2) ───
         def!("org.knime.python3.scripting.nodes.script.PythonScriptNodeFactory2", "core.script.python",
@@ -1489,7 +1495,7 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.meta.timer.TimerInfoNodeFactory", "core.sql",
             |_| json!({"query": "SELECT now() AS execution_time, * FROM input_0"}));
         def!("org.knime.ext.ssh.SSHConnectionNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "SSH connection"}));
+            |_| json!({"reason": "SSH connection → use ducklink WASM component or SwanFlow Python UDF with paramiko"}));
 
         // ─── Statistics (duckdb-ml + stats_duck powered) ───
         def_fb!("org.knime.base.node.stats.ttest.PairedTTestNodeFactory", "core.sql",
