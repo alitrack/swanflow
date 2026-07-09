@@ -1847,6 +1847,356 @@ impl KnimeNodeMapper {
                     model, context, prompt)})
             });
 
+        // ═══════════════════════════════════════════════════════════════
+        // Round 10 — New DuckDB extensions: excel, azure, iceberg, delta,
+        // avro, odbc, vss, yaml, pdf, gcs, unity_catalog, lance, vortex,
+        // sheetreader, h3, tdigest, read_stat
+        // ═══════════════════════════════════════════════════════════════
+
+        // ─── Excel (.xlsx) — duckdb excel extension ───
+        // Replaces previous read_csv_auto hacks for Excel nodes
+        def_fb!("org.knime.ext.poi3.node.io.filehandling.excel.reader.ExcelTableReaderNodeFactory2", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
+                json!({"query": format!(
+                    "SELECT * FROM st_read('{}', layer='{}')", path, sheet)})
+            }, "Fallback: DuckDB excel extension → read_xlsx()");
+
+        def!("org.knime.ext.poi3.node.io.filehandling.excel.writer.ExcelTableWriterNodeFactory2", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/output.xlsx");
+                json!({"query": format!(
+                    "COPY (SELECT * FROM input_0) TO '{}' (FORMAT xlsx)", path)})
+            });
+
+        def!("org.knime.base.node.io.filehandling.ExcelReaderNodeFactory2", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
+                json!({"query": format!(
+                    "SELECT * FROM st_read('{}', layer='{}')", path, sheet)})
+            });
+
+        // ─── Excel (community) — sheetreader / rusty_sheet / spxlsx ───
+        def!("org.knime.base.node.io.filehandling.XLSXReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
+                json!({"query": format!(
+                    "SELECT * FROM sheetreader('{}', sheet='{}')", path, sheet)})
+            });
+
+        def!("org.knime.ext.sharepoint.SharePointExcelReaderNodeFactory", "core.sql",
+            |s| {
+                let site = s.get("site_url").and_then(|v| v.as_str()).unwrap_or("");
+                let file = s.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM spxlsx('{}', file='{}')", site, file)})
+            });
+
+        // ─── Azure Blob Storage (duckdb azure extension) ───
+        def!("org.knime.base.node.io.cloud.AzureBlobConnectorNodeFactory", "core.sql",
+            |s| {
+                let container = s.get("container").and_then(|v| v.as_str()).unwrap_or("");
+                let account = s.get("account_name").and_then(|v| v.as_str()).unwrap_or("");
+                let path = s.get("blob_path").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM 'azure://{}/{}/{}'", account, container, path)})
+            });
+
+        def!("org.knime.base.node.io.cloud.AzureBlobReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM read_csv_auto('azure://{}')", path)})
+            });
+
+        // ─── GCS (Google Cloud Storage) ───
+        def!("org.knime.base.node.io.cloud.GCSConnectorNodeFactory", "core.sql",
+            |s| {
+                let bucket = s.get("bucket").and_then(|v| v.as_str()).unwrap_or("");
+                let path = s.get("object_path").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM 'gcs://{}/{}'", bucket, path)})
+            });
+
+        def!("org.knime.base.node.io.cloud.GCSReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM read_parquet('gcs://{}')", path)})
+            });
+
+        // ─── Iceberg (Apache Iceberg) — duckdb iceberg extension ───
+        def!("org.knime.base.node.io.lake.IcebergReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("table_path").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM iceberg_scan('{}')", path)})
+            });
+
+        def!("org.knime.base.node.io.lake.IcebergWriterNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("table_path").and_then(|v| v.as_str()).unwrap_or("/tmp/iceberg_table");
+                json!({"query": format!(
+                    "COPY (SELECT * FROM input_0) TO '{}' (FORMAT iceberg)", path)})
+            });
+
+        // ─── Delta Lake — duckdb delta extension ───
+        def!("org.knime.base.node.io.lake.DeltaReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("table_path").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM delta_scan('{}')", path)})
+            });
+
+        def!("org.knime.base.node.io.lake.DeltaWriterNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("table_path").and_then(|v| v.as_str()).unwrap_or("/tmp/delta_table");
+                json!({"query": format!(
+                    "COPY (SELECT * FROM input_0) TO '{}' (FORMAT delta)", path)})
+            });
+
+        // ─── Lance columnar format — duckdb lance extension ───
+        def!("org.knime.base.node.io.lake.LanceReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM '{}'", path)})
+            });
+
+        // ─── Unity Catalog — duckdb unity_catalog extension ───
+        def!("org.knime.base.node.io.catalog.UnityCatalogReaderNodeFactory", "core.sql",
+            |s| {
+                let endpoint = s.get("endpoint").and_then(|v| v.as_str()).unwrap_or("");
+                let catalog = s.get("catalog").and_then(|v| v.as_str()).unwrap_or("main");
+                let schema = s.get("schema").and_then(|v| v.as_str()).unwrap_or("default");
+                let table = s.get("table").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "ATTACH '{}' AS uc (TYPE unity_catalog); SELECT * FROM uc.{}.{}.{}",
+                    endpoint, catalog, schema, table)})
+            });
+
+        // ─── Avro — duckdb avro extension ───
+        def!("org.knime.base.node.io.filehandling.AvroReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_avro('{}')", path)})
+            });
+
+        // ─── ODBC — duckdb odbc extension ───
+        def!("org.knime.base.node.io.database.ODBCConnectorNodeFactory", "core.sql",
+            |s| {
+                let dsn = s.get("dsn").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "ATTACH 'dsn={}' AS odbc_db (TYPE odbc)", dsn)})
+            });
+
+        def!("org.knime.base.node.io.database.ODBCReaderNodeFactory", "core.sql",
+            |s| {
+                let dsn = s.get("dsn").and_then(|v| v.as_str()).unwrap_or("");
+                let query = s.get("sql_string").and_then(|v| v.as_str()).unwrap_or("SELECT * FROM table");
+                json!({"query": format!(
+                    "ATTACH 'dsn={}' AS odbc_src (TYPE odbc); {}",
+                    dsn, query)})
+            });
+
+        // ─── VSS Vector Similarity Search — duckdb vss extension ───
+        def!("org.knime.base.node.mine.similarity.VectorIndexNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("embedding_column").and_then(|v| v.as_str()).unwrap_or("embedding");
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("vectors");
+                json!({"query": format!(
+                    "CREATE INDEX {}_idx ON {} USING HNSW ({})", table, table, col)})
+            });
+
+        def!("org.knime.base.node.mine.similarity.VectorSearchNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("embedding_column").and_then(|v| v.as_str()).unwrap_or("embedding");
+                let query_vec = s.get("query_vector").and_then(|v| v.as_str()).unwrap_or("");
+                let k = s.get("top_k").and_then(|v| v.as_str()).unwrap_or("10");
+                json!({"query": format!(
+                    "SELECT *, array_distance({}, {}::FLOAT[128]) AS _distance FROM input_0 ORDER BY _distance LIMIT {}",
+                    col, query_vec, k)})
+            });
+
+        // ─── YAML — duckdb yaml extension ───
+        def_fb!("org.knime.base.node.io.filehandling.YAMLReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_yaml('{}')", path)})
+            }, "Fallback: SwanFlow Python UDF → PyYAML");
+
+        // ─── PDF — duckdb pdf extension ───
+        def_fb!("org.knime.base.node.io.filehandling.PDFReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_text('pdf://{}')", path)})
+            }, "Fallback: SwanFlow Python UDF → PyMuPDF / pdfplumber");
+
+        def!("org.knime.base.node.io.filehandling.PDFTableReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM parquet_scan('{}')", path)})
+            });
+
+        // ─── H3 Geospatial Indexing — spatial extension H3 functions ───
+        def!("org.knime.geospatial.nodes.h3.H3IndexNodeFactory", "core.sql",
+            |s| {
+                let lat_col = s.get("latitude_column").and_then(|v| v.as_str()).unwrap_or("lat");
+                let lon_col = s.get("longitude_column").and_then(|v| v.as_str()).unwrap_or("lon");
+                let resolution = s.get("resolution").and_then(|v| v.as_str()).unwrap_or("8");
+                json!({"query": format!(
+                    "SELECT *, h3_latlng_to_cell({}, {}, {}) AS h3_cell FROM input_0",
+                    lat_col, lon_col, resolution)})
+            });
+
+        def!("org.knime.geospatial.nodes.h3.H3AggregateNodeFactory", "core.sql",
+            |s| {
+                let h3_col = s.get("h3_column").and_then(|v| v.as_str()).unwrap_or("h3_cell");
+                let val_col = s.get("value_column").and_then(|v| v.as_str()).unwrap_or("*");
+                json!({"query": format!(
+                    "SELECT {}, COUNT({}) AS cnt, AVG(CAST({} AS DOUBLE)) AS avg_val FROM input_0 GROUP BY {}",
+                    h3_col, val_col, val_col, h3_col)})
+            });
+
+        // ─── tdigest — approximate quantiles ───
+        def!("org.knime.base.node.stats.quantile.QuantileNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let quantiles = s.get("quantiles").and_then(|v| v.as_str()).unwrap_or("0.25,0.5,0.75,0.95,0.99");
+                json!({"query": format!(
+                    "SELECT tdigest_quantile({}, [{}]) AS quantiles FROM input_0", col, quantiles)})
+            });
+
+        // ─── read_stat — SAS/Stata/SPSS via DuckDB stats_duck ───
+        def!("org.knime.base.node.io.filehandling.StataReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_dta('{}')", path)})
+            });
+
+        def!("org.knime.base.node.io.filehandling.SAS7BDATReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT * FROM read_sas('{}')", path)})
+            });
+
+        // ─── Overture Maps — duckdb overture extension ───
+        def!("org.knime.geospatial.nodes.overture.OvertureReaderNodeFactory", "core.sql",
+            |s| {
+                let theme = s.get("theme").and_then(|v| v.as_str()).unwrap_or("places");
+                let bbox = s.get("bbox").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM overture('{}', bbox='{}')", theme, bbox)})
+            });
+
+        // ─── GeoArrow — duckdb duck_geoarrow extension ───
+        def!("org.knime.geospatial.nodes.geoarrow.GeoArrowReaderNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT ST_AsText(geometry) AS wkt, * FROM read_parquet('{}')", path)})
+            });
+
+        // ─── Harbor — DuckDB HTTP server/client ───
+        def!("org.knime.base.node.io.remote.HarborServerNodeFactory", "core.sql",
+            |s| {
+                let port = s.get("port").and_then(|v| v.as_str()).unwrap_or("42197");
+                let token = s.get("auth_token").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "ATTACH 'host=localhost port={} token={}' AS harbor_db (TYPE harbor)",
+                    port, token)})
+            });
+
+        // ─── GeoIP — duckdb geoip extension ───
+        def!("org.knime.base.node.mine.geoip.GeoIPLookupNodeFactory", "core.sql",
+            |s| {
+                let ip_col = s.get("ip_column").and_then(|v| v.as_str()).unwrap_or("ip_address");
+                json!({"query": format!(
+                    "SELECT *, geoip_lookup({}) AS geoip FROM input_0", ip_col)})
+            });
+
+        // ─── DuckDB MCP — model context protocol bridge ───
+        def!("org.knime.base.node.mine.mcp.MCPClientNodeFactory", "core.sql",
+            |s| {
+                let server = s.get("mcp_server").and_then(|v| v.as_str()).unwrap_or("");
+                let tool = s.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM mcp_call('{}', '{}', input_0)", server, tool)})
+            });
+
+        // ─── OpenTelemetry — duckdb otlp extension ───
+        def!("org.knime.base.node.monitor.OTLPReaderNodeFactory", "core.sql",
+            |s| {
+                let endpoint = s.get("endpoint").and_then(|v| v.as_str()).unwrap_or("http://localhost:4318");
+                json!({"query": format!(
+                    "SELECT * FROM otlp_traces('{}')", endpoint)})
+            });
+
+        // ─── ERPL Web — OData/GraphQL/REST SAP connector ───
+        def!("org.knime.base.node.io.erpl.ERPLODataReaderNodeFactory", "core.sql",
+            |s| {
+                let service = s.get("odata_service").and_then(|v| v.as_str()).unwrap_or("");
+                let entity = s.get("entity_set").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM odata_scan('{}/{}')", service, entity)})
+            });
+
+        def!("org.knime.base.node.io.erpl.ERPLGraphQLReaderNodeFactory", "core.sql",
+            |s| {
+                let endpoint = s.get("graphql_endpoint").and_then(|v| v.as_str()).unwrap_or("");
+                let query = s.get("query").and_then(|v| v.as_str()).unwrap_or("{ __typename }");
+                json!({"query": format!(
+                    "SELECT * FROM graphql_scan('{}', '{}')", endpoint, query)})
+            });
+
+        // ─── Web Macro / MiniJinja / Tera templating ───
+        def!("org.knime.base.node.report.TemplateRendererNodeFactory", "core.sql",
+            |s| {
+                let template = s.get("template").and_then(|v| v.as_str()).unwrap_or("");
+                let col = s.get("context_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, minijinja_render('{}', {}) AS rendered FROM input_0", template, col)})
+            });
+
+        // ─── Data Diff — duckdb duck_diff extension ───
+        def!("org.knime.base.node.preproc.diff.DataDiffNodeFactory", "core.sql",
+            |s| {
+                let pk = s.get("primary_key").and_then(|v| v.as_str()).unwrap_or("id");
+                json!({"query": format!(
+                    "SELECT * FROM duck_diff(input_0, input_1, '{}')", pk)})
+            });
+
+        // ─── DuckDB Events hook ───
+        def!("org.knime.base.node.monitor.DBEventHookNodeFactory", "core.sql",
+            |s| {
+                let event = s.get("event_type").and_then(|v| v.as_str()).unwrap_or("query_finished");
+                let cmd = s.get("command").and_then(|v| v.as_str()).unwrap_or("echo 'query done'");
+                json!({"query": format!(
+                    "SELECT events_emit('{}', '{}') AS event_result", event, cmd)})
+            });
+
+        // ─── Cron jobs in SQL — duckdb cronjob extension ───
+        def!("org.knime.base.node.flow.scheduler.SchedulerNodeFactory", "core.sql",
+            |s| {
+                let schedule = s.get("cron_expression").and_then(|v| v.as_str()).unwrap_or("0 * * * *");
+                let query = s.get("sql_query").and_then(|v| v.as_str()).unwrap_or("SELECT now()");
+                json!({"query": format!(
+                    "SELECT cronjob_schedule('{}', '{}') AS scheduled", schedule, query)})
+            });
+
+        // ─── Python UDF in SQL — duckdb python extension ───
+        def!("org.knime.base.node.script.PythonSQLUDFNodeFactory", "core.sql",
+            |s| {
+                let func_name = s.get("function_name").and_then(|v| v.as_str()).unwrap_or("my_udf");
+                let py_code = s.get("python_code").and_then(|v| v.as_str()).unwrap_or("return x * 2");
+                json!({"query": format!(
+                    "CREATE OR REPLACE FUNCTION {} (x) AS '{}' LANGUAGE python; SELECT * FROM input_0",
+                    func_name, py_code)})
+            });
+
 
         Self { type_map }
     }
