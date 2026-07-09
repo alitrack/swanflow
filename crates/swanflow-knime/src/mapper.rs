@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use petgraph::stable_graph::NodeIndex;
 use serde_json::json;
@@ -385,6 +385,24 @@ impl KnimeNodeMapper {
                         target_port: edge.target_port,
                     },
                 );
+            }
+        }
+
+        // Set materialize=true on terminal nodes (no outgoing edges) for --print support
+        {
+            let has_outgoing: HashSet<NodeIndex> = graph
+                .edge_indices()
+                .filter_map(|e| graph.edge_endpoints(e))
+                .map(|(src, _)| src)
+                .collect();
+            let terminal_nodes: Vec<NodeIndex> = graph
+                .node_indices()
+                .filter(|idx| !has_outgoing.contains(idx))
+                .collect();
+            for idx in terminal_nodes {
+                if let Some(node) = graph.node_weight_mut(idx) {
+                    node.materialize = true;
+                }
             }
         }
 

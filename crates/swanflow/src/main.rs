@@ -58,6 +58,9 @@ enum KnimeCommands {
         /// Execution engine: datafusion, duckdb, or auto (default: auto)
         #[arg(long, default_value = "auto")]
         engine: String,
+        /// Print first 5 rows of the final output table
+        #[arg(long)]
+        print: bool,
         /// After execution, also push Shaper dashboard to SQLite
         #[arg(long)]
         push_shaper: bool,
@@ -247,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Knime { command } => match command {
-            KnimeCommands::Run { input, engine, push_shaper, shaper_db } => {
+            KnimeCommands::Run { input, engine, print, push_shaper, shaper_db } => {
                 println!("🧩 Parsing KNIME workflow: {:?}", input);
                 let archive = KnwfParser::parse_file(&input)?;
                 println!(
@@ -328,6 +331,84 @@ async fn main() -> anyhow::Result<()> {
                     "✅ Done — {} executed, {} errors",
                     executed, errors
                 );
+
+                if print {
+                    // Read the last materialized node's output from metadata DB
+                    let cache_dir = "target/swanflow_cache";
+                    let metadata_path = format!("{}/metadata.duckdb", cache_dir);
+                    if let Ok(conn) = duckdb::Connection::open(&metadata_path) {
+                        let mut stmt = conn
+                            .prepare("SELECT node_id, table_name, parquet_path FROM flow_metadata ORDER BY rowid DESC LIMIT 1")
+                            .ok();
+                        if let Some(stmt) = stmt.as_mut() {
+                            if let Ok(rows) = stmt.query_map([], |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, String>(2)?,
+                                ))
+                            }) {
+                                for row in rows.flatten() {
+                                    let (_node_id, table_name, parquet_path) = row;
+                                    if !parquet_path.is_empty() {
+                                        println!("\n📋 Output table: `{}`", table_name);
+                                        // Read parquet with DuckDB and print first 5 rows
+                                        if let Ok(pconn) = duckdb::Connection::open_in_memory() {
+                                            if pconn.execute_batch(&format!(
+                                                "CREATE VIEW output AS SELECT * FROM '{}';",
+                                                parquet_path
+                                            )).is_ok() {
+                                                if let Ok(mut stmt) = pconn.prepare("SELECT * FROM output LIMIT 5") {
+                                                    if let Ok(mut rows) = stmt.query([]) {
+                                                        // Get columns from first row
+                                                        let mut first = true;
+                                                        while let Ok(Some(r)) = rows.next() {
+                                                            let ncols = r.as_ref().column_count();
+                                                            let vals: Vec<String> = (0..ncols)
+                                                                .map(|i| {
+                                                                    match r.get_ref(i) {
+                                                                        Ok(duckdb::types::ValueRef::Null) => "NULL".into(),
+                                                                        Ok(duckdb::types::ValueRef::Boolean(b)) => b.to_string(),
+                                                                        Ok(duckdb::types::ValueRef::TinyInt(n)) => n.to_string(),
+                                                                        Ok(duckdb::types::ValueRef::SmallInt(n)) => n.to_string(),
+                                                                        Ok(duckdb::types::ValueRef::Int(n)) => n.to_string(),
+                                                                        Ok(duckdb::types::ValueRef::BigInt(n)) => n.to_string(),
+                                                                        Ok(duckdb::types::ValueRef::Float(f)) => format!("{:.4}", f),
+                                                                        Ok(duckdb::types::ValueRef::Double(f)) => format!("{:.4}", f),
+                                                                        Ok(duckdb::types::ValueRef::Text(s)) => {
+                                                                            String::from_utf8_lossy(s).into_owned()
+                                                                        }
+                                                                        Ok(other) => format!("{:?}", other),
+                                                                        Err(_) => "NULL".into(),
+                                                                    }
+                                                                })
+                                                                .collect();
+                                                            if first {
+                                                                // Use column indices as headers
+                                                                let headers: Vec<String> = (0..ncols)
+                                                                    .map(|i| format!("col{}", i))
+                                                                    .collect();
+                                                                println!("  {}", headers.join(" | "));
+                                                                println!("  {}", "-".repeat(headers.join(" | ").len()));
+                                                                first = false;
+                                                            }
+                                                            println!("  {}", vals.join(" | "));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        println!(
+                                            "\n📋 Output materialized as in-memory table `{}`",
+                                            table_name
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if push_shaper {
                     if errors > 0 {
