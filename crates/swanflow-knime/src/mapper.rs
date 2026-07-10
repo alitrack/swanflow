@@ -2314,9 +2314,12 @@ impl KnimeNodeMapper {
                 json!({"query": format!("PRQL '{}' AS (SELECT * FROM input_0)", prql)})
             });
 
-        // ─── Substrait — query plan serialization (not yet a DuckDB extension) ───
+        // ─── Substrait query plan export → ducklink WASM component ───
+        // ducklink_load('substrait_exporter');
+        // SELECT * FROM substrait_export(query_plan);
+        // Component: compile substrait-rs to WASM, register table function
         def!("org.knime.base.node.query.SubstraitExportNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "No substrait DuckDB extension — consider ducklink WASM component for query plan serialization"}));
+            |_| json!({"reason": "Substrait query plan export → ducklink WASM component (substrait-rs crate)", "_ducklink": "substrait_exporter"}));
 
         // ─── Web Crawler — duckdb crawler extension ───
         def!("org.knime.base.node.io.web.WebCrawlerNodeFactory", "core.sql",
@@ -2356,9 +2359,12 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.preproc.id.ULIDGeneratorNodeFactory", "core.script.python",
             |_| json!({"sandboxed": false, "script": "import ulid\nimport pyarrow as pa\n\ntable = pa.Table.from_batches([batch])\nn = table.num_rows or 1\nresult_table = pa.table({\"ulid\": [str(ulid.new()) for _ in range(n)]})"}));
 
-        // ─── Address Parsing (libpostal — not yet a DuckDB extension) ───
+        // ─── Address Parsing → ducklink WASM component ───
+        // ducklink_load('address_parser');
+        // SELECT * FROM address_parse('1600 Pennsylvania Ave, Washington DC');
+        // Component: compile libpostal (C) to WASM via emscripten, register table function
         def!("org.knime.base.node.text.AddressParserNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "No libpostal DuckDB extension — consider ducklink WASM component for address parsing"}));
+            |_| json!({"reason": "Address parser → ducklink WASM component (libpostal via emscripten)", "_ducklink": "address_parser"}));
 
         // ─── VIndex — advanced vector indexes (HNSW/IVF/DiskANN) ───
         def!("org.knime.base.node.mine.similarity.VIndexCreateNodeFactory", "core.sql",
@@ -2395,17 +2401,23 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.query.ChineseSQLNodeFactory", "core.sql",
             |_| json!({"query": "SELECT * FROM input_0"}));
 
-        // ─── AWS Ion format (not yet a DuckDB extension) ───
+        // ─── AWS Ion format → ducklink WASM component ───
+        // ducklink_load('ion_reader');
+        // SELECT * FROM ion_read('s3://bucket/data.ion');
+        // Component: compile ion-rs to WASM, register table function via DuckDB C API
         def!("org.knime.base.node.io.filehandling.IonReaderNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "No ion DuckDB extension — consider ducklink WASM component for AWS Ion parsing"}));
+            |_| json!({"reason": "AWS Ion format reader → ducklink WASM component (ion-rs crate)", "_ducklink": "ion_reader"}));
 
         // ─── ShellFS — shell command output (no DuckDB extension + security risk) ───
         def!("org.knime.base.node.io.system.ShellCommandReaderNodeFactory", "core.script.python",
             |_| json!({"sandboxed": false, "script": "import subprocess\nimport pyarrow as pa\n\nresult = subprocess.run([\"echo\", \"ok\"], capture_output=True, text=True)\nresult_table = pa.table({\"output\": [result.stdout], \"exit_code\": [result.returncode]})"}));
 
-        // ─── TAR Archive reader (tarfs — not yet a DuckDB extension) ───
+        // ─── TAR Archive reader → ducklink WASM component ───
+        // ducklink_load('tar_reader');
+        // SELECT * FROM tar_read('/path/to/archive.tar.gz');
+        // Component: compile tar-rs to WASM, register table function
         def!("org.knime.base.node.io.filehandling.TARReaderNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "No tarfs DuckDB extension — consider ducklink WASM component for TAR archive reading"}));
+            |_| json!({"reason": "TAR archive reader → ducklink WASM component (tar-rs crate)", "_ducklink": "tar_reader"}));
 
         // ─── Vortex format reader ───
         def!("org.knime.base.node.io.filehandling.VortexReaderNodeFactory", "core.sql",
