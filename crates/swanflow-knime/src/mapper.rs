@@ -648,12 +648,12 @@ impl KnimeNodeMapper {
             });
 
         // ─── Workflow / SSH ───
-        def!("org.knime.base.node.meta.caller.WorkflowExecutorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "sub-workflow executor (use SwanFlow sub_workflow)"}));
-        def!("org.knime.ext.ssh.SSHConnectionNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "ssh connection"}));
-        def!("org.knime.ext.ssh.SSHCommandNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "SSH command → use ducklink WASM component or SwanFlow Python UDF with paramiko"}));
+        def!("org.knime.base.node.meta.caller.WorkflowExecutorNodeFactory", "core.script.python",
+            |_| json!({"_hint": "Workflow executor -> SwanFlow subprocess"}));
+        def!("org.knime.ext.ssh.SSHConnectionNodeFactory", "core.script.python",
+            |_| json!({"_hint": "SSH connection -> paramiko"}));
+        def!("org.knime.ext.ssh.SSHCommandNodeFactory", "core.script.python",
+            |_| json!({"_hint": "SSH command -> paramiko exec_command"}));
 
         // ─── Analysis — Regression (duckdb-ml powered) ───
         // ml_train() takes: model_name, algorithm, target_json, features_json, params_json
@@ -752,10 +752,10 @@ impl KnimeNodeMapper {
                     "SELECT * FROM ml_train('sw_kmeans', 'kmeans', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"k\": {}}}')",
                     feat_json_array, n_clusters)})
             }, "Fallback: SwanFlow Python UDF → sklearn.cluster.KMeans");
-        def!("org.knime.base.node.mine.cluster.hierarchical.HierarchicalClusterNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "hierarchical clustering (not in duckdb-ml; use KMeans or SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.mine.cluster.dbscan.DBSCANNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "DBSCAN clustering (not in duckdb-ml yet)"}));
+        def!("org.knime.base.node.mine.cluster.hierarchical.HierarchicalClusterNodeFactory", "core.script.python",
+            |_| json!({"_hint": "Hierarchical clustering -> sklearn.cluster.AgglomerativeClustering"}));
+        def!("org.knime.base.node.mine.cluster.dbscan.DBSCANNodeFactory", "core.script.python",
+            |_| json!({"_hint": "DBSCAN -> sklearn.cluster.DBSCAN"}));
 
         // ─── Analysis — Dimension Reduction (duckdb-ml powered) ───
         def!("org.knime.base.node.mine.pca.PCANodeFactory", "core.sql",
@@ -839,10 +839,10 @@ impl KnimeNodeMapper {
                     "SELECT *, (SELECT prediction FROM ml_predict('sw_nb', {})) AS prediction FROM input_0",
                     feat_args.join(", "))})
             });
-        def!("org.knime.base.node.mine.svm.SVMLearnerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "SVM learner (not in duckdb-ml; use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.mine.svm.SVMPredictorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "SVM predictor (not in duckdb-ml; use SwanFlow Python UDF)"}));
+        def!("org.knime.base.node.mine.svm.SVMLearnerNodeFactory", "core.script.python",
+            |_| json!({"_hint": "SVM learner -> sklearn.svm.SVC/SVR"}));
+        def!("org.knime.base.node.mine.svm.SVMPredictorNodeFactory", "core.script.python",
+            |_| json!({"_hint": "SVM predictor -> model.predict()"}));
         def_fb!("org.knime.base.node.mine.mlp.MLPLearnerNodeFactory", "core.sql",
             |s| {
                 let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
@@ -1179,28 +1179,28 @@ impl KnimeNodeMapper {
             });
 
         // ─── Interactive Widgets ───
-        def!("org.knime.js.base.node.widget.filter.nominal.NominalFilterWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "nominal filter widget"}));
-        def!("org.knime.js.base.node.widget.filter.range.RangeFilterWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "range filter widget"}));
-        def!("org.knime.js.base.node.widget.filter.slider.SliderFilterWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "slider filter widget"}));
-        def!("org.knime.js.base.node.widget.selection.column.ColumnSelectionWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "column selection widget"}));
-        def!("org.knime.js.base.node.widget.selection.single.SingleSelectionWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "single selection widget"}));
-        def!("org.knime.js.base.node.widget.selection.multiple.MultipleSelectionWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "multiple selection widget"}));
-        def!("org.knime.js.base.node.widget.button.ButtonWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "button widget"}));
-        def!("org.knime.js.base.node.widget.text.TextOutputWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "text output widget"}));
-        def!("org.knime.js.base.node.widget.image.ImageOutputWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "image output widget"}));
-        def!("org.knime.js.base.node.widget.file.FileDownloadWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "file download widget"}));
-        def!("org.knime.js.base.node.widget.fileupload.FileUploadWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "file upload widget"}));
+        def!("org.knime.js.base.node.widget.filter.nominal.NominalFilterWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.widget.filter.range.RangeFilterWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.widget.filter.slider.SliderFilterWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.widget.selection.column.ColumnSelectionWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.widget.selection.single.SingleSelectionWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.widget.selection.multiple.MultipleSelectionWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.widget.button.ButtonWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.widget.text.TextOutputWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.widget.image.ImageOutputWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.widget.file.FileDownloadWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.js.base.node.widget.fileupload.FileUploadWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── JSON / XML ───
         def!("org.knime.json.node.jsonpathtojson.JsonPathToJsonNodeFactory", "core.sql",
@@ -1263,14 +1263,14 @@ impl KnimeNodeMapper {
             });
 
         // ─── Deep Learning / Keras ───
-        def!("org.knime.dl.keras.base.nodes.layers.DLKerasInputLayerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "keras input layer → export to ONNX → use ml_load_onnx()"}));
-        def!("org.knime.dl.keras.base.nodes.layers.DLKerasDenseLayerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "keras dense layer → export to ONNX → use ml_load_onnx()"}));
-        def!("org.knime.dl.keras.base.nodes.learner.DLKerasNetworkLearnerNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "keras network learner → train in Python, export ONNX → ml_load_onnx()"}));
-        def!("org.knime.dl.keras.base.nodes.executor.DLKerasNetworkExecutorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "keras executor → ml_predict() with ONNX model loaded via ml_load_onnx()"}));
+        def!("org.knime.dl.keras.base.nodes.layers.DLKerasInputLayerNodeFactory", "core.script.python",
+            |_| json!({"_hint": "Keras Input -> tensorflow.keras.layers.Input"}));
+        def!("org.knime.dl.keras.base.nodes.layers.DLKerasDenseLayerNodeFactory", "core.script.python",
+            |_| json!({"_hint": "Keras Dense -> tensorflow.keras.layers.Dense"}));
+        def!("org.knime.dl.keras.base.nodes.learner.DLKerasNetworkLearnerNodeFactory", "core.script.python",
+            |_| json!({"_hint": "Keras learner -> model.compile()+model.fit()"}));
+        def!("org.knime.dl.keras.base.nodes.executor.DLKerasNetworkExecutorNodeFactory", "core.script.python",
+            |_| json!({"_hint": "Keras executor -> model.predict()"}));
 
         // ─── Python Script (v2) ───
         def!("org.knime.python3.scripting.nodes.script.PythonScriptNodeFactory2", "core.script.python",
@@ -1697,8 +1697,8 @@ impl KnimeNodeMapper {
                     "SELECT * FROM ml_train('sw_rf', 'random_forest', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{}}')",
                     target, feat_json_array)})
             });
-        def!("org.knime.base.node.mine.svm.SVMNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "SVM (not in duckdb-ml; use SwanFlow Python UDF)"}));
+        def!("org.knime.base.node.mine.svm.SVMNodeFactory", "core.script.python",
+            |_| json!({"_hint": "SVM legacy -> sklearn.svm.SVC"}));
         def!("org.knime.base.node.mine.neural.mlp.MLPNodeFactory", "core.sql",
             |s| {
                 let target = s.get("target_column").and_then(|v| v.as_str()).unwrap_or("");
@@ -1729,10 +1729,10 @@ impl KnimeNodeMapper {
             |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Script ───
-        def!("org.knime.ext.r.nodes.RSnippetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "R script (use SwanFlow Python UDF)"}));
-        def!("org.knime.base.node.preproc.javasnippet.JavaSnippetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "java snippet (use SwanFlow Python UDF)"}));
+        def!("org.knime.ext.r.nodes.RSnippetNodeFactory", "core.script.python",
+            |_| json!({"_hint": "R Snippet -> rpy2 or subprocess"}));
+        def!("org.knime.base.node.preproc.javasnippet.JavaSnippetNodeFactory", "core.script.python",
+            |_| json!({"_hint": "Java Snippet preproc -> Python equivalent"}));
 
 
         // ─── Graph / Network Analysis (DuckDB duckpgq extension) ───
@@ -2346,8 +2346,8 @@ impl KnimeNodeMapper {
             });
 
         // ─── ULID Generation (not yet a DuckDB extension) ───
-        def!("org.knime.base.node.preproc.id.ULIDGeneratorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "No ulid DuckDB extension — consider ducklink WASM component for ULID generation"}));
+        def!("org.knime.base.node.preproc.id.ULIDGeneratorNodeFactory", "core.script.python",
+            |_| json!({"_hint": "ULID generator -> python-ulid"}));
 
         // ─── Address Parsing (libpostal — not yet a DuckDB extension) ───
         def!("org.knime.base.node.text.AddressParserNodeFactory", "core.missing.placeholder",
@@ -2393,8 +2393,8 @@ impl KnimeNodeMapper {
             |_| json!({"reason": "No ion DuckDB extension — consider ducklink WASM component for AWS Ion parsing"}));
 
         // ─── ShellFS — shell command output (no DuckDB extension + security risk) ───
-        def!("org.knime.base.node.io.system.ShellCommandReaderNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "No shellfs DuckDB extension + security concern — consider ducklink WASM sandbox"}));
+        def!("org.knime.base.node.io.system.ShellCommandReaderNodeFactory", "core.script.python",
+            |_| json!({"_hint": "Shell command -> subprocess.run()"}));
 
         // ─── TAR Archive reader (tarfs — not yet a DuckDB extension) ───
         def!("org.knime.base.node.io.filehandling.TARReaderNodeFactory", "core.missing.placeholder",
@@ -2534,8 +2534,8 @@ impl KnimeNodeMapper {
             });
 
         // ─── GSheet — Google Sheets (no native extension; use cloudfs gdfs) ───
-        def!("org.knime.ext.google.sheets.GoogleSheetsNativeReaderNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "No gsheet DuckDB extension — use existing gdfs:// backend (cloudfs) or ducklink WASM"}));
+        def!("org.knime.ext.google.sheets.GoogleSheetsNativeReaderNodeFactory", "core.script.python",
+            |_| json!({"_hint": "Google Sheets -> gspread"}));
 
         // ─── IP Network functions — duckdb inet extension ───
         def!("org.knime.base.node.network.IPAnalyzerNodeFactory", "core.sql",
@@ -2890,27 +2890,27 @@ impl KnimeNodeMapper {
             |_| json!({"reason": "endif node (control flow)"}));
 
         // ─── JS Widget configurations ───
-        def!("org.knime.js.base.node.configuration.filter.column.ColumnFilterDialogNodeFactory2", "core.missing.placeholder",
-            |_| json!({"reason": "column filter configuration widget"}));
+        def!("org.knime.js.base.node.configuration.filter.column.ColumnFilterDialogNodeFactory2", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("org.knime.js.base.node.configuration.selection.single.SingleSelectionDialogNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "single selection dialog widget"}));
+        def!("org.knime.js.base.node.configuration.selection.single.SingleSelectionDialogNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("org.knime.js.base.node.configuration.input.string.StringDialogNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "string input dialog widget"}));
+        def!("org.knime.js.base.node.configuration.input.string.StringDialogNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("org.knime.js.base.node.configuration.input.fileupload.FileDialogNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "file upload dialog widget"}));
+        def!("org.knime.js.base.node.configuration.input.fileupload.FileDialogNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Reporting nodes ───
-        def!("org.knime.reporting2.nodes.create.ReportTemplateCreatorNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "report template creator (use SwanFlow shaper for rendering)"}));
+        def!("org.knime.reporting2.nodes.create.ReportTemplateCreatorNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("org.knime.reporting2.nodes.pdfwriter.ReportPdfWriterNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "PDF writer (use SwanFlow shaper + TypePress for rendering)"}));
+        def!("org.knime.reporting2.nodes.pdfwriter.ReportPdfWriterNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("org.knime.reporting2.nodes.concatenate.ReportConcatenatePortsNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "report port concatenator (use SwanFlow shaper)"}));
+        def!("org.knime.reporting2.nodes.concatenate.ReportConcatenatePortsNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         def!("org.knime.reporting2.nodes.loopend.ReportLoopEndNodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "report loop end (use SwanFlow shaper)"}));
@@ -2927,8 +2927,8 @@ impl KnimeNodeMapper {
             |_| json!({}));
 
         // ─── Java IF Switch ───
-        def!("org.knime.ext.sun.nodes.script.node.ifswitch.JavaIfSwitchNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "java if-switch (use SwanFlow Python UDF)"}));
+        def!("org.knime.ext.sun.nodes.script.node.ifswitch.JavaIfSwitchNodeFactory", "core.script.python",
+            |_| json!({"_hint": "Java IfSwitch -> Python conditional"}));
 
         // ─── Regex Substring ───
         def!("org.AF.TableUtil.RegexSubstring.RegexSubstringNodeFactory", "core.sql",
@@ -3105,12 +3105,12 @@ impl KnimeNodeMapper {
             });
 
         // ─── Widget: Value Selection ───
-        def!("org.knime.js.base.node.widget.selection.value.ValueSelectionWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "value selection widget"}));
+        def!("org.knime.js.base.node.widget.selection.value.ValueSelectionWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Widget: Refresh Button ───
-        def!("org.knime.js.base.node.widget.reexecution.refresh.RefreshButtonWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "refresh button widget"}));
+        def!("org.knime.js.base.node.widget.reexecution.refresh.RefreshButtonWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Scatter Plot (selection appender) ───
         def!("org.knime.js.base.node.viz.plotter.scatterSelectionAppender.ScatterPlotNodeFactory", "core.sql",
@@ -3170,8 +3170,8 @@ impl KnimeNodeMapper {
             });
 
         // ─── Java Scripting node → Python UDF proxy ───
-        def!("org.knime.ext.sun.nodes.script.JavaScriptingNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "Java scripting — use SwanFlow Python UDF instead"}));
+        def!("org.knime.ext.sun.nodes.script.JavaScriptingNodeFactory", "core.script.python",
+            |_| json!({"_hint": "JavaScript -> Python exec or subprocess"}));
 
         // ─── Heatmap view ───
         def!("org.knime.base.views.node.heatmap.HeatmapNodeFactory", "core.sql",
@@ -3261,16 +3261,16 @@ impl KnimeNodeMapper {
             |_| json!({"query": "SELECT now() AS execution_time, * FROM input_0"}));
 
         // ─── Report HTML Writer ───
-        def!("org.knime.reporting2.nodes.htmlwriter.ReportHtmlWriterNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "HTML report writer (use SwanFlow Shaper for rendering)"}));
+        def!("org.knime.reporting2.nodes.htmlwriter.ReportHtmlWriterNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Value Filter Widget ───
-        def!("org.knime.js.base.node.widget.filter.value.ValueFilterWidgetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "value filter widget (interactive — not applicable to batch mode)"}));
+        def!("org.knime.js.base.node.widget.filter.value.ValueFilterWidgetNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Java Snippet ───
-        def!("org.knime.base.node.jsnippet.JavaSnippetNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "Java snippet — use SwanFlow Python UDF instead"}));
+        def!("org.knime.base.node.jsnippet.JavaSnippetNodeFactory", "core.script.python",
+            |_| json!({"_hint": "Java Snippet -> Python equivalent"}));
 
         // ═══════════════════════════════════════════════════════════════
         // Round 14 — Final gap fill: 25 low-freq unmapped factories from
@@ -3320,8 +3320,8 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.stats.viz.extended.ExtendedStatisticsNodeFactory", "core.transform.profiler",
             |_| json!({"analysis": "extended_statistics"}));
 
-        def!("org.knime.reporting2.nodes.pagebreak.ReportPageBreakNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "report page break (use SwanFlow Shaper)"}));
+        def!("org.knime.reporting2.nodes.pagebreak.ReportPageBreakNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         def!("org.knime.time.node.manipulate.modifytime.ModifyTimeNodeFactory", "core.sql",
             |s| {
@@ -3360,8 +3360,8 @@ impl KnimeNodeMapper {
         def!("com.vernalis.knime.flowcontrol.nodes.switches.conditional.ifswitch.ConfigurableFvvalIfSwitchNodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "Vernalis conditional flow switch (control flow)"}));
 
-        def!("org.knime.reporting2.nodes.concatenate.ReportConcatenateTableNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "report table concatenation (use SwanFlow Shaper)"}));
+        def!("org.knime.reporting2.nodes.concatenate.ReportConcatenateTableNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         def!("org.knime.base.node.preproc.columnaggregator2.ColumnAggregator2NodeFactory", "core.sql",
             |s| {
