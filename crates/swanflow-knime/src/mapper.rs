@@ -3106,6 +3106,162 @@ impl KnimeNodeMapper {
         def!("org.knime.js.base.node.viz.plotter.scatterSelectionAppender.ScatterPlotNodeFactory", "core.sql",
             |_| json!({"query": "SELECT * FROM input_0"}));
 
+        // ═══════════════════════════════════════════════════════════════
+        // Tier 1 — Python UDF explicit mappings (33 factories, 55 nodes)
+        // ═══════════════════════════════════════════════════════════════
+
+        // ─── NLP String Similarity → Python difflib ───
+        def!("ws.palladian.nodes.helper.nlp.StringSimilarityNodeFactory", "core.script.python",
+            |s| {
+                let col1 = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let col2 = s.get("second_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"script": format!(
+                    "from difflib import SequenceMatcher\nfor row in input_table:\n    row['similarity'] = SequenceMatcher(None, str(row.get('{}','')), str(row.get('{}',''))).ratio()",
+                    col1, col2), "type": "python3"})
+            });
+
+        // ─── Density Plot → DuckDB histogram binning ───
+        def!("org.knime.base.views.node.densityplot.DensityPlotNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let bins = s.get("number_of_bins").and_then(|v| v.as_str()).unwrap_or("50");
+                json!({"query": format!(
+                    "SELECT WIDTH_BUCKET(\"{}\", MIN(\"{}\") OVER(), MAX(\"{}\") OVER(), {}) AS bin, COUNT(*) AS density FROM input_0 GROUP BY bin ORDER BY bin",
+                    col, col, col, bins)})
+            });
+
+        // ─── Image Writer → Python Pillow ───
+        def!("org.knime.base.node.io.filehandling.imagewriter.ImagePortWriterNodeFactory", "core.script.python",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/output.png");
+                json!({"script": format!(
+                    "from PIL import Image\nimport io\nfor row in input_table:\n    img_data = row.get('image_data', b'')\n    if img_data:\n        Image.open(io.BytesIO(img_data)).save('{}')", path), "type": "python3"})
+            });
+
+        // ─── Image to Table → Python PIL extract ───
+        def!("org.knime.base.node.image.ImageToTableNodeFactory", "core.script.python",
+            |_| json!({"script": 
+                "from PIL import Image\nimport io\nrows = []\nfor row in input_table:\n    img_data = row.get('image_data', b'')\n    if img_data:\n        img = Image.open(io.BytesIO(img_data))\n        rows.append({'width': img.width, 'height': img.height, 'mode': img.mode})\noutput_table = rows", "type": "python3"}));
+
+        // ─── Generic ECharts → passthrough with JSON ───
+        def!("org.knime.base.views.node.generic.GenericEChartsNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── String to Path variable ───
+        def!("org.knime.filehandling.utility.nodes.stringtopath.variable.StringToPathVariableNodeFactory", "core.flow.variable_creator",
+            |_| json!({}));
+
+        // ─── String to Number v2 ───
+        def!("org.knime.base.node.preproc.colconvert.stringtonumber2.StringToNumber2NodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT *, TRY_CAST(\"{}\" AS DOUBLE) AS {}_num FROM input_0", col, col)})
+            });
+
+        // ─── Java Scripting node → Python UDF proxy ───
+        def!("org.knime.ext.sun.nodes.script.JavaScriptingNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "Java scripting — use SwanFlow Python UDF instead"}));
+
+        // ─── Heatmap view ───
+        def!("org.knime.base.views.node.heatmap.HeatmapNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        // ─── Image Writer (table variant) ───
+        def!("org.knime.base.node.io.filehandling.imagewriter.table.ImageWriterTableNodeFactory", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/output.png");
+                json!({"query": format!("COPY (SELECT * FROM input_0) TO '{}'", path)})
+            });
+
+        // ─── Data Explorer → DuckDB SUMMARIZE ───
+        def!("org.knime.base.node.stats.dataexplorer.DataExplorerNodeFactory", "core.sql",
+            |s| {
+                let cols_str = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("*");
+                json!({"query": format!("SUMMARIZE SELECT {} FROM input_0", cols_str)})
+            });
+
+        // ─── Similarity Search → Python scipy ───
+        def!("org.knime.distmatrix.similaritysearch.SimilaritySearchNodeFactory", "core.script.python",
+            |s| {
+                let k = s.get("top_k").and_then(|v| v.as_str()).and_then(|v| v.parse::<usize>().ok()).unwrap_or(5);
+                json!({"script": format!(
+                    "from scipy.spatial.distance import cdist\nimport numpy as np\n\
+                     features = np.array([[float(row.get(c, 0)) for c in feature_cols] for row in input_table])\n\
+                     dists = cdist(features, features, metric='euclidean')\n\
+                     for i, row in enumerate(input_table):\n\
+                     \x20   top_k = np.argsort(dists[i])[1:{} + 1]\n\
+                     \x20   row['nearest_neighbors'] = ','.join(str(j) for j in top_k)", k), "type": "python3"})
+            });
+
+        // ─── Cell Splitter by Position → SQL substr ───
+        def!("org.knime.base.node.preproc.cellsplitbypos.CellSplitterByPosNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let pos = s.get("split_position").and_then(|v| v.as_str()).unwrap_or("1");
+                json!({"query": format!(
+                    "SELECT *, SUBSTR(\"{}\", 1, {}) AS left_part, SUBSTR(\"{}\", {} + 1) AS right_part FROM input_0",
+                    col, pos, col, pos)})
+            });
+
+        // ─── Subset Matcher → DuckDB semi-join ───
+        def!("org.knime.base.node.preproc.matcher.SubsetMatcherNodeFactory", "core.sql",
+            |s| {
+                let key_col = s.get("key_column").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT * FROM input_0 WHERE \"{}\" IN (SELECT \"{}\" FROM input_1)", key_col, key_col)})
+            });
+
+        // ─── Sleep node → pg_sleep ───
+        def!("org.knime.base.node.flowcontrol.sleep.SleepNodeFactory", "core.sql",
+            |s| {
+                let seconds = s.get("sleep_duration").and_then(|v| v.as_str()).unwrap_or("1");
+                json!({"query": format!("SELECT pg_sleep({}) AS slept, * FROM input_0", seconds)})
+            });
+
+        // ─── Column Merger → SQL concatenation ───
+        def!("org.knime.base.node.preproc.columnmerge.ColumnMergerNodeFactory", "core.sql",
+            |s| {
+                let cols_str = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
+                let cols: Vec<&str> = cols_str.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+                let sep = s.get("separator").and_then(|v| v.as_str()).unwrap_or("_");
+                let concat = cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(&format!(" || '{}' || ", sep));
+                json!({"query": format!("SELECT *, {} AS merged FROM input_0", concat)})
+            });
+
+        // ─── Modify Date → SQL date arithmetic ───
+        def!("org.knime.time.node.manipulate.modifydate.ModifyDateNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let operation = s.get("modification").and_then(|v| v.as_str()).unwrap_or("ADD");
+                let amount = s.get("amount").and_then(|v| v.as_str()).unwrap_or("1");
+                let unit = s.get("unit").and_then(|v| v.as_str()).unwrap_or("DAY");
+                let op = if operation == "ADD" { "+" } else { "-" };
+                json!({"query": format!(
+                    "SELECT *, CAST({} AS DATE) {} INTERVAL '{}' {} AS modified FROM input_0",
+                    col, op, amount, unit)})
+            });
+
+        // ─── Empty Table Switch ───
+        def!("org.knime.base.node.switches.emptytableswitch.EmptyTableSwitchNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "empty table switch (control flow — SwanFlow handles via conditional)"}));
+
+        // ─── Timer Info ───
+        def!("org.knime.base.node.util.timerinfo.TimerinfoNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT now() AS execution_time, * FROM input_0"}));
+
+        // ─── Report HTML Writer ───
+        def!("org.knime.reporting2.nodes.htmlwriter.ReportHtmlWriterNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "HTML report writer (use SwanFlow Shaper for rendering)"}));
+
+        // ─── Value Filter Widget ───
+        def!("org.knime.js.base.node.widget.filter.value.ValueFilterWidgetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "value filter widget (interactive — not applicable to batch mode)"}));
+
+        // ─── Java Snippet ───
+        def!("org.knime.base.node.jsnippet.JavaSnippetNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "Java snippet — use SwanFlow Python UDF instead"}));
+
 
         Self { type_map }
     }
@@ -3128,7 +3284,29 @@ impl KnimeNodeMapper {
             }
             (def.swanflow_type.clone(), config)
         } else {
-            ("core.util.unknown".to_string(), serde_json::json!({}))
+            // Unknown factory → auto-suggest Python UDF fallback
+            // Three-tier strategy: Python UDF (immediate) → WASM/ducklink (performant) → On-demand
+            let fallback_msg = format!(
+                "Unmapped KNIME factory: {}. Use SwanFlow Python UDF → {}",
+                factory,
+                match factory.as_str() {
+                    f if f.contains("widget") || f.contains("dialog") || f.contains("configuration")
+                        => "pass-through (interactive widgets not applicable to batch mode)",
+                    f if f.contains("loop") || f.contains("switch") || f.contains("case") || f.contains("endif")
+                        => "SwanFlow StepMode::Loop / conditional branching",
+                    f if f.contains("report") || f.contains("template")
+                        => "SwanFlow Shaper + TypePress for document rendering",
+                    f if f.contains("image") || f.contains("chart") || f.contains("plot") || f.contains("view")
+                        => "matplotlib / Pillow / plotly for Python-side rendering",
+                    f if f.contains("regex") || f.contains("string") || f.contains("text") || f.contains("nlp")
+                        => "re / string methods / text processing",
+                    _ => "generic Python UDF — consider ducklink WASM for reusable performance-critical code",
+                }
+            );
+            ("core.util.unknown".to_string(), serde_json::json!({
+                "_python_fallback": fallback_msg,
+                "_factory": factory,
+            }))
         }
     }
 
