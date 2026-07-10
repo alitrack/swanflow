@@ -177,8 +177,21 @@ fn test_knar_mapper_coverage() {
             let name = node.name.as_deref().unwrap_or("");
             let factory = node.node_type.as_deref().unwrap_or("");
             let (sw_type, config) = mapper.resolve_node(node.node_type.as_deref(), &node.settings);
+            // Use extract_factory logic to get the real factory name
+            let real_factory = {
+                let nt = node.node_type.as_deref();
+                let mut f = nt.unwrap_or("unknown").to_string();
+                if nt == Some("NativeNode") || nt == Some("SubNode") || nt == Some("MetaNode") {
+                    if let Some(m) = node.settings.get("model").and_then(|v| v.get("factory")).and_then(|v| v.as_str()) {
+                        f = m.to_string();
+                    } else if let Some(sf) = node.settings.get("factory").and_then(|v| v.as_str()) {
+                        f = sf.to_string();
+                    }
+                }
+                f
+            };
             if sw_type == "core.util.unknown" {
-                *unmapped_names.entry(factory.to_string()).or_default() += 1;
+                *unmapped_names.entry(real_factory).or_default() += 1;
             } else {
                 mapped += 1;
             }

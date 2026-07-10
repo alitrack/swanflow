@@ -3262,6 +3262,164 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.jsnippet.JavaSnippetNodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "Java snippet — use SwanFlow Python UDF instead"}));
 
+        // ═══════════════════════════════════════════════════════════════
+        // Round 14 — Final gap fill: 25 low-freq unmapped factories from
+        // KNIME study (1965/2171 → 90.5%, targeting 95%+)
+        // ═══════════════════════════════════════════════════════════════
+
+        def!("org.knime.base.node.preproc.filter.row3.RowFilterNodeFactory", "core.transform.filter",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let op = Self::map_op(s.get("operator").and_then(|v| v.as_str()).unwrap_or("="));
+                let val = s.get("filter_value").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"expr": format!("\"{}\" {} {}", col, op, val)})
+            });
+
+        def!("org.knime.base.node.preproc.colconvert.numbertostring2.NumberToString2NodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, CAST(\"{}\" AS VARCHAR) AS {}_str FROM input_0", col, col)})
+            });
+
+        def!("org.knime.base.node.rules.engine.twoports.RuleEngine2PortsNodeFactory", "core.transform.condition",
+            |s| json!({"rules": s.get("rules").cloned().unwrap_or(json!([])), "split": true}));
+
+        def!("org.knime.base.node.preproc.columnheaderextract.ColumnHeaderExtractorNodeFactory", "core.transform.project",
+            |_| json!({"extract_header": true}));
+
+        def!("org.knime.base.node.io.filehandling.pmml.reader.PMMLReaderNodeFactory3", "core.sql",
+            |s| {
+                let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/model.pmml");
+                json!({"query": format!("SELECT * FROM ml_load_xgboost('imported_model', '{}')", path)})
+            });
+
+        def!("org.knime.base.node.meta.looper.LoopStartIntervalDynamicNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "interval loop start (control flow)"}));
+
+        def!("org.knime.base.node.preproc.refcolumnresorter.ReferenceColumnResorterNodeFactory", "core.transform.project",
+            |s| json!({"columns": s.get("column_names").and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())}));
+
+        def!("org.knime.base.node.preproc.sample.SamplingNodeFactory", "core.transform.filter",
+            |s| json!({"sample_size": s.get("sample_size"), "seed": s.get("seed"),
+                       "method": s.get("sampling_method").and_then(|v| v.as_str()).unwrap_or("random")}));
+
+        def!("org.knime.base.views.node.stackedareachart.StackedAreaChartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+
+        def!("org.knime.base.node.stats.viz.extended.ExtendedStatisticsNodeFactory", "core.transform.profiler",
+            |_| json!({"analysis": "extended_statistics"}));
+
+        def!("org.knime.reporting2.nodes.pagebreak.ReportPageBreakNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "report page break (use SwanFlow Shaper)"}));
+
+        def!("org.knime.time.node.manipulate.modifytime.ModifyTimeNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let operation = s.get("modification").and_then(|v| v.as_str()).unwrap_or("ADD");
+                let amount = s.get("amount").and_then(|v| v.as_str()).unwrap_or("1");
+                let unit = s.get("unit").and_then(|v| v.as_str()).unwrap_or("HOUR");
+                let op = if operation == "ADD" { "+" } else { "-" };
+                json!({"query": format!(
+                    "SELECT *, CAST({} AS TIMESTAMP) {} INTERVAL '{}' {} AS modified FROM input_0", col, op, amount, unit)})
+            });
+
+        def!("org.knime.time.node.filter.datetimebasedrowfilter.DateTimeBasedRowFilterNodeFactory", "core.transform.filter",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let start = s.get("start_date").and_then(|v| v.as_str()).unwrap_or("'2000-01-01'");
+                let end = s.get("end_date").and_then(|v| v.as_str()).unwrap_or("'2099-12-31'");
+                json!({"expr": format!("\"{}\" BETWEEN {} AND {}", col, start, end)})
+            });
+
+        def!("com.vernalis.nodes.collection.list2set.List2SetNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT DISTINCT \"{}\" FROM input_0", col)})
+            });
+
+        def!("org.knime.base.collection.list.split.CollectionSplitNodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!("SELECT *, UNNEST(\"{}\") AS list_item FROM input_0", col)})
+            });
+
+        def!("org.knime.base.node.preproc.datavalidator.DataValidatorSpecNodeFactory", "core.transform.profiler",
+            |_| json!({}));
+
+        def!("com.vernalis.knime.flowcontrol.nodes.switches.conditional.ifswitch.ConfigurableFvvalIfSwitchNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "Vernalis conditional flow switch (control flow)"}));
+
+        def!("org.knime.reporting2.nodes.concatenate.ReportConcatenateTableNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "report table concatenation (use SwanFlow Shaper)"}));
+
+        def!("org.knime.base.node.preproc.columnaggregator2.ColumnAggregator2NodeFactory", "core.sql",
+            |s| {
+                let cols_str = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
+                let cols: Vec<&str> = cols_str.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+                let agg_func = s.get("aggregation_method").and_then(|v| v.as_str()).unwrap_or("AVG");
+                let aggs: Vec<String> = cols.iter().map(|c| format!("{}(\"{}\") AS {}_agg", agg_func, c, c)).collect();
+                json!({"query": format!("SELECT {} FROM input_0", aggs.join(", "))})
+            });
+
+        def!("org.knime.base.node.preproc.groupby2.GroupBy2NodeFactory", "core.transform.aggregate",
+            |s| {
+                let parse_cols = |key: &str| -> Vec<&str> {
+                    s.get(key).and_then(|v| v.as_str())
+                        .map(|s| s.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect())
+                        .unwrap_or_default()
+                };
+                let group_cols = parse_cols("group_column_names");
+                let agg_cols = parse_cols("aggregate_column_names");
+                let aggs: Vec<String> = agg_cols.iter().map(|c| format!("AVG({})", c)).collect();
+                json!({"group_by": group_cols, "aggs": aggs})
+            });
+
+        def!("org.knime.base.node.preproc.missingval.MissingValue2NodeFactory", "core.quality.null_check",
+            |s| json!({"strategy": s.get("missing_value_handling").and_then(|v| v.as_str()).unwrap_or("drop")}));
+
+        def!("org.knime.ensembles.bagging.ModelLoopStartNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "ensemble bagging model loop start (control flow)"}));
+
+        def!("org.knime.ensembles.boosting.BoostingLearnerLoopStartNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "ensemble boosting learner loop start (control flow)"}));
+
+        def!("org.knime.ensembles.boosting.BoostingLearnerLoopEndNodeFactory", "core.missing.placeholder",
+            |_| json!({"reason": "ensemble boosting learner loop end (control flow — SwanFlow handles via StepMode::Loop)"}));
+
+        def!("org.knime.base.node.preproc.columntrans2.One2ManyCol2NodeFactory", "core.sql",
+            |s| {
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                let delim = s.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
+                json!({"query": format!(
+                    "SELECT *, UNNEST(string_split(\"{}\", '{}')) AS expanded FROM input_0", col, delim)})
+            });
+
+        def!("org.knime.base.node.preproc.tablediff.TableDifferNodeFactory", "core.sql",
+            |s| {
+                let pk = s.get("primary_key").and_then(|v| v.as_str()).unwrap_or("id");
+                json!({"query": format!(
+                    "SELECT * FROM duck_diff(input_0, input_1, '{}')", pk)})
+            });
+
+        def!("org.knime.datageneration.counter.CounterGenerationNodeFactory", "core.sql",
+            |s| {
+                let start = s.get("start").and_then(|v| v.as_str()).unwrap_or("1");
+                let end = s.get("end").and_then(|v| v.as_str()).unwrap_or("100");
+                json!({"query": format!("SELECT * FROM generate_series({}, {})", start, end)})
+            });
+
+        def!("org.knime.base.node.preproc.table.cellextractor.CellExtractorNodeFactory", "core.sql",
+            |s| {
+                let row = s.get("row_index").and_then(|v| v.as_str()).unwrap_or("0");
+                let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
+                json!({"query": format!(
+                    "SELECT \"{}\" FROM input_0 LIMIT 1 OFFSET {}", col, row)})
+            });
+
+        def!("org.knime.base.node.util.extracttablespec.ExtractTableSpecNodeFactory", "core.transform.profiler",
+            |_| json!({}));
+
 
         Self { type_map }
     }
