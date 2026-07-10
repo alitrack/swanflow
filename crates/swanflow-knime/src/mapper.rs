@@ -2391,9 +2391,9 @@ impl KnimeNodeMapper {
                     "SELECT * FROM rawduck_ingest('{}')", path)})
             });
 
-        // ─── Chinese SQL (chsql — not yet a DuckDB extension) ───
-        def!("org.knime.base.node.query.ChineseSQLNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "No chsql DuckDB extension — consider ducklink WASM component for Chinese SQL dialect"}));
+        // ─── Chinese SQL query node → core.sql passthrough (chsql ClickHouse extension exists in community registry but not downloadable for DuckDB 1.5.2)
+        def!("org.knime.base.node.query.ChineseSQLNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── AWS Ion format (not yet a DuckDB extension) ───
         def!("org.knime.base.node.io.filehandling.IonReaderNodeFactory", "core.missing.placeholder",
