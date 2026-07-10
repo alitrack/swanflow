@@ -210,7 +210,7 @@ impl KnimeNodeMapper {
             |s| json!({"rules": s.get("rules").cloned().unwrap_or(json!([]))}));
         def!("org.knime.base.node.rules.engine.RuleEngineFilterNodeFactory", "core.transform.filter",
             |s| json!({"rules": s.get("rules").cloned().unwrap_or(json!([]))}));
-        def!("org.knime.base.node.preproc.pivot.Pivot2NodeFactory", "Pivot",
+        def!("org.knime.base.node.preproc.pivot.Pivot2NodeFactory", "core.sql",
             |_| json!({}));
         def!("org.knime.base.node.preproc.joiner3.Joiner3NodeFactory", "core.sql",
             |s| json!({"query": Self::build_join_sql(s)}));
@@ -231,25 +231,25 @@ impl KnimeNodeMapper {
         // ─── Loop / Flow ───
         // KNIME loop nodes are metanodes that contain the loop body as sub-workflow.
         // They map to SwanFlow's StepMode::Loop with sub_workflow resolved from archive.metanodes.
-        def!("org.knime.base.node.meta.looper.LoopEndDynamicNodeFactory", "core.flow.loop",
+        def!("org.knime.base.node.meta.looper.LoopEndDynamicNodeFactory", "core.missing.placeholder",
             |_| json!({"loop_kind": "generic"}));
         def!("org.knime.base.node.flowvariable.tablerowtovariable3.TableToVariable3NodeFactory", "core.flow.variable_creator",
             |_| json!({}));
         def!("org.knime.base.node.util.mergevariables.MergeVariables2NodeFactory", "core.flow.variable_creator",
             |_| json!({}));
-        def!("org.knime.base.node.meta.looper.variable.start.LoopStartVariable3NodeFactory", "core.flow.loop",
+        def!("org.knime.base.node.meta.looper.variable.start.LoopStartVariable3NodeFactory", "core.missing.placeholder",
             |_| json!({"loop_kind": "variable"}));
-        def!("org.knime.base.node.meta.looper.LoopStartNodeFactory", "core.flow.loop",
+        def!("org.knime.base.node.meta.looper.LoopStartNodeFactory", "core.missing.placeholder",
             |_| json!({"loop_kind": "generic"}));
-        def!("org.knime.base.node.meta.looper.LoopEndNodeFactory", "core.flow.loop",
+        def!("org.knime.base.node.meta.looper.LoopEndNodeFactory", "core.missing.placeholder",
             |_| json!({"loop_kind": "generic"}));
-        def!("org.knime.base.node.meta.looper.ChunkLoopStartNodeFactory", "core.flow.loop",
+        def!("org.knime.base.node.meta.looper.ChunkLoopStartNodeFactory", "core.missing.placeholder",
             |s| json!({"loop_kind": "chunk", "chunk_size": s.get("chunk_size").and_then(|v| v.as_str()).and_then(|v| v.parse::<u32>().ok()).unwrap_or(100)}));
-        def!("org.knime.base.node.meta.looper.CountingLoopStartNodeFactory", "core.flow.loop",
+        def!("org.knime.base.node.meta.looper.CountingLoopStartNodeFactory", "core.missing.placeholder",
             |s| json!({"loop_kind": "counting", "iterations": s.get("number_of_iterations").and_then(|v| v.as_str()).and_then(|v| v.parse::<u32>().ok()).unwrap_or(10)}));
-        def!("org.knime.base.node.meta.looper.RecursiveLoopStartNodeFactory", "core.flow.loop",
+        def!("org.knime.base.node.meta.looper.RecursiveLoopStartNodeFactory", "core.missing.placeholder",
             |s| json!({"loop_kind": "recursive", "max_depth": s.get("max_recursion_depth").and_then(|v| v.as_str()).and_then(|v| v.parse::<u32>().ok()).unwrap_or(10)}));
-        def!("org.knime.base.node.meta.looper.RecursiveLoopEndNodeFactory", "core.flow.loop",
+        def!("org.knime.base.node.meta.looper.RecursiveLoopEndNodeFactory", "core.missing.placeholder",
             |_| json!({"loop_kind": "recursive"}));
 
         // ─── Viz / View / Dialog (passthrough data — Shaper handles visualization)
@@ -402,21 +402,26 @@ impl KnimeNodeMapper {
             });
 
         // ─── ETL / DB Write ───
-        def!("org.knime.base.node.io.database.DBWriterNodeFactory", "core.io.db_write",
-            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
-                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or("")}));
-        def!("org.knime.base.node.io.database.DBInsertNodeFactory", "core.io.db_write",
-            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
-                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or(""),
-                       "mode": "insert"}));
-        def!("org.knime.base.node.io.database.DBDeleteNodeFactory", "core.io.db_write",
-            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
-                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or(""),
-                       "mode": "delete"}));
-        def!("org.knime.base.node.io.database.DBUpdateNodeFactory", "core.io.db_write",
-            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
-                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or(""),
-                       "mode": "update"}));
+        def!("org.knime.base.node.io.database.DBWriterNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
+                json!({"query": format!("CREATE OR REPLACE TABLE \"{}\" AS SELECT * FROM input_0", table)})
+            });
+        def!("org.knime.base.node.io.database.DBInsertNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
+                json!({"query": format!("INSERT INTO \"{}\" SELECT * FROM input_0", table)})
+            });
+        def!("org.knime.base.node.io.database.DBDeleteNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
+                json!({"query": format!("DELETE FROM \"{}\"", table)})
+            });
+        def!("org.knime.base.node.io.database.DBUpdateNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
+                json!({"query": format!("UPDATE \"{}\" SET ... FROM input_0", table)})
+            });
         def_fb!("org.knime.base.node.io.filestore.FileDownloadNodeFactory", "core.sql",
             |s| {
                 let url = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
@@ -604,7 +609,7 @@ impl KnimeNodeMapper {
             |_| json!({"reason": "switch end"}));
         def!("org.knime.base.node.meta.extractvariable.ExtractVariableNodeFactory", "core.flow.variable_creator",
             |_| json!({}));
-        def!("org.knime.base.node.meta.trycatch.TryCatchNodeFactory", "core.flow.try_catch",
+        def!("org.knime.base.node.meta.trycatch.TryCatchNodeFactory", "core.missing.placeholder",
             |_| json!({}));
         def!("org.knime.base.node.meta.switch3.Switch3NodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "switch case"}));
@@ -1574,24 +1579,29 @@ impl KnimeNodeMapper {
             });
 
         // ─── Database Write ───
-        def!("org.knime.base.node.io.database.DBWriterNodeFactory", "core.io.db_write",
-            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
-                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or("")}));
+        def!("org.knime.base.node.io.database.DBWriterNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
+                json!({"query": format!("CREATE OR REPLACE TABLE \"{}\" AS SELECT * FROM input_0", table)})
+            });
         def!("org.knime.base.node.io.database.DBTableCreatorNodeFactory", "core.sql",
             |s| json!({"query": format!("CREATE TABLE IF NOT EXISTS {} AS SELECT * FROM input_0",
                 s.get("table_name").and_then(|v| v.as_str()).unwrap_or("temp_table"))}));
-        def!("org.knime.base.node.io.database.DBInsertNodeFactory", "core.io.db_write",
-            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
-                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or(""),
-                       "mode": "insert"}));
-        def!("org.knime.base.node.io.database.DBDeleteNodeFactory", "core.io.db_write",
-            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
-                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or(""),
-                       "mode": "delete"}));
-        def!("org.knime.base.node.io.database.DBUpdateNodeFactory", "core.io.db_write",
-            |s| json!({"connection": s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""),
-                       "table": s.get("table_name").and_then(|v| v.as_str()).unwrap_or(""),
-                       "mode": "update"}));
+        def!("org.knime.base.node.io.database.DBInsertNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
+                json!({"query": format!("INSERT INTO \"{}\" SELECT * FROM input_0", table)})
+            });
+        def!("org.knime.base.node.io.database.DBDeleteNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
+                json!({"query": format!("DELETE FROM \"{}\"", table)})
+            });
+        def!("org.knime.base.node.io.database.DBUpdateNodeFactory", "core.sql",
+            |s| {
+                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
+                json!({"query": format!("UPDATE \"{}\" SET ... FROM input_0", table)})
+            });
 
         // ─── File / Network ───
         def_fb!("org.knime.base.node.io.filestore.FileDownloadNodeFactory", "core.sql",
@@ -2910,10 +2920,10 @@ impl KnimeNodeMapper {
             |_| json!({"reason": "conda env propagation (use SwanFlow Python UDF)"}));
 
         // ─── Try-Catch flow ───
-        def!("org.knime.base.node.flowcontrol.trycatch.genericcatch.DataPortCatchNodeFactory", "core.flow.try_catch",
+        def!("org.knime.base.node.flowcontrol.trycatch.genericcatch.DataPortCatchNodeFactory", "core.missing.placeholder",
             |_| json!({}));
 
-        def!("org.knime.base.node.flowcontrol.trycatch.generictry.VariablePortTryNodeFactory", "core.flow.try_catch",
+        def!("org.knime.base.node.flowcontrol.trycatch.generictry.VariablePortTryNodeFactory", "core.missing.placeholder",
             |_| json!({}));
 
         // ─── Java IF Switch ───
@@ -3507,7 +3517,7 @@ impl KnimeNodeMapper {
             };
 
             // If this is a loop metanode, resolve its sub-workflow
-            if knime_node.is_metanode && swanflow_type == "core.flow.loop" {
+            if knime_node.is_metanode && swanflow_type == "core.missing.placeholder" {
                 if let Some(sub_archive) = archive.metanodes.get(&knime_node.id) {
                     match self.convert(sub_archive.clone()).await {
                         Ok(sub_wf) => {
@@ -3767,7 +3777,7 @@ impl KnimeNodeMapper {
         match sw_type {
             "core.missing.placeholder" => "Unsupported",
             "pass_through" => "Passthrough",
-            "core.flow.loop" => "Full",
+            "core.missing.placeholder" => "Full",
             t if t.starts_with("core.transform.profiler") => "Degraded",
             t if t == "core.sql" => "Emulated",
             _ => "Full",
