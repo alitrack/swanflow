@@ -142,12 +142,21 @@ impl ExecutionPlan for PythonExec {
     ) -> DFResult<SendableRecordBatchStream> {
         let input_stream = self.input.execute(partition, context)?;
 
-        // Compile the script with security restrictions
-        let compiled_fn = Python::attach(|py| -> Result<Py<PyAny>> {
-            let script = &self.script;
+        // Parse sandboxed flag from script prefix (format: "sandboxed:true/false\n...")
+        let (sandboxed, actual_script) = if let Some(rest) = self.script.strip_prefix("sandboxed:false\n") {
+            (false, rest.to_string())
+        } else if let Some(rest) = self.script.strip_prefix("sandboxed:true\n") {
+            (true, rest.to_string())
+        } else {
+            (true, self.script.clone()) // default: sandboxed
+        };
 
-            // Define restricted import function
-            let restricted_mod = PyModule::from_code(
+        // Compile the script with optional security restrictions
+        let compiled_fn = Python::attach(|py| -> Result<Py<PyAny>> {
+            let script = &actual_script;
+
+            let restricted_mod = if sandboxed {
+                PyModule::from_code(
                 py,
                 c_str!(
                     r#"
@@ -170,7 +179,16 @@ def make_restricted_import(original_import):
                 ),
                 c_str!("restricted_import.py"),
                 c_str!("restricted_import"),
-            )?;
+            )?
+            } else {
+                // Unrestricted mode: allow all imports (for KNIME bridge scripts using sklearn/tensorflow/paramiko)
+                PyModule::from_code(
+                    py,
+                    c_str!("def make_restricted_import(orig): return orig"),
+                    c_str!("passthrough_import.py"),
+                    c_str!("passthrough_import"),
+                )?
+            };
             let make_restricted_import_fn = restricted_mod.getattr("make_restricted_import")?;
 
             // Set up the globals with our restricted __import__
@@ -300,7 +318,8 @@ impl NodeBehavior for PythonNode {
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "script": { "type": "string", "description": "Python code logic. Variable 'batch' is available." }
+                    "script": { "type": "string", "description": "Python code logic. Variable 'batch' is available." },
+                    "sandboxed": { "type": "boolean", "description": "Enable security sandbox (default true). Set false for KNIME bridge scripts that need sklearn/tensorflow/paramiko.", "default": true }
                 },
                 "required": ["script"]
             }),
@@ -318,10 +337,11 @@ impl NodeBehavior for PythonNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let script = cfg::required_string(config, "script")?;
+        let sandboxed = config.get("sandboxed").and_then(|v| v.as_bool()).unwrap_or(true);
         Ok(vec![LogicalPlan::Extension(
             datafusion::logical_expr::Extension {
                 node: Arc::new(PythonLogical {
-                    script,
+                    script: format!("sandboxed:{}\n{}", sandboxed, script), // encode sandboxed flag in script prefix
                     input: inputs[0].clone(),
                 }),
             },
