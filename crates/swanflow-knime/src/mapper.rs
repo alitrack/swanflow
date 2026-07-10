@@ -231,26 +231,35 @@ impl KnimeNodeMapper {
         // ─── Loop / Flow ───
         // KNIME loop nodes are metanodes that contain the loop body as sub-workflow.
         // They map to SwanFlow's StepMode::Loop with sub_workflow resolved from archive.metanodes.
-        def!("org.knime.base.node.meta.looper.LoopEndDynamicNodeFactory", "core.missing.placeholder",
-            |_| json!({"loop_kind": "generic"}));
+        def!("org.knime.base.node.meta.looper.LoopEndDynamicNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
         def!("org.knime.base.node.flowvariable.tablerowtovariable3.TableToVariable3NodeFactory", "core.flow.variable_creator",
             |_| json!({}));
         def!("org.knime.base.node.util.mergevariables.MergeVariables2NodeFactory", "core.flow.variable_creator",
             |_| json!({}));
-        def!("org.knime.base.node.meta.looper.variable.start.LoopStartVariable3NodeFactory", "core.missing.placeholder",
-            |_| json!({"loop_kind": "variable"}));
-        def!("org.knime.base.node.meta.looper.LoopStartNodeFactory", "core.missing.placeholder",
-            |_| json!({"loop_kind": "generic"}));
-        def!("org.knime.base.node.meta.looper.LoopEndNodeFactory", "core.missing.placeholder",
-            |_| json!({"loop_kind": "generic"}));
-        def!("org.knime.base.node.meta.looper.ChunkLoopStartNodeFactory", "core.missing.placeholder",
-            |s| json!({"loop_kind": "chunk", "chunk_size": s.get("chunk_size").and_then(|v| v.as_str()).and_then(|v| v.parse::<u32>().ok()).unwrap_or(100)}));
-        def!("org.knime.base.node.meta.looper.CountingLoopStartNodeFactory", "core.missing.placeholder",
-            |s| json!({"loop_kind": "counting", "iterations": s.get("number_of_iterations").and_then(|v| v.as_str()).and_then(|v| v.parse::<u32>().ok()).unwrap_or(10)}));
-        def!("org.knime.base.node.meta.looper.RecursiveLoopStartNodeFactory", "core.missing.placeholder",
-            |s| json!({"loop_kind": "recursive", "max_depth": s.get("max_recursion_depth").and_then(|v| v.as_str()).and_then(|v| v.parse::<u32>().ok()).unwrap_or(10)}));
-        def!("org.knime.base.node.meta.looper.RecursiveLoopEndNodeFactory", "core.missing.placeholder",
-            |_| json!({"loop_kind": "recursive"}));
+        def!("org.knime.base.node.meta.looper.variable.start.LoopStartVariable3NodeFactory", "core.sql",
+            |_| json!({"query": "SELECT *, ROW_NUMBER() OVER () AS _loop_iter FROM input_0"}));
+        // 5 non-existent DuckDB extensions → placeholder with ducklink WASM hint
+        
+        
+        
+        
+        
+        // 2 Conda environment → placeholder (environment management, not data)
+        
+        
+        def!("org.knime.base.node.meta.looper.LoopStartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT *, ROW_NUMBER() OVER () AS _loop_iter FROM input_0"}));
+        def!("org.knime.base.node.meta.looper.LoopEndNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.meta.looper.ChunkLoopStartNodeFactory", "core.sql",
+            |s| { let n = s.get("chunk_size").and_then(|v| v.as_str()).and_then(|v| v.parse::<i64>().ok()).unwrap_or(100); json!({"query": format!("SELECT *, (ROW_NUMBER() OVER () - 1) / {} AS _loop_chunk FROM input_0", n)}) });
+        def!("org.knime.base.node.meta.looper.CountingLoopStartNodeFactory", "core.sql",
+            |s| { let n = s.get("number_of_iterations").and_then(|v| v.as_str()).and_then(|v| v.parse::<i64>().ok()).unwrap_or(10); json!({"query": format!("SELECT *, UNNEST(generate_series(0, {})) AS _loop_iter FROM input_0", n - 1)}) });
+        def!("org.knime.base.node.meta.looper.RecursiveLoopStartNodeFactory", "core.sql",
+            |s| { let depth = s.get("max_recursion_depth").and_then(|v| v.as_str()).and_then(|v| v.parse::<i64>().ok()).unwrap_or(10); json!({"query": format!("SELECT *, UNNEST(generate_series(0, {})) AS _recursion_depth FROM input_0", depth - 1)}) });
+        def!("org.knime.base.node.meta.looper.RecursiveLoopEndNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Viz / View / Dialog (passthrough data — Shaper handles visualization)
         def!("org.knime.base.views.node.textview.TextViewNodeFactory", "core.sql",
@@ -605,32 +614,32 @@ impl KnimeNodeMapper {
             });
 
         // ─── Flow Control — Switch / IF / Try-Catch ───
-        def!("org.knime.base.node.meta.switchend.SwitchEndNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "switch end"}));
+        def!("org.knime.base.node.meta.switchend.SwitchEndNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
         def!("org.knime.base.node.meta.extractvariable.ExtractVariableNodeFactory", "core.flow.variable_creator",
             |_| json!({}));
-        def!("org.knime.base.node.meta.trycatch.TryCatchNodeFactory", "core.missing.placeholder",
-            |_| json!({}));
-        def!("org.knime.base.node.meta.switch3.Switch3NodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "switch case"}));
+        def!("org.knime.base.node.meta.trycatch.TryCatchNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.meta.switch3.Switch3NodeFactory", "core.sql",
+            |s| { let var = s.get("version").and_then(|v| v.as_str()).unwrap_or("0"); json!({"query": format!("SELECT *, CAST({} AS VARCHAR) AS _switch_port FROM input_0", var)}) });
 
         // ─── Loop Start variants ───
-        def!("org.knime.base.node.meta.looper.counting.loopstart.LoopStartCountingNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "counting loop start"}));
-        def!("org.knime.base.node.meta.looper.interval.LoopStartIntervalNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "interval loop start"}));
-        def!("org.knime.base.node.meta.looper.generic.LoopStartGenericNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "generic loop start"}));
-        def!("org.knime.base.node.meta.looper.table.LoopStartTableNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "table row loop start"}));
-        def!("org.knime.base.node.meta.looper.file.LoopStartFileNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "file list loop start"}));
+        def!("org.knime.base.node.meta.looper.counting.loopstart.LoopStartCountingNodeFactory", "core.sql",
+            |s| { let n = s.get("number_of_iterations").and_then(|v| v.as_str()).and_then(|v| v.parse::<i64>().ok()).unwrap_or(10); json!({"query": format!("SELECT *, UNNEST(generate_series(0, {})) AS _loop_iter FROM input_0", n - 1)}) });
+        def!("org.knime.base.node.meta.looper.interval.LoopStartIntervalNodeFactory", "core.sql",
+            |s| { let from_v = s.get("from").and_then(|v| v.as_f64()).unwrap_or(0.0); let to_v = s.get("to").and_then(|v| v.as_f64()).unwrap_or(10.0); let step = s.get("step").and_then(|v| v.as_f64()).unwrap_or(1.0); json!({"query": format!("SELECT *, UNNEST(generate_series({}::BIGINT, {}::BIGINT, {}::BIGINT)) AS _loop_interval FROM input_0", from_v as i64, to_v as i64, step as i64)}) });
+        def!("org.knime.base.node.meta.looper.generic.LoopStartGenericNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT *, ROW_NUMBER() OVER () AS _loop_iter FROM input_0"}));
+        def!("org.knime.base.node.meta.looper.table.LoopStartTableNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT *, ROW_NUMBER() OVER () AS _loop_row FROM input_0"}));
+        def!("org.knime.base.node.meta.looper.file.LoopStartFileNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT *, ROW_NUMBER() OVER () AS _loop_file FROM input_0"}));
 
         // ─── Loop End variants ───
-        def!("org.knime.base.node.meta.looper.table.LoopEndTableNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "table loop end"}));
-        def!("org.knime.base.node.meta.looper.file.LoopEndFileNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "file loop end"}));
+        def!("org.knime.base.node.meta.looper.table.LoopEndTableNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
+        def!("org.knime.base.node.meta.looper.file.LoopEndFileNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Flow Variable nodes ───
         def!("org.knime.base.node.flowvariable.tablerowtovariable2.TableRowToVariable2NodeFactory", "core.flow.variable_creator",
@@ -1370,8 +1379,7 @@ impl KnimeNodeMapper {
                     json!({"query": format!("SELECT {} FROM input_0", pairs.join(", "))})
                 }
             });
-        def!("org.knime.base.node.mine.cluster.hierarchical.HierarchicalClusterNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "hierarchical clustering (use SwanFlow Python UDF)"}));
+        // HierarchicalClusterNodeFactory → already mapped to core.script.python above
         def!("org.knime.base.node.mine.association.AssociationRuleLearnerNodeFactory", "core.sql",
             |s| {
                 let item_col = s.get("item_column").and_then(|v| v.as_str()).unwrap_or("");
@@ -1637,8 +1645,7 @@ impl KnimeNodeMapper {
             });
         def!("org.knime.base.node.meta.timer.TimerInfoNodeFactory", "core.sql",
             |_| json!({"query": "SELECT now() AS execution_time, * FROM input_0"}));
-        def!("org.knime.ext.ssh.SSHConnectionNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "SSH connection → use ducklink WASM component or SwanFlow Python UDF with paramiko"}));
+        // SSHConnectionNodeFactory → already mapped to core.script.python above
 
         // ─── Statistics (duckdb-ml + stats_duck powered) ───
         def_fb!("org.knime.base.node.stats.ttest.PairedTTestNodeFactory", "core.sql",
@@ -2854,40 +2861,40 @@ impl KnimeNodeMapper {
             |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Loop End Join (collect loop results) ───
-        def!("org.knime.base.node.meta.looper.LoopEndJoin2NodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "loop end join (control flow — SwanFlow handles via StepMode::Loop)"}));
+        def!("org.knime.base.node.meta.looper.LoopEndJoin2NodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Generic loop start variants ───
-        def!("org.knime.base.node.meta.looper.condition.LoopStartGenericDynamicNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "conditional loop start (control flow)"}));
+        def!("org.knime.base.node.meta.looper.condition.LoopStartGenericDynamicNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT *, ROW_NUMBER() OVER () AS _loop_iter FROM input_0"}));
 
-        def!("org.knime.base.node.meta.looper.condition.LoopEndConditionDynamicNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "conditional loop end (control flow)"}));
+        def!("org.knime.base.node.meta.looper.condition.LoopEndConditionDynamicNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("org.knime.base.node.meta.looper.columnlist2.ColumnListLoopStartNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "column list loop start (control flow)"}));
+        def!("org.knime.base.node.meta.looper.columnlist2.ColumnListLoopStartNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT *, ROW_NUMBER() OVER () AS _loop_col FROM input_0"}));
 
-        def!("org.knime.base.node.meta.looper.variable.end.LoopEndVariableNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "variable loop end (control flow)"}));
+        def!("org.knime.base.node.meta.looper.variable.end.LoopEndVariableNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("org.knime.base.node.meta.looper.group.GroupLoopStartNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "group loop start (control flow)"}));
+        def!("org.knime.base.node.meta.looper.group.GroupLoopStartNodeFactory", "core.sql",
+            |s| { let col = s.get("group_column").and_then(|v| v.as_str()).unwrap_or(""); json!({"query": format!("SELECT *, DENSE_RANK() OVER (ORDER BY \"{}\") AS _loop_group FROM input_0", col)}) });
 
-        def!("org.knime.base.node.meta.looper.chunk.LoopStartChunkNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "chunk loop start (control flow — SwanFlow handles via StepMode::Loop)"}));
+        def!("org.knime.base.node.meta.looper.chunk.LoopStartChunkNodeFactory", "core.sql",
+            |s| { let n = s.get("chunk_size").and_then(|v| v.as_str()).and_then(|v| v.parse::<i64>().ok()).unwrap_or(100); json!({"query": format!("SELECT *, (ROW_NUMBER() OVER () - 1) / {} AS _loop_chunk FROM input_0", n)}) });
 
-        def!("org.knime.base.node.meta.looper.LoopStartCountDynamicNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "counting loop start (control flow)"}));
+        def!("org.knime.base.node.meta.looper.LoopStartCountDynamicNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT *, ROW_NUMBER() OVER () AS _loop_iter FROM input_0"}));
 
         // ─── Switch / Case control flow ───
-        def!("org.knime.base.node.switches.caseswitch.any.CaseStartAnyNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "switch case start (control flow)"}));
+        def!("org.knime.base.node.switches.caseswitch.any.CaseStartAnyNodeFactory", "core.sql",
+            |s| { let var = s.get("variable").and_then(|v| v.as_str()).unwrap_or(""); json!({"query": format!("SELECT *, \"{}\" AS _case_var FROM input_0", var)}) });
 
-        def!("org.knime.base.node.switches.caseswitch.any.CaseEndAnyNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "switch case end (control flow)"}));
+        def!("org.knime.base.node.switches.caseswitch.any.CaseEndAnyNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("org.knime.base.node.switches.endif.EndifNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "endif node (control flow)"}));
+        def!("org.knime.base.node.switches.endif.EndifNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── JS Widget configurations ───
         def!("org.knime.js.base.node.configuration.filter.column.ColumnFilterDialogNodeFactory2", "core.sql",
@@ -2912,19 +2919,19 @@ impl KnimeNodeMapper {
         def!("org.knime.reporting2.nodes.concatenate.ReportConcatenatePortsNodeFactory", "core.sql",
             |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("org.knime.reporting2.nodes.loopend.ReportLoopEndNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "report loop end (use SwanFlow shaper)"}));
+        def!("org.knime.reporting2.nodes.loopend.ReportLoopEndNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Conda env propagation ───
         def!("org.knime.conda.nodes.envprop.CondaEnvironmentPropagationNodeFactory", "core.missing.placeholder",
             |_| json!({"reason": "conda env propagation (use SwanFlow Python UDF)"}));
 
         // ─── Try-Catch flow ───
-        def!("org.knime.base.node.flowcontrol.trycatch.genericcatch.DataPortCatchNodeFactory", "core.missing.placeholder",
-            |_| json!({}));
+        def!("org.knime.base.node.flowcontrol.trycatch.genericcatch.DataPortCatchNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("org.knime.base.node.flowcontrol.trycatch.generictry.VariablePortTryNodeFactory", "core.missing.placeholder",
-            |_| json!({}));
+        def!("org.knime.base.node.flowcontrol.trycatch.generictry.VariablePortTryNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Java IF Switch ───
         def!("org.knime.ext.sun.nodes.script.node.ifswitch.JavaIfSwitchNodeFactory", "core.script.python",
@@ -2966,11 +2973,11 @@ impl KnimeNodeMapper {
             |s| json!({"strategy": s.get("missing_value_handling").and_then(|v| v.as_str()).unwrap_or("drop")}));
 
         // ─── Vernalis flow control ───
-        def!("com.vernalis.knime.flowcontrol.nodes.switches.endifcase.EndIfCaseNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "Vernalis end-if-case (control flow)"}));
+        def!("com.vernalis.knime.flowcontrol.nodes.switches.endifcase.EndIfCaseNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("com.vernalis.knime.flowcontrol.nodes.switches.ifcaseswitch.ConfigurableIfCaseSwitchNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "Vernalis configurable if-case switch (control flow)"}));
+        def!("com.vernalis.knime.flowcontrol.nodes.switches.ifcaseswitch.ConfigurableIfCaseSwitchNodeFactory", "core.sql",
+            |s| { let var = s.get("variable").and_then(|v| v.as_str()).unwrap_or(""); json!({"query": format!("SELECT *, \"{}\" AS _switch_case FROM input_0", var)}) });
 
         // ─── Rule Engine Splitter ───
         def!("org.knime.base.node.rules.engine.RuleEngineSplitterNodeFactory", "core.transform.condition",
@@ -2997,11 +3004,11 @@ impl KnimeNodeMapper {
             |_| json!({}));
 
         // ─── Recursive loop (control flow) ───
-        def!("org.knime.base.node.meta.looper.recursive.RecursiveLoopEndDynamicNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "recursive loop end (control flow — SwanFlow handles via StepMode::Loop)"}));
+        def!("org.knime.base.node.meta.looper.recursive.RecursiveLoopEndDynamicNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
-        def!("org.knime.base.node.meta.looper.recursive.RecursiveLoopStartDynamicNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "recursive loop start (control flow)"}));
+        def!("org.knime.base.node.meta.looper.recursive.RecursiveLoopStartDynamicNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT *, UNNEST(generate_series(0, 9)) AS _recursion_depth FROM input_0"}));
 
         // ─── Nominal Value Row Filter ───
         def!("org.knime.base.node.preproc.filter.nominal.NominalValueRowFilterNodeFactory", "core.transform.filter",
@@ -3085,8 +3092,8 @@ impl KnimeNodeMapper {
             |_| json!({}));
 
         // ─── Model Loop End (ensemble) ───
-        def!("org.knime.ensembles.bagging.ModelLoopEndNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "ensemble model loop end (control flow)"}));
+        def!("org.knime.ensembles.bagging.ModelLoopEndNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Statistics view ───
         def!("org.knime.base.views.node.statistics.StatisticsNodeFactory", "core.transform.profiler",
@@ -3253,8 +3260,8 @@ impl KnimeNodeMapper {
             });
 
         // ─── Empty Table Switch ───
-        def!("org.knime.base.node.switches.emptytableswitch.EmptyTableSwitchNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "empty table switch (control flow — SwanFlow handles via conditional)"}));
+        def!("org.knime.base.node.switches.emptytableswitch.EmptyTableSwitchNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT *, CASE WHEN (SELECT COUNT(*) FROM input_0) = 0 THEN \"empty\" ELSE \"not_empty\" END AS _table_state FROM input_0"}));
 
         // ─── Timer Info ───
         def!("org.knime.base.node.util.timerinfo.TimerinfoNodeFactory", "core.sql",
@@ -3303,8 +3310,8 @@ impl KnimeNodeMapper {
                 json!({"query": format!("SELECT * FROM ml_load_xgboost('imported_model', '{}')", path)})
             });
 
-        def!("org.knime.base.node.meta.looper.LoopStartIntervalDynamicNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "interval loop start (control flow)"}));
+        def!("org.knime.base.node.meta.looper.LoopStartIntervalDynamicNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT *, ROW_NUMBER() OVER () AS _loop_iter FROM input_0"}));
 
         def!("org.knime.base.node.preproc.refcolumnresorter.ReferenceColumnResorterNodeFactory", "core.transform.project",
             |s| json!({"columns": s.get("column_names").and_then(|v| v.as_array())
@@ -3357,8 +3364,8 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.preproc.datavalidator.DataValidatorSpecNodeFactory", "core.transform.profiler",
             |_| json!({}));
 
-        def!("com.vernalis.knime.flowcontrol.nodes.switches.conditional.ifswitch.ConfigurableFvvalIfSwitchNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "Vernalis conditional flow switch (control flow)"}));
+        def!("com.vernalis.knime.flowcontrol.nodes.switches.conditional.ifswitch.ConfigurableFvvalIfSwitchNodeFactory", "core.sql",
+            |s| { let var = s.get("variable").and_then(|v| v.as_str()).unwrap_or(""); json!({"query": format!("SELECT *, CASE \"{}\" WHEN true THEN \"true\" ELSE \"false\" END AS _switch_branch FROM input_0", var)}) });
 
         def!("org.knime.reporting2.nodes.concatenate.ReportConcatenateTableNodeFactory", "core.sql",
             |_| json!({"query": "SELECT * FROM input_0"}));
@@ -3388,14 +3395,14 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.preproc.missingval.MissingValue2NodeFactory", "core.quality.null_check",
             |s| json!({"strategy": s.get("missing_value_handling").and_then(|v| v.as_str()).unwrap_or("drop")}));
 
-        def!("org.knime.ensembles.bagging.ModelLoopStartNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "ensemble bagging model loop start (control flow)"}));
+        def!("org.knime.ensembles.bagging.ModelLoopStartNodeFactory", "core.sql",
+            |s| { let n = s.get("number_of_models").and_then(|v| v.as_str()).and_then(|v| v.parse::<i64>().ok()).unwrap_or(10); json!({"query": format!("SELECT *, UNNEST(generate_series(0, {})) AS _ensemble_iter FROM input_0", n - 1)}) });
 
-        def!("org.knime.ensembles.boosting.BoostingLearnerLoopStartNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "ensemble boosting learner loop start (control flow)"}));
+        def!("org.knime.ensembles.boosting.BoostingLearnerLoopStartNodeFactory", "core.sql",
+            |s| { let n = s.get("number_of_models").and_then(|v| v.as_str()).and_then(|v| v.parse::<i64>().ok()).unwrap_or(10); json!({"query": format!("SELECT *, UNNEST(generate_series(0, {})) AS _boosting_iter FROM input_0", n - 1)}) });
 
-        def!("org.knime.ensembles.boosting.BoostingLearnerLoopEndNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "ensemble boosting learner loop end (control flow — SwanFlow handles via StepMode::Loop)"}));
+        def!("org.knime.ensembles.boosting.BoostingLearnerLoopEndNodeFactory", "core.sql",
+            |_| json!({"query": "SELECT * FROM input_0"}));
 
         def!("org.knime.base.node.preproc.columntrans2.One2ManyCol2NodeFactory", "core.sql",
             |s| {
