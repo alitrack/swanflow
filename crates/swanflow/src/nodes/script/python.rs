@@ -388,3 +388,74 @@ impl NodeBehavior for PythonUdfNode {
         Ok(vec![])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_sandboxed_default_true() {
+        let node = PythonNode;
+        let spec = node.spec();
+        let schema = spec.config_schema;
+        assert!(schema.to_string().contains("sandboxed"));
+    }
+
+    #[test]
+    fn test_propose_plan_sandboxed_false() {
+        let node = PythonNode;
+        let config = json!({"script": "import pyarrow as pa; return batch", "sandboxed": false});
+        assert!(node.validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_propose_plan_sandboxed_default() {
+        let node = PythonNode;
+        let config = json!({"script": "return batch"});
+        assert!(node.validate(&config).is_ok());
+    }
+
+    #[test]
+    fn test_propose_plan_encodes_sandboxed_prefix() {
+        let node = PythonNode;
+        let config = json!({"script": "x = 1", "sandboxed": false});
+        let empty_input = LogicalPlan::EmptyRelation(
+            datafusion::logical_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(datafusion::common::DFSchema::empty()),
+            },
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let plans = rt.block_on(node.propose_plan(vec![empty_input], &config)).unwrap();
+        let plan = &plans[0];
+        if let LogicalPlan::Extension(ext) = plan {
+            let logical = ext.node.as_any().downcast_ref::<PythonLogical>().unwrap();
+            assert!(logical.script.starts_with("sandboxed:false\n"));
+            assert!(logical.script.contains("x = 1"));
+        } else {
+            panic!("Expected Extension logical plan");
+        }
+    }
+
+    #[test]
+    fn test_propose_plan_sandboxed_true_prefix() {
+        let node = PythonNode;
+        let config = json!({"script": "x = 1"});
+        let empty_input = LogicalPlan::EmptyRelation(
+            datafusion::logical_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(datafusion::common::DFSchema::empty()),
+            },
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let plans = rt.block_on(node.propose_plan(vec![empty_input], &config)).unwrap();
+        let plan = &plans[0];
+        if let LogicalPlan::Extension(ext) = plan {
+            let logical = ext.node.as_any().downcast_ref::<PythonLogical>().unwrap();
+            assert!(logical.script.starts_with("sandboxed:true\n"));
+        } else {
+            panic!("Expected Extension logical plan");
+        }
+    }
+}
