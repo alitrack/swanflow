@@ -5,6 +5,7 @@
 //! - [`OpenAiHook`] — LLM-powered [`IntelligenceHook`] for error recovery
 //! - [`PromptBuilder`] — modular context assembly (NOT monolithic 200KB prompts)
 //! - [`LlmClient`] — generic HTTP LLM client (OpenAI-compatible API)
+//! - [`RouterConfig`] — configuration loading and validation
 //!
 //! # Feature Gate
 //!
@@ -17,6 +18,7 @@
 //! ```
 
 pub mod client;
+pub mod config;
 pub mod hook;
 pub mod prompt;
 pub mod router;

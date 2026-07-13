@@ -12,6 +12,8 @@ SwanFlow is a high-performance data science engine built on **Apache DataFusion 
 | **KNIME 兼容** | ✅ .knwf 导入执行 | ❌ | ✅ 原生 | ❌ |
 | **WASM UDF** | ✅ 浏览器级沙箱 | ❌ | ❌ | ❌ |
 | **MCP 双通道** | ✅ Server + Client | ❌ | ❌ | ❌ |
+| **AI 预算路由** | ✅ ModelRouter 5维评分 | ❌ | ❌ | ❌ |
+| **智能修复上下文** | ✅ Schema+拓扑感知 PromptBuilder | ❌ | ❌ | ❌ |
 | **Shaper 仪表板** | ✅ DuckDB push | ❌ | ❌ | ❌ |
 | **单二进制** | ✅ 编译即用 | ❌ | ❌ | ❌ |
 | **零拷贝 Python** | ✅ Arrow FFI | ❌ | ❌ | ❌ |
