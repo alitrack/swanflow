@@ -270,24 +270,47 @@ impl Stream for PythonStream {
         match self.input.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(batch))) => {
                 let compiled_fn = &self.compiled_fn;
-                let result = Python::attach(|py| -> Result<RecordBatch> {
-                    let py_batch = PyRecordBatch::from(batch);
-                    let result_py_obj = compiled_fn.call1(py, (py_batch,))?;
 
-                    if result_py_obj.is_none(py) {
-                        anyhow::bail!("Python transform function must return a PyRecordBatch, but returned None");
-                    }
+                // Run Python in a blocking thread to avoid blocking the tokio worker.
+                // Use oneshot channel to bridge blocking computation back to async.
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let fn_clone = compiled_fn.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let result = Python::attach(|py| -> Result<RecordBatch> {
+                        let py_batch = PyRecordBatch::from(batch);
+                        let result_py_obj = fn_clone.call1(py, (py_batch,))?;
 
-                    let result_py_batch: PyRecordBatch = result_py_obj.extract(py)
-                        .map_err(|e| anyhow!("Failed to extract PyRecordBatch from Python return value: {}. Ensure your script returns the result (e.g., 'return batch').", e))?;
-                    Ok(result_py_batch.into())
+                        if result_py_obj.is_none(py) {
+                            anyhow::bail!("Python transform function must return a PyRecordBatch, but returned None");
+                        }
+
+                        let result_py_batch: PyRecordBatch = result_py_obj.extract(py)
+                            .map_err(|e| anyhow!("Failed to extract PyRecordBatch from Python return value: {}. Ensure your script returns the result (e.g., 'return batch').", e))?;
+                        Ok(result_py_batch.into())
+                    });
+                    let _ = tx.send(result);
                 });
 
-                match result {
-                    Ok(out_batch) => Poll::Ready(Some(Ok(out_batch))),
-                    Err(e) => Poll::Ready(Some(Err(
-                        datafusion::error::DataFusionError::Execution(e.to_string()),
-                    ))),
+                // Now await the oneshot channel — returns Poll::Pending if not ready,
+                // which lets tokio handle other tasks and respects the outer timeout.
+                let rx = tokio::pin!(rx);
+                match rx.poll(cx) {
+                    std::task::Poll::Ready(Ok(Ok(out_batch))) => {
+                        Poll::Ready(Some(Ok(out_batch)))
+                    }
+                    std::task::Poll::Ready(Ok(Err(e))) => {
+                        Poll::Ready(Some(Err(
+                            datafusion::error::DataFusionError::Execution(e.to_string()),
+                        )))
+                    }
+                    std::task::Poll::Ready(Err(_recv_err)) => {
+                        Poll::Ready(Some(Err(
+                            datafusion::error::DataFusionError::Execution(
+                                "Python execution channel closed unexpectedly".to_string(),
+                            ),
+                        )))
+                    }
+                    std::task::Poll::Pending => Poll::Pending,
                 }
             }
             other => other,
