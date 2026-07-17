@@ -38,6 +38,30 @@ use crate::nodes::sql::SqlProxyLogical;
 use crate::nodes::{NodeDiagnostic, NodeErrorClass, NodeEvent};
 
 use duckdb::Connection;
+use tokio::time::{timeout, Duration as TokioDuration};
+
+/// Wraps an async node execution with timeout.
+/// If the timeout fires, returns an error with a clear message.
+async fn with_node_timeout<F, T>(
+    node_id: Uuid,
+    timeout_seconds: u64,
+    fut: F,
+) -> Result<T, datafusion::error::DataFusionError>
+where
+    F: std::future::Future<Output = Result<T, datafusion::error::DataFusionError>>,
+{
+    if timeout_seconds == 0 {
+        // No timeout configured
+        return fut.await;
+    }
+    match timeout(TokioDuration::from_secs(timeout_seconds), fut).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(datafusion::error::DataFusionError::Execution(format!(
+            "Node {} timed out after {} seconds",
+            node_id, timeout_seconds
+        ))),
+    }
+}
 
 /// Hooks for injecting AI intelligence into the execution flow.
 #[async_trait]
@@ -80,6 +104,11 @@ pub struct SwanFlowEngine {
     pub engine: Option<QueryEngineRef>,
     /// Active engine mode.
     pub engine_mode: EngineMode,
+    /// Max seconds per node execution before timeout (0 = no timeout).
+    /// Applied to both DataFusion and DuckDB execution paths.
+    pub node_timeout_seconds: u64,
+    /// Max rows returned per node. Prevents OOM on large datasets (0 = unlimited).
+    pub max_rows_per_node: u64,
 }
 
 async fn sync_metadata_to_context(ctx: &Arc<SessionContext>, cache_dir: &str) {
@@ -171,6 +200,8 @@ impl SwanFlowEngine {
             hook: None,
             engine: None,
             engine_mode: EngineMode::DataFusion,
+            node_timeout_seconds: 3600, // default 1 hour timeout
+            max_rows_per_node: 10_000_000, // default 10M rows per node
         }
     }
 
@@ -241,6 +272,8 @@ impl SwanFlowEngine {
 
         let engine_clone = engine.arc_clone();
         let tx_err = tx.clone();
+        let duckdb_timeout_secs = self.node_timeout_seconds;
+        let duckdb_max_rows = self.max_rows_per_node;
 
         tokio::spawn(async move {
             for (level, terminals) in stages.into_iter().enumerate() {
@@ -260,8 +293,26 @@ impl SwanFlowEngine {
                         }
                     };
 
+                    // Apply row limit to prevent OOM on large datasets
+                    let sql = if duckdb_max_rows > 0 {
+                        let trimmed = sql.trim();
+                        if trimmed.to_uppercase().starts_with("SELECT") {
+                            format!(
+                                "SELECT * FROM ({}) AS _sw_limit LIMIT {}",
+                                trimmed, duckdb_max_rows
+                            )
+                        } else {
+                            sql
+                        }
+                    } else {
+                        sql
+                    };
+
                     // Execute SQL in DuckDB
-                    match engine_clone.execute_sql(&sql).await {
+                    let duckdb_node_id = node_id;
+                    match with_node_timeout(duckdb_node_id, duckdb_timeout_secs, async {
+                        engine_clone.execute_sql(&sql).await
+                    }).await {
                         Ok(batches) => {
                             if !batches.is_empty() {
                                 // Materialize result as a registered table
@@ -372,6 +423,7 @@ impl SwanFlowEngine {
         let query_planner_clone = query_planner.clone();
         let hook_shared = self.hook.clone();
         let _registry_shared = self.registry.clone();
+        let node_timeout_seconds = self.node_timeout_seconds;
 
         tokio::spawn(async move {
             // STAGED TOPOLOGICAL EXECUTION: run each level stage in order
@@ -402,7 +454,11 @@ impl SwanFlowEngine {
                     match state.create_physical_plan(&logical_plan).await {
                         Ok(physical_plan) => {
                             let task_ctx = ctx_shared.task_ctx();
-                            match datafusion::physical_plan::collect(physical_plan, task_ctx).await
+                            let node_id_exec = node_id;
+                            let physical_plan_clone = physical_plan.clone();
+                            match with_node_timeout(node_id_exec, node_timeout_seconds, async {
+                                datafusion::physical_plan::collect(physical_plan_clone, task_ctx).await
+                            }).await
                             {
                                 Ok(batches) => {
                                     if let Some(hook) = &hook_shared {
@@ -479,11 +535,11 @@ impl SwanFlowEngine {
                             match state.create_physical_plan(&logical_plan).await {
                                 Ok(physical_plan) => {
                                     let task_ctx = ctx_shared.task_ctx();
-                                    match datafusion::physical_plan::collect(
-                                        physical_plan,
-                                        task_ctx,
-                                    )
-                                    .await
+                                    let retry_node_id = node_id;
+                                    let physical_plan_clone2 = physical_plan.clone();
+                                    match with_node_timeout(retry_node_id, node_timeout_seconds, async {
+                                        datafusion::physical_plan::collect(physical_plan_clone2, task_ctx).await
+                                    }).await
                                     {
                                         Ok(_batches) => {
                                             let _ = tx.send(NodeEvent::StateChanged {
