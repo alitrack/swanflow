@@ -245,6 +245,7 @@ def make_restricted_import(original_import):
         Ok(Box::pin(PythonStream {
             input: input_stream,
             compiled_fn,
+            pending_result: None,
         }))
     }
 }
@@ -252,6 +253,8 @@ def make_restricted_import(original_import):
 struct PythonStream {
     input: SendableRecordBatchStream,
     compiled_fn: Py<PyAny>,
+    /// Stores the oneshot receiver from an in-flight spawn_blocking Python call.
+    pending_result: Option<tokio::sync::oneshot::Receiver<std::result::Result<RecordBatch, anyhow::Error>>>,
 }
 
 impl RecordBatchStream for PythonStream {
@@ -267,18 +270,47 @@ impl Stream for PythonStream {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        // If there's an in-flight Python result, check if it's ready
+        if self.pending_result.is_some() {
+            match self.pending_result.as_mut().unwrap().try_recv() {
+                Ok(result) => {
+                    self.pending_result = None;
+                    return match result {
+                        Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                        Err(e) => Poll::Ready(Some(Err(
+                            datafusion::error::DataFusionError::Execution(e.to_string()),
+                        ))),
+                    };
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    // Not ready yet — register waker and retry later
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.pending_result = None;
+                    return Poll::Ready(Some(Err(
+                        datafusion::error::DataFusionError::Execution(
+                            "Python execution channel closed unexpectedly".to_string(),
+                        ),
+                    )));
+                }
+            }
+        }
+
+        // No in-flight call — try to read next input batch
         match self.input.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(batch))) => {
-                let compiled_fn = &self.compiled_fn;
+                // Clone the compiled function — need Python GIL for Py::clone_ref
+                let compiled_fn_clone = Python::with_gil(|py| self.compiled_fn.clone_ref(py));
 
                 // Run Python in a blocking thread to avoid blocking the tokio worker.
-                // Use oneshot channel to bridge blocking computation back to async.
+                // Bridge result back via oneshot channel.
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                let fn_clone = compiled_fn.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     let result = Python::attach(|py| -> Result<RecordBatch> {
                         let py_batch = PyRecordBatch::from(batch);
-                        let result_py_obj = fn_clone.call1(py, (py_batch,))?;
+                        let result_py_obj = compiled_fn_clone.call1(py, (py_batch,))?;
 
                         if result_py_obj.is_none(py) {
                             anyhow::bail!("Python transform function must return a PyRecordBatch, but returned None");
@@ -291,29 +323,14 @@ impl Stream for PythonStream {
                     let _ = tx.send(result);
                 });
 
-                // Now await the oneshot channel — returns Poll::Pending if not ready,
-                // which lets tokio handle other tasks and respects the outer timeout.
-                let rx = tokio::pin!(rx);
-                match rx.poll(cx) {
-                    std::task::Poll::Ready(Ok(Ok(out_batch))) => {
-                        Poll::Ready(Some(Ok(out_batch)))
-                    }
-                    std::task::Poll::Ready(Ok(Err(e))) => {
-                        Poll::Ready(Some(Err(
-                            datafusion::error::DataFusionError::Execution(e.to_string()),
-                        )))
-                    }
-                    std::task::Poll::Ready(Err(_recv_err)) => {
-                        Poll::Ready(Some(Err(
-                            datafusion::error::DataFusionError::Execution(
-                                "Python execution channel closed unexpectedly".to_string(),
-                            ),
-                        )))
-                    }
-                    std::task::Poll::Pending => Poll::Pending,
-                }
+                // Store receiver; next poll will check for completion
+                self.pending_result = Some(rx);
+                cx.waker().wake_by_ref();
+                Poll::Pending
             }
-            other => other,
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

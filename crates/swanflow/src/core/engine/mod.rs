@@ -664,6 +664,7 @@ impl SwanFlowEngine {
         let hook_shared = self.hook.clone();
         let registry_clone = registry.clone();
         let workflow = workflow.clone();
+        let yaml_timeout_secs = self.node_timeout_seconds;
 
         tokio::spawn(async move {
             // Collect topological order
@@ -731,6 +732,8 @@ impl SwanFlowEngine {
                             hook: hook_shared.clone(),
                             engine: None,
                             engine_mode: crate::core::engine::EngineMode::Auto,
+                            node_timeout_seconds: yaml_timeout_secs,
+                            max_rows_per_node: 0, // unlimited for sub-workflow (parent applies limits)
                         };
 
                         match sub_engine.execute_workflow(sub_wf).await {
