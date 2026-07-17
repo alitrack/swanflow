@@ -3,6 +3,7 @@ pub mod cache;
 pub mod checkpoint;
 pub mod flow_vars;
 pub mod health;
+pub mod incremental;
 pub mod datafusion_backend;
 pub mod duckdb_backend;
 
@@ -42,7 +43,47 @@ use crate::nodes::sql::SqlProxyLogical;
 use crate::nodes::{NodeDiagnostic, NodeErrorClass, NodeEvent};
 
 use duckdb::Connection;
+use serde::Deserialize;
 use tokio::time::{timeout, Duration as TokioDuration};
+
+/// A single lineage record — tracks which node produced which table.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LineageRecord {
+    pub node_id: String,
+    pub table_name: String,
+    pub parquet_path: String,
+    pub schema_json: String,
+}
+
+/// Query lineage records for a specific table or all tables.
+/// Returns an empty vec if the metadata DB doesn't exist.
+pub fn get_lineage(cache_dir: &str, table_name: Option<&str>) -> Vec<LineageRecord> {
+    let metadata_path = format!("{}/metadata.duckdb", cache_dir);
+    let Ok(conn) = Connection::open(&metadata_path) else {
+        return vec![];
+    };
+    let sql = match table_name {
+        Some(name) => format!(
+            "SELECT node_id, table_name, parquet_path, schema_json FROM flow_metadata WHERE table_name = '{}'",
+            name.replace('\'', "''")
+        ),
+        None => "SELECT node_id, table_name, parquet_path, schema_json FROM flow_metadata".to_string(),
+    };
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return vec![];
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok(LineageRecord {
+            node_id: row.get(0)?,
+            table_name: row.get(1)?,
+            parquet_path: row.get(2)?,
+            schema_json: row.get(3)?,
+        })
+    }) else {
+        return vec![];
+    };
+    rows.flatten().collect()
+}
 
 /// Wraps an async node execution with timeout.
 /// If the timeout fires, returns an error with a clear message.
@@ -341,7 +382,19 @@ impl SwanFlowEngine {
 
         tokio::spawn(async move {
             let cm = checkpoint::CheckpointManager::new(&duckdb_cache_dir);
+
+            // Check for resumable checkpoint — skip already-completed levels
+            let resume_from = cm.find_resumable(&duckdb_wf_name)
+                .ok()
+                .flatten()
+                .and_then(|cp| cp.completed_levels.iter().max().map(|l| l + 1))
+                .unwrap_or(0);
+
             for (level, terminals) in stages.into_iter().enumerate() {
+                // Skip levels already completed in a previous interrupted run
+                if level < resume_from {
+                    continue;
+                }
                 for stage_plan in terminals {
                     let node_id = stage_plan.node_id;
                     let logical_plan = stage_plan.plan;
@@ -523,8 +576,20 @@ impl SwanFlowEngine {
 
         tokio::spawn(async move {
             let cm = checkpoint::CheckpointManager::new(&df_cache_dir);
+
+            // Check for resumable checkpoint — skip already-completed levels
+            let resume_from = cm.find_resumable(&df_wf_name)
+                .ok()
+                .flatten()
+                .and_then(|cp| cp.completed_levels.iter().max().map(|l| l + 1))
+                .unwrap_or(0);
+
             // STAGED TOPOLOGICAL EXECUTION: run each level stage in order
             for (level, mut terminals) in stages.into_iter().enumerate() {
+                // Skip levels already completed in a previous interrupted run
+                if level < resume_from {
+                    continue;
+                }
                 println!("DEBUG: Executing Stage Level {}", level);
                 terminals
                     .sort_by(|a, b| a.node_id.cmp(&b.node_id).then_with(|| a.port.cmp(&b.port)));
