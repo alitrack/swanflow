@@ -332,8 +332,14 @@ impl SwanFlowEngine {
         let tx_err = tx.clone();
         let duckdb_timeout_secs = self.node_timeout_seconds;
         let duckdb_max_rows = self.max_rows_per_node;
+        let duckdb_cache_dir = self.cache_dir.clone();
+        let duckdb_run_id = Uuid::new_v4().to_string();
+        let duckdb_wf_name = workflow.name.clone();
+        let duckdb_total_levels = stages.len();
+        let duckdb_max_cache = self.max_cache_size_mb;
 
         tokio::spawn(async move {
+            let cm = checkpoint::CheckpointManager::new(&duckdb_cache_dir);
             for (level, terminals) in stages.into_iter().enumerate() {
                 for stage_plan in terminals {
                     let node_id = stage_plan.node_id;
@@ -418,7 +424,33 @@ impl SwanFlowEngine {
                         }
                     }
                 }
+                // Save checkpoint after each level
+                let _ = cm.save_checkpoint(&checkpoint::EngineCheckpoint {
+                    run_id: duckdb_run_id.clone(),
+                    workflow_hash: duckdb_wf_name.clone(),
+                    workflow_name: duckdb_wf_name.clone(),
+                    completed_levels: (0..=level).collect(),
+                    total_levels: duckdb_total_levels,
+                    materialized_tables: std::collections::HashMap::new(),
+                    flow_vars: std::collections::HashMap::new(),
+                    started_at: "".to_string(),
+                    completed_at: None,
+                });
             }
+            // Mark workflow as completed
+            let _ = cm.save_checkpoint(&checkpoint::EngineCheckpoint {
+                run_id: duckdb_run_id,
+                workflow_hash: duckdb_wf_name.clone(),
+                workflow_name: duckdb_wf_name.clone(),
+                completed_levels: (0..duckdb_total_levels).collect(),
+                total_levels: duckdb_total_levels,
+                materialized_tables: std::collections::HashMap::new(),
+                flow_vars: std::collections::HashMap::new(),
+                started_at: "".to_string(),
+                completed_at: Some("".to_string()),
+            });
+            let cache_mgr = cache::CacheManager::new(&duckdb_cache_dir, duckdb_max_cache);
+            cache_mgr.evict();
             drop(tx_err);
         });
 
@@ -482,8 +514,14 @@ impl SwanFlowEngine {
         let hook_shared = self.hook.clone();
         let _registry_shared = self.registry.clone();
         let node_timeout_seconds = self.node_timeout_seconds;
+        let df_cache_dir = self.cache_dir.clone();
+        let df_run_id = Uuid::new_v4().to_string();
+        let df_wf_name = workflow.name.clone();
+        let df_total_levels = stages.len();
+        let df_max_cache = self.max_cache_size_mb;
 
         tokio::spawn(async move {
+            let cm = checkpoint::CheckpointManager::new(&df_cache_dir);
             // STAGED TOPOLOGICAL EXECUTION: run each level stage in order
             for (level, mut terminals) in stages.into_iter().enumerate() {
                 println!("DEBUG: Executing Stage Level {}", level);
@@ -678,10 +716,38 @@ impl SwanFlowEngine {
 
                 // Final Sync after this level to be absolutely sure
                 sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
+
+                // Save checkpoint after each level
+                let _ = cm.save_checkpoint(&checkpoint::EngineCheckpoint {
+                    run_id: df_run_id.clone(),
+                    workflow_hash: df_wf_name.clone(),
+                    workflow_name: df_wf_name.clone(),
+                    completed_levels: (0..=level).collect(),
+                    total_levels: df_total_levels,
+                    materialized_tables: std::collections::HashMap::new(),
+                    flow_vars: std::collections::HashMap::new(),
+                    started_at: "".to_string(),
+                    completed_at: None,
+                });
             }
 
-            // 5. Final Sync to ensure results are visible to main thread
+            // Final Sync to ensure results are visible to main thread
             sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
+
+            // Mark workflow as completed
+            let _ = cm.save_checkpoint(&checkpoint::EngineCheckpoint {
+                run_id: df_run_id,
+                workflow_hash: df_wf_name.clone(),
+                workflow_name: df_wf_name.clone(),
+                completed_levels: (0..df_total_levels).collect(),
+                total_levels: df_total_levels,
+                materialized_tables: std::collections::HashMap::new(),
+                flow_vars: std::collections::HashMap::new(),
+                started_at: "".to_string(),
+                completed_at: Some("".to_string()),
+            });
+            let cache_mgr = cache::CacheManager::new(&df_cache_dir, df_max_cache);
+            cache_mgr.evict();
         });
 
         Ok(rx)
@@ -723,8 +789,13 @@ impl SwanFlowEngine {
         let registry_clone = registry.clone();
         let workflow = workflow.clone();
         let yaml_timeout_secs = self.node_timeout_seconds;
+        let yaml_cache_dir = self.cache_dir.clone();
+        let yaml_run_id = Uuid::new_v4().to_string();
+        let yaml_wf_name = workflow.name.clone();
+        let yaml_max_cache = self.max_cache_size_mb;
 
         tokio::spawn(async move {
+            let cm = checkpoint::CheckpointManager::new(&yaml_cache_dir);
             // Collect topological order
             let sorted_indices = match petgraph::algo::toposort(&workflow.graph, None) {
                 Ok(v) => v,
@@ -893,6 +964,21 @@ impl SwanFlowEngine {
             }
 
             sync_metadata_to_context(&ctx_shared, &cache_dir).await;
+
+            // Mark YAML workflow as completed
+            let _ = cm.save_checkpoint(&checkpoint::EngineCheckpoint {
+                run_id: yaml_run_id,
+                workflow_hash: yaml_wf_name.clone(),
+                workflow_name: yaml_wf_name.clone(),
+                completed_levels: vec![0],
+                total_levels: 1,
+                materialized_tables: std::collections::HashMap::new(),
+                flow_vars: std::collections::HashMap::new(),
+                started_at: "".to_string(),
+                completed_at: Some("".to_string()),
+            });
+            let cache_mgr = cache::CacheManager::new(&yaml_cache_dir, yaml_max_cache);
+            cache_mgr.evict();
             drop(tx);
         });
 
