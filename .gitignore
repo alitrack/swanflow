@@ -1,4 +1,5 @@
 **/*.rs.bk
+**/target/swanflow_cache/
 *.a
 *.csv
 *.h
