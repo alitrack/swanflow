@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod checkpoint;
 pub mod datafusion_backend;
 pub mod duckdb_backend;
 
