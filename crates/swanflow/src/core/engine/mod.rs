@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod cache;
 pub mod checkpoint;
+pub mod health;
 pub mod datafusion_backend;
 pub mod duckdb_backend;
 
@@ -111,6 +112,8 @@ pub struct SwanFlowEngine {
     pub node_timeout_seconds: u64,
     /// Max rows returned per node. Prevents OOM on large datasets (0 = unlimited).
     pub max_rows_per_node: u64,
+    /// Max cache directory size in MB before eviction (0 = unlimited).
+    pub max_cache_size_mb: u64,
 }
 
 async fn sync_metadata_to_context(ctx: &Arc<SessionContext>, cache_dir: &str) {
@@ -146,6 +149,36 @@ fn should_invoke_self_healing(diagnostic: &NodeDiagnostic) -> bool {
             .message
             .to_ascii_lowercase()
             .contains("missing node implementation")
+}
+
+/// Count completed and in-progress checkpoint runs from the metadata store.
+fn count_checkpoint_runs(cache_dir: &str) -> (usize, usize) {
+    let metadata_path = format!("{}/metadata.duckdb", cache_dir);
+    let Ok(conn) = duckdb::Connection::open(&metadata_path) else {
+        return (0, 0);
+    };
+    let mut completed = 0usize;
+    let mut in_progress = 0usize;
+
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT checkpoint_json FROM __execution_checkpoints",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            let json: String = row.get(0)?;
+            Ok(json)
+        }) {
+            for row in rows.flatten() {
+                if let Ok(cp) = serde_json::from_str::<checkpoint::EngineCheckpoint>(&row) {
+                    if cp.completed_at.is_some() {
+                        completed += 1;
+                    } else {
+                        in_progress += 1;
+                    }
+                }
+            }
+        }
+    }
+    (completed, in_progress)
 }
 
 impl SwanFlowEngine {
@@ -204,6 +237,7 @@ impl SwanFlowEngine {
             engine_mode: EngineMode::DataFusion,
             node_timeout_seconds: 3600, // default 1 hour timeout
             max_rows_per_node: 10_000_000, // default 10M rows per node
+            max_cache_size_mb: 1024, // default 1GB cache limit
         }
     }
 
@@ -218,6 +252,28 @@ impl SwanFlowEngine {
     pub fn with_engine_mode(mut self, mode: EngineMode) -> Self {
         self.engine_mode = mode;
         self
+    }
+
+    /// Return a health snapshot of the engine.
+    pub fn get_health(&self) -> health::EngineHealth {
+        let cm = cache::CacheManager::new(&self.cache_dir, self.max_cache_size_mb);
+
+        // Count completed and in-progress checkpoints from the metadata DB
+        let (completed_runs, in_progress_runs) = count_checkpoint_runs(&self.cache_dir);
+
+        health::EngineHealth {
+            ready: true,
+            registered_node_count: self.registry.list_specs().len(),
+            cache_dir: self.cache_dir.clone(),
+            cache_size_mb: cm.total_size_mb(),
+            max_cache_size_mb: self.max_cache_size_mb,
+            node_timeout_seconds: self.node_timeout_seconds,
+            max_rows_per_node: self.max_rows_per_node,
+            engine_mode: format!("{:?}", self.engine_mode),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            completed_runs,
+            in_progress_runs,
+        }
     }
 
     /// Resolve Auto mode to a concrete engine based on pipeline node types.
@@ -736,6 +792,7 @@ impl SwanFlowEngine {
                             engine_mode: crate::core::engine::EngineMode::Auto,
                             node_timeout_seconds: yaml_timeout_secs,
                             max_rows_per_node: 0, // unlimited for sub-workflow (parent applies limits)
+                            max_cache_size_mb: 0, // unlimited for sub-workflow
                         };
 
                         match sub_engine.execute_workflow(sub_wf).await {
