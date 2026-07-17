@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod cache;
 pub mod checkpoint;
+pub mod flow_vars;
 pub mod health;
 pub mod datafusion_backend;
 pub mod duckdb_backend;
