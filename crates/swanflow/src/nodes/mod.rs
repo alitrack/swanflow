@@ -291,6 +291,7 @@ pub trait NodeBehavior: Send + Sync {
                 .into_iter()
                 .map(|p| p.schema().clone())
                 .collect(),
+            sample_data: None,
         })
     }
 }
