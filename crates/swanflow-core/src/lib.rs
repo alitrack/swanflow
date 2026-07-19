@@ -11,6 +11,8 @@ pub mod registry;
 pub use error::SwanFlowError;
 pub use graph::{EdgeInstance, ErrorMode, NodeInstance, StepMode, Workflow};
 pub use nodes::{
-    GraphSchemas, InferredMetadata, NodeBehavior, NodeCapability, NodeDiagnostic,
-    NodeErrorClass, NodeEvent, NodeSpec, NodeState, PortSpec,
+    DesignerMetadata, GraphSchemas, InferredMetadata, NodeBehavior, NodeCapability,
+    NodeCategory, NodeDiagnostic, NodeErrorClass, NodeEvent, NodeSpec, NodeState, OptionChoice,
+    OptionDesignMetadata, OptionValueType, PortDesignMetadata, PortSpec, TypedNodeBehavior,
 };
+pub use registry::NodeRegistry;

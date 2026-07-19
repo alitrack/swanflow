@@ -283,6 +283,73 @@ pub trait NodeBehavior: Send + Sync {
     }
 }
 
+/// Typed extension of NodeBehavior with compile-time port-count guarantees.
+///
+/// Unlike the base `NodeBehavior` trait which accepts `Vec<LogicalPlan>`,
+/// `TypedNodeBehavior` enforces fixed input/output port counts at the type
+/// level. The engine can validate arity before proposing plans.
+///
+/// Inspired by FluxFlow's `FlowNode<TIn, TOut>` generics, adapted for
+/// DataFusion's dynamic-schema architecture where type-level Arrow types
+/// are infeasible.
+#[async_trait]
+pub trait TypedNodeBehavior: NodeBehavior {
+    /// Fixed number of input ports.
+    const INPUT_COUNT: usize;
+    /// Fixed number of output ports.
+    const OUTPUT_COUNT: usize;
+
+    /// Validate that the actual input count matches the expected count.
+    fn validate_input_count(actual: usize) -> Result<()> {
+        if actual != Self::INPUT_COUNT {
+            Err(anyhow!(
+                "Node expects {} inputs but received {}",
+                Self::INPUT_COUNT,
+                actual
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Build designer metadata from the node's spec + type-level constants.
+    fn designer_metadata(&self) -> DesignerMetadata {
+        let spec = self.spec();
+        DesignerMetadata {
+            type_id: spec.type_id.clone(),
+            display_name: spec.display_name.clone(),
+            description: spec.description.clone(),
+            category: NodeCategory::Other("uncategorized".into()),
+            icon: None,
+            input_count: Self::INPUT_COUNT,
+            output_count: Self::OUTPUT_COUNT,
+            inputs: spec
+                .input_ports
+                .iter()
+                .map(|p| PortDesignMetadata {
+                    name: p.name.clone(),
+                    description: p.description.clone(),
+                    data_type: DataType::Utf8,
+                })
+                .collect(),
+            outputs: spec
+                .output_ports
+                .iter()
+                .map(|p| PortDesignMetadata {
+                    name: p.name.clone(),
+                    description: p.description.clone(),
+                    data_type: DataType::Utf8,
+                })
+                .collect(),
+            options: vec![],
+            config_schema: spec.config_schema,
+            capability: self.capability(),
+            impl_version: self.impl_version(),
+            config_version: self.config_version(),
+        }
+    }
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Designer Metadata — standalone metadata for visual editor consumption.
 // Separated from NodeBehavior so the editor can enumerate node types
