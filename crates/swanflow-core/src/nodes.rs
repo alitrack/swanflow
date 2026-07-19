@@ -46,11 +46,12 @@ pub enum NodeState {
 /// - `ReadOnly`: transforms data in-memory, no external side effects
 /// - `ReadWrite`: may read from or write to external systems
 /// - `WriteOnly`: sends data out (e.g. email, webhook), no output port
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[non_exhaustive]
 pub enum NodeCapability {
-    ReadOnly,
+    #[default]
     ReadWrite,
+    ReadOnly,
     WriteOnly,
 }
 
@@ -397,7 +398,7 @@ fn default_version() -> u32 {
 
 /// Serde module for DataType ↔ string conversion.
 mod serde_datatype {
-    use datafusion::arrow::datatypes::DataType;
+    use datafusion::arrow::datatypes::{DataType, TimeUnit};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S>(dt: &DataType, serializer: S) -> Result<S::Ok, S::Error>
