@@ -1,12 +1,13 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
 use datafusion::logical_expr::LogicalPlan;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -277,6 +278,150 @@ pub trait NodeBehavior: Send + Sync {
                 .map(|p| p.schema().clone())
                 .collect(),
             sample_data: None,
+        })
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Designer Metadata — standalone metadata for visual editor consumption.
+// Separated from NodeBehavior so the editor can enumerate node types
+// without constructing node instances.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Category for organizing nodes in the visual editor palette.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum NodeCategory {
+    IO,
+    Transform,
+    Analysis,
+    Quality,
+    Script,
+    AI,
+    Flow,
+    Connector,
+    Other(String),
+}
+
+/// Per-option metadata for the visual editor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionDesignMetadata {
+    /// The config key this option maps to.
+    pub key: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Description / help text.
+    pub description: String,
+    /// Expected Arrow type or JSON schema type.
+    pub value_type: OptionValueType,
+    /// Default value (JSON).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<JsonValue>,
+    /// Whether this option is required.
+    #[serde(default)]
+    pub required: bool,
+    /// Valid choices (for enum-style options).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub choices: Vec<OptionChoice>,
+}
+
+/// A valid choice for an option.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionChoice {
+    pub value: String,
+    pub label: String,
+}
+
+/// The type hint for an option value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OptionValueType {
+    String,
+    Integer,
+    Float,
+    Boolean,
+    Json,
+    ColumnRef,
+    Expression,
+    Path,
+    Url,
+    Secret,
+}
+
+/// Per-port metadata for the visual editor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortDesignMetadata {
+    pub name: String,
+    pub description: String,
+    /// Arrow DataType hint (serialized as string).
+    #[serde(with = "serde_datatype")]
+    pub data_type: DataType,
+}
+
+/// Standalone designer metadata for a node type.
+/// This can be constructed without instantiating a NodeBehavior,
+/// enabling the visual editor to enumerate available node types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesignerMetadata {
+    pub type_id: String,
+    pub display_name: String,
+    pub description: String,
+    pub category: NodeCategory,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Number of input ports (fixed for most nodes).
+    pub input_count: usize,
+    /// Number of output ports (fixed for most nodes).
+    pub output_count: usize,
+    pub inputs: Vec<PortDesignMetadata>,
+    pub outputs: Vec<PortDesignMetadata>,
+    pub options: Vec<OptionDesignMetadata>,
+    /// Config JSON schema for validation.
+    pub config_schema: JsonValue,
+    /// Capability hint for safety gating.
+    #[serde(default)]
+    pub capability: NodeCapability,
+    /// Implementation version for migration tracking.
+    #[serde(default = "default_version")]
+    pub impl_version: u32,
+    /// Config schema version.
+    #[serde(default = "default_version")]
+    pub config_version: u32,
+}
+
+fn default_version() -> u32 {
+    1
+}
+
+/// Serde module for DataType ↔ string conversion.
+mod serde_datatype {
+    use datafusion::arrow::datatypes::DataType;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(dt: &DataType, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        format!("{:?}", dt).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DataType, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "Utf8" | "LargeUtf8" => DataType::Utf8,
+            "Int32" => DataType::Int32,
+            "Int64" => DataType::Int64,
+            "Float32" => DataType::Float32,
+            "Float64" => DataType::Float64,
+            "Boolean" => DataType::Boolean,
+            "Date32" => DataType::Date32,
+            "Timestamp(Nanosecond, None)" => DataType::Timestamp(TimeUnit::Nanosecond, None),
+            _ => DataType::Utf8,
         })
     }
 }
