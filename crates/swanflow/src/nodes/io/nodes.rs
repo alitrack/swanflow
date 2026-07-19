@@ -37,7 +37,7 @@ use crate::nodes::connectors::clickhouse::ClickHouseConnector;
 use crate::nodes::connectors::mysql::MySqlConnector;
 use crate::nodes::connectors::postgres::PostgresConnector;
 use crate::nodes::connectors::{ConnConfig, Connector};
-use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec};
+use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec, TypedNodeBehavior};
 
 pub struct DuckDBHelper;
 
