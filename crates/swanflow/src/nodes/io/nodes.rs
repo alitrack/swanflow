@@ -152,6 +152,11 @@ impl NodeBehavior for DuckDBReadNode {
         )])
     }
 }
+impl TypedNodeBehavior for DuckDBReadNode {
+    const INPUT_COUNT: usize = 0;
+    const OUTPUT_COUNT: usize = 1;
+}
+
 
 pub struct DuckDBWriteNode;
 
@@ -192,6 +197,11 @@ impl NodeBehavior for DuckDBWriteNode {
         Ok(inputs)
     }
 }
+impl TypedNodeBehavior for DuckDBWriteNode {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = 0;
+}
+
 
 pub struct HttpFetchNode;
 
@@ -245,6 +255,11 @@ impl NodeBehavior for HttpFetchNode {
         })])
     }
 }
+impl TypedNodeBehavior for HttpFetchNode {
+    const INPUT_COUNT: usize = 0;
+    const OUTPUT_COUNT: usize = 1;
+}
+
 
 pub struct ParquetReadNode;
 
@@ -289,6 +304,11 @@ impl NodeBehavior for ParquetReadNode {
         Ok(vec![df.into_optimized_plan()?])
     }
 }
+impl TypedNodeBehavior for ParquetReadNode {
+    const INPUT_COUNT: usize = 0;
+    const OUTPUT_COUNT: usize = 1;
+}
+
 
 pub struct CsvReadNode;
 
@@ -331,6 +351,11 @@ impl NodeBehavior for CsvReadNode {
         Ok(vec![df.into_optimized_plan()?])
     }
 }
+impl TypedNodeBehavior for CsvReadNode {
+    const INPUT_COUNT: usize = 0;
+    const OUTPUT_COUNT: usize = 1;
+}
+
 
 pub struct UniversalReadNode;
 
@@ -752,6 +777,11 @@ impl NodeBehavior for UniversalReadNode {
         }
     }
 }
+impl TypedNodeBehavior for UniversalReadNode {
+    const INPUT_COUNT: usize = 0;
+    const OUTPUT_COUNT: usize = 1;
+}
+
 
 pub struct DbConnectorNode;
 

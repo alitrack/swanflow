@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
 use crate::nodes::config as cfg;
-use crate::nodes::{NodeBehavior, NodeCapability, NodeSpec, PortSpec};
+use crate::nodes::{NodeBehavior, NodeCapability, NodeSpec, PortSpec, TypedNodeBehavior};
 
 /// Filter rows based on a SQL expression.
 pub struct FilterNode;
@@ -64,6 +64,11 @@ impl NodeBehavior for FilterNode {
             .await?;
         Ok(vec![df.into_optimized_plan()?])
     }
+}
+
+impl TypedNodeBehavior for FilterNode {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = 1;
 }
 
 /// Project/Rename columns using SQL expressions.

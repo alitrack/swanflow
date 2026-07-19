@@ -8,7 +8,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::nodes::config as cfg;
-use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
+use crate::nodes::{NodeBehavior, TypedNodeBehavior, NodeSpec, PortSpec};
 
 #[derive(Debug, Clone)]
 pub struct SqlProxyLogical {
@@ -195,3 +195,9 @@ impl NodeBehavior for SqlNode {
         )])
     }
 }
+
+impl TypedNodeBehavior for SqlNode {
+    const INPUT_COUNT: usize = 1;
+    const OUTPUT_COUNT: usize = 1;
+}
+
