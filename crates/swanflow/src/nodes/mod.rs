@@ -291,7 +291,28 @@ pub trait NodeBehavior: Send + Sync {
                 .into_iter()
                 .map(|p| p.schema().clone())
                 .collect(),
-            sample_data: None,
         })
+    }
+}
+
+/// Typed extension of NodeBehavior with compile-time port-count guarantees.
+#[async_trait]
+pub trait TypedNodeBehavior: NodeBehavior {
+    /// Fixed number of input ports.
+    const INPUT_COUNT: usize;
+    /// Fixed number of output ports.
+    const OUTPUT_COUNT: usize;
+
+    /// Validate that the actual input count matches the expected count.
+    fn validate_input_count(actual: usize) -> Result<()> {
+        if actual != Self::INPUT_COUNT {
+            Err(anyhow!(
+                "Node expects {} inputs but received {}",
+                Self::INPUT_COUNT,
+                actual
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
