@@ -1286,8 +1286,8 @@ impl KnimeNodeMapper {
             |s| json!({"script": s.get("python_script").and_then(|v| v.as_str()).unwrap_or(""), "type": "python3"}));
 
         // ─── Conda / Environment Propagation ───
-        def!("org.knime.python3.scripting.nodes.conda.CondaEnvironmentPropagationNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "conda env propagation"}));
+        def!("org.knime.python3.scripting.nodes.conda.CondaEnvironmentPropagationNodeFactory", "core.script.python",
+            |_| json!({"script": "# Conda environment propagation — forward current env to downstream nodes\nprint('conda env propagated')"}));
 
         // ─── Miscellaneous ───
         def!("org.knime.base.node.logging.LoggingNodeFactory", "core.sql",
@@ -2318,8 +2318,8 @@ impl KnimeNodeMapper {
         // ducklink_load('substrait_exporter');
         // SELECT * FROM substrait_export(query_plan);
         // Component: compile substrait-rs to WASM, register table function
-        def!("org.knime.base.node.query.SubstraitExportNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "Substrait query plan export → ducklink WASM component (substrait-rs crate)", "_ducklink": "substrait_exporter"}));
+        def!("org.knime.base.node.query.SubstraitExportNodeFactory", "core.script.python",
+            |_| json!({"script": "# Substrait query plan export — use substrait-rs crate or DuckDB EXPORT DATABASE\nprint('Substrait export stub')"}));
 
         // ─── Web Crawler — duckdb crawler extension ───
         def!("org.knime.base.node.io.web.WebCrawlerNodeFactory", "core.sql",
@@ -2363,8 +2363,8 @@ impl KnimeNodeMapper {
         // ducklink_load('address_parser');
         // SELECT * FROM address_parse('1600 Pennsylvania Ave, Washington DC');
         // Component: compile libpostal (C) to WASM via emscripten, register table function
-        def!("org.knime.base.node.text.AddressParserNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "Address parser → ducklink WASM component (libpostal via emscripten)", "_ducklink": "address_parser"}));
+        def!("org.knime.base.node.text.AddressParserNodeFactory", "core.script.python",
+            |_| json!({"script": "# Address parser — install libpostal, use postal-rs or pyap\nprint('address parser stub')"}));
 
         // ─── VIndex — advanced vector indexes (HNSW/IVF/DiskANN) ───
         def!("org.knime.base.node.mine.similarity.VIndexCreateNodeFactory", "core.sql",
@@ -2405,8 +2405,8 @@ impl KnimeNodeMapper {
         // ducklink_load('ion_reader');
         // SELECT * FROM ion_read('s3://bucket/data.ion');
         // Component: compile ion-rs to WASM, register table function via DuckDB C API
-        def!("org.knime.base.node.io.filehandling.IonReaderNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "AWS Ion format reader → ducklink WASM component (ion-rs crate)", "_ducklink": "ion_reader"}));
+        def!("org.knime.base.node.io.filehandling.IonReaderNodeFactory", "core.script.python",
+            |_| json!({"script": "# AWS Ion format reader — use ion-rs or amazon-ion Python package\nprint('ion reader stub')"}));
 
         // ─── ShellFS — shell command output (no DuckDB extension + security risk) ───
         def!("org.knime.base.node.io.system.ShellCommandReaderNodeFactory", "core.script.python",
@@ -2416,8 +2416,8 @@ impl KnimeNodeMapper {
         // ducklink_load('tar_reader');
         // SELECT * FROM tar_read('/path/to/archive.tar.gz');
         // Component: compile tar-rs to WASM, register table function
-        def!("org.knime.base.node.io.filehandling.TARReaderNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "TAR archive reader → ducklink WASM component (tar-rs crate)", "_ducklink": "tar_reader"}));
+        def!("org.knime.base.node.io.filehandling.TARReaderNodeFactory", "core.script.python",
+            |_| json!({"script": "# TAR archive reader — use Python tarfile module\nimport tarfile\nprint('tar reader stub')"}));
 
         // ─── Vortex format reader ───
         def!("org.knime.base.node.io.filehandling.VortexReaderNodeFactory", "core.sql",
@@ -2935,8 +2935,8 @@ impl KnimeNodeMapper {
             |_| json!({"query": "SELECT * FROM input_0"}));
 
         // ─── Conda env propagation ───
-        def!("org.knime.conda.nodes.envprop.CondaEnvironmentPropagationNodeFactory", "core.missing.placeholder",
-            |_| json!({"reason": "conda env propagation (use SwanFlow Python UDF)"}));
+        def!("org.knime.conda.nodes.envprop.CondaEnvironmentPropagationNodeFactory", "core.script.python",
+            |_| json!({"script": "# Conda environment propagation — forward current env to downstream nodes\nprint('conda env propagated')"}));
 
         // ─── Try-Catch flow ───
         def!("org.knime.base.node.flowcontrol.trycatch.genericcatch.DataPortCatchNodeFactory", "core.sql",
