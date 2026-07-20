@@ -429,8 +429,7 @@ async fn submit_workflow(
     let cancel = cancel_token.clone();
 
     // Load workflow from KNIME file
-    let archive = swanflow_knime::parser::parse_knwf(path).await?;
-    let core_wf = swanflow_knime::mapper::convert_to_workflow(&archive)?;
+    let core_wf = swanflow_knime::import_knwf(path).await?;
     let workflow_json = serde_json::to_value(&core_wf)?;
     let workflow: Workflow = serde_json::from_value(workflow_json)?;
     let wf_name = workflow.name.clone();
