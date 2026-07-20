@@ -705,7 +705,8 @@ async fn handle_daemon_command(cmd: DaemonCommands) -> anyhow::Result<()> {
             println!("🔄 Starting SwanFlow daemon...");
             println!("   Socket: {}", swanflow::core::engine::daemon::default_socket_path().display());
             println!("   Submit workflows with: swanflow daemon submit <file>");
-            daemon.start().await?;
+            daemon.start().await
+                .map_err(|e| anyhow::anyhow!("Daemon error: {}", e))?;
             Ok(())
         }
         DaemonCommands::Stop { socket } => {
