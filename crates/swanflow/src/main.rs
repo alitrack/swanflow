@@ -17,6 +17,10 @@ use uuid::Uuid;
 #[command(name = "swanflow")]
 #[command(about = "SwanFlow: High-performance Rust-native Data Science Engine", long_about = None)]
 struct Cli {
+    /// Remote host for daemon commands (SSH target, e.g. sa@10.10.10.131)
+    #[arg(short = 'r', long, global = true)]
+    remote: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -691,7 +695,7 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Daemon { command } => {
-            handle_daemon_command(command).await?;
+            handle_daemon_command(command, cli.remote).await?;
         }
     }
 
@@ -702,7 +706,11 @@ async fn main() -> anyhow::Result<()> {
 // Daemon client helper — talk to the SwanFlow daemon over Unix socket
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async fn handle_daemon_command(cmd: DaemonCommands) -> anyhow::Result<()> {
+async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> anyhow::Result<()> {
+    if let Some(ref host) = remote {
+        return handle_remote_daemon(cmd, host).await;
+    }
+
     match cmd {
         DaemonCommands::Start { socket, foreground } => {
             if foreground {
@@ -839,6 +847,75 @@ async fn send_daemon_raw(
     let mut resp = String::new();
     tokio::io::AsyncReadExt::read_to_string(&mut buf_reader, &mut resp).await?;
     Ok(resp.trim().to_string())
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Remote daemon — SSH wrapper (Herdr --remote inspired)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result<()> {
+    use std::process::Command;
+
+    match cmd {
+        DaemonCommands::Start { .. } => {
+            let status = Command::new("ssh").arg(host)
+                .arg("swanflow").arg("daemon").arg("start")
+                .status()?;
+            anyhow::ensure!(status.success(), "Remote daemon start failed");
+        }
+        DaemonCommands::Stop { .. } => {
+            let status = Command::new("ssh").arg(host)
+                .arg("swanflow").arg("daemon").arg("stop")
+                .status()?;
+        }
+        DaemonCommands::Ping { .. } => {
+            run_ssh(host, &["swanflow", "daemon", "ping"])?;
+        }
+        DaemonCommands::List { .. } => {
+            run_ssh(host, &["swanflow", "daemon", "list"])?;
+        }
+        DaemonCommands::Status { workflow_id, .. } => {
+            run_ssh(host, &["swanflow", "daemon", "status", &workflow_id])?;
+        }
+        DaemonCommands::Cancel { workflow_id, .. } => {
+            run_ssh(host, &["swanflow", "daemon", "cancel", &workflow_id])?;
+        }
+        DaemonCommands::Submit { file, .. } => {
+            let fname = file.file_name().and_then(|s| s.to_str()).unwrap_or("workflow.knwf");
+            let remote_path = format!("/tmp/{}", fname);
+            // SCP the file
+            let status = Command::new("scp")
+                .arg(file.to_string_lossy().as_ref())
+                .arg(format!("{}:{}", host, remote_path))
+                .status()?;
+            anyhow::ensure!(status.success(), "SCP upload failed");
+            // Submit on remote
+            run_ssh(host, &["swanflow", "daemon", "submit", &remote_path])?;
+        }
+        DaemonCommands::Attach { workflow_id, .. } => {
+            // Use ssh -t for PTY — live streaming needs terminal
+            let status = Command::new("ssh").arg("-t").arg(host)
+                .arg("swanflow").arg("daemon").arg("attach").arg(&workflow_id)
+                .status()?;
+            anyhow::ensure!(status.success(), "Remote attach failed");
+        }
+    }
+    Ok(())
+}
+
+fn run_ssh(host: &str, args: &[&str]) -> anyhow::Result<()> {
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.arg(host);
+    for a in args { cmd.arg(a); }
+    let output = cmd.output()?;
+    if !output.stdout.is_empty() {
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+    anyhow::ensure!(output.status.success(), "SSH command failed");
+    Ok(())
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
