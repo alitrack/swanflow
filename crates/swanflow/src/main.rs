@@ -10,7 +10,7 @@ use swanflow::mcp::server::McpServer;
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeEvent;
 use swanflow_knime::KnwfParser;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -755,8 +755,9 @@ async fn handle_daemon_command(cmd: DaemonCommands) -> anyhow::Result<()> {
             let pid_path = swanflow::core::engine::daemon::pid_path();
             if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    #[cfg(unix)]
-                    unsafe { libc::kill(pid, libc::SIGTERM); }
+                    let _ = std::process::Command::new("kill")
+                        .arg(pid.to_string())
+                        .output();
                     let _ = std::fs::remove_file(&pid_path);
                 }
             }
