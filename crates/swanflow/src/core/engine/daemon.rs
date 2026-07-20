@@ -429,9 +429,13 @@ async fn submit_workflow(
     let cancel = cancel_token.clone();
 
     // Load workflow from KNIME file
-    let core_wf = swanflow_knime::import_knwf(path).await?;
-    let workflow_json = serde_json::to_value(&core_wf)?;
-    let workflow: Workflow = serde_json::from_value(workflow_json)?;
+    let core_wf = swanflow_knime::import_knwf(path)
+        .await
+        .map_err(|e| format!("Failed to import KNIME workflow: {}", e))?;
+    let workflow_json = serde_json::to_value(&core_wf)
+        .map_err(|e| format!("Serialization error: {}", e))?;
+    let workflow: Workflow = serde_json::from_value(workflow_json)
+        .map_err(|e| format!("Deserialization error: {}", e))?;
     let wf_name = workflow.name.clone();
 
     let node_count = workflow.graph.node_count();
