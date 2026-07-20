@@ -541,7 +541,7 @@ fn node_state_to_string(state: &NodeState) -> String {
 }
 
 async fn write_response(
-    writer: &mut tokio::io::WriteHalf<UnixStream>,
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     resp: &DaemonResponse,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let json = serde_json::to_string(resp)?;
