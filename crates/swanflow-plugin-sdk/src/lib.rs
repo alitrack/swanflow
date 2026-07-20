@@ -1,94 +1,64 @@
-// swanflow-plugin-sdk — build custom SwanFlow nodes as external crates
-//
-// This crate provides the minimum API surface for third-party plugin
-// development. Plugins depend only on `swanflow-plugin-sdk` (not the
-// full `swanflow` crate), keeping compile times low and API surface
-// small.
-//
-// ## Quick start
-// ```ignore
-// use swanflow_plugin_sdk::prelude::*;
-//
-// pub struct MyCustomNode;
-//
-// #[async_trait]
-// impl PluginNode for MyCustomNode {
-//     fn manifest() -> PluginManifest { ... }
-//     fn spec(&self) -> NodeSpec { ... }
-//     // ...
-// }
-//
-// swanflow_plugin_sdk::export_plugin!(MyCustomNode);
-// ```
+//! SwanFlow Plugin SDK
+//!
+//! Build custom node types and register them into the SwanFlow engine.
+//!
+//! ## Quick Start
+//!
+//! ```rust,ignore
+//! use swanflow_plugin_sdk::*;
+//! use swanflow_core::{NodeBehavior, NodeSpec, PortSpec};
+//!
+//! struct MyPlugin;
+//!
+//! impl Plugin for MyPlugin {
+//!     fn name(&self) -> &str { "my-plugin" }
+//!     fn version(&self) -> &str { env!("CARGO_PKG_VERSION") }
+//!
+//!     fn node_types(&self) -> Vec<Box<dyn NodeBehavior>> {
+//!         vec![Box::new(MyCustomNode::default())]
+//!     }
+//! }
+//! ```
+//!
+//! Then register in your SwanFlow config or at engine startup:
+//!
+//! ```rust,ignore
+//! registry.load_plugin(Box::new(MyPlugin));
+//! ```
 
-pub mod manifest;
-pub mod prelude;
-pub mod version;
+pub use swanflow_core::{
+    NodeBehavior, NodeCapability, NodeCategory, NodeSpec, PortSpec,
+    TypedNodeBehavior, DesignerMetadata, InferredMetadata,
+};
 
-pub use manifest::PluginManifest;
-pub use version::{check_compatibility, SwanFlowVersion, VersionReq};
-
-use async_trait::async_trait;
-use swanflow_core::nodes::{NodeBehavior, NodeSpec};
-
-/// The extended trait for plugin nodes.
+/// A SwanFlow plugin that provides custom node types.
 ///
-/// Plugin nodes implement `NodeBehavior` (from swanflow-core) plus
-/// provide a static manifest describing the plugin package.
-#[async_trait]
-pub trait PluginNode: NodeBehavior + Send + Sync + 'static {
-    /// Return the plugin manifest describing this plugin package.
-    fn manifest() -> PluginManifest
-    where
-        Self: Sized;
+/// Implements Herdr-inspired plugin pattern: each plugin is a self-contained
+/// bundle of node types that can be loaded into the engine at runtime.
+pub trait Plugin: Send + Sync {
+    /// Unique plugin identifier (e.g., "my-etl-nodes").
+    fn name(&self) -> &str;
 
-    /// The minimum SwanFlow engine version required by this plugin.
-    fn min_swanflow_version() -> SwanFlowVersion
-    where
-        Self: Sized,
-    {
-        SwanFlowVersion::new(0, 1, 0)
+    /// Semantic version string.
+    fn version(&self) -> &str;
+
+    /// Human-readable description.
+    fn description(&self) -> &str {
+        ""
     }
 
-    /// Create a boxed instance of this plugin node.
-    fn create() -> Box<dyn PluginNode>
-    where
-        Self: Sized + Default,
-    {
-        Box::<Self>::default()
+    /// Node types provided by this plugin. Each `NodeBehavior`
+    /// will be registered in the engine's `NodeRegistry`.
+    fn node_types(&self) -> Vec<Box<dyn NodeBehavior>> {
+        vec![]
     }
 }
 
-/// Macro to export a plugin node type.
-///
-/// Generates the required `#[no_mangle]` entry point that SwanFlow's
-/// plugin loader discovers at runtime.
-///
-/// ## Usage
-/// ```ignore
-/// swanflow_plugin_sdk::export_plugin!(MyAwesomeNode);
-/// ```
-#[macro_export]
-macro_rules! export_plugin {
-    ($plugin_type:ty) => {
-        #[no_mangle]
-        pub extern "C" fn __swanflow_plugin_manifest() -> *const std::ffi::c_char {
-            let manifest = <$plugin_type as $crate::PluginNode>::manifest();
-            let json = serde_json::to_string(&manifest).unwrap_or_default();
-            let c_str = std::ffi::CString::new(json).unwrap_or_default();
-            c_str.into_raw()
-        }
-
-        #[no_mangle]
-        pub extern "C" fn __swanflow_plugin_create() -> *mut dyn $crate::PluginNode {
-            let plugin: Box<dyn $crate::PluginNode> = <$plugin_type as $crate::PluginNode>::create();
-            Box::into_raw(plugin)
-        }
-
-        #[no_mangle]
-        pub extern "C" fn __swanflow_plugin_min_version() -> u64 {
-            let v = <$plugin_type as $crate::PluginNode>::min_swanflow_version();
-            v.to_u64()
-        }
-    };
+/// Metadata about a loaded plugin.
+#[derive(Debug, Clone)]
+pub struct PluginInfo {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub node_count: usize,
 }

@@ -55,6 +55,12 @@ enum Commands {
         command: KnimeCommands,
     },
 
+    /// Plugin management (Herdr-inspired)
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
+    },
+
     /// Daemon mode — start a persistent workflow server (Herdr-inspired)
     Daemon {
         #[command(subcommand)]
@@ -118,6 +124,12 @@ enum ConnectCommands {
         /// Connection name or ID to show
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum PluginCommands {
+    /// List all registered node types (built-in + plugins)
+    List,
 }
 
 #[derive(Subcommand)]
@@ -697,6 +709,16 @@ async fn main() -> anyhow::Result<()> {
         Commands::Daemon { command } => {
             handle_daemon_command(command, cli.remote).await?;
         }
+        Commands::Plugin { command } => match command {
+            PluginCommands::List => {
+                let registry = NodeRegistry::default();
+                let specs = registry.list_specs();
+                println!("📦 SwanFlow Node Registry — {} types\n", specs.len());
+                for spec in &specs {
+                    println!("  {} ({})", spec.type_id, spec.display_name);
+                }
+            }
+        },
     }
 
     Ok(())

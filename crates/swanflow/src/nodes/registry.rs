@@ -36,6 +36,32 @@ impl NodeRegistry {
         self.nodes.values().map(|n| n.spec()).collect()
     }
 
+    /// Load a plugin and register all its node types.
+    /// Returns metadata about the loaded plugin.
+    pub fn load_plugin(&mut self, plugin: Box<dyn swanflow_plugin_sdk::Plugin>) -> swanflow_plugin_sdk::PluginInfo {
+        let name = plugin.name().to_string();
+        let version = plugin.version().to_string();
+        let description = plugin.description().to_string();
+        let mut count = 0;
+
+        for behavior in plugin.node_types() {
+            self.register_node(Arc::from(behavior));
+            count += 1;
+        }
+
+        swanflow_plugin_sdk::PluginInfo {
+            name,
+            version,
+            description,
+            node_count: count,
+        }
+    }
+
+    /// Number of registered node types.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     /// Register all fundamental SwanFlow nodes.
     ///
     /// Note: AI nodes (ConfigWizard, McpNode) are not registered here as they
