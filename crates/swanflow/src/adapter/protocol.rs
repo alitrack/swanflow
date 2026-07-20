@@ -139,7 +139,9 @@ fn serialize_node_state(state: NodeState) -> String {
     match state {
         NodeState::Unconfigured => "unconfigured".to_owned(),
         NodeState::Configured => "configured".to_owned(),
+        NodeState::Pending => "pending".to_owned(),
         NodeState::Running => "running".to_owned(),
+        NodeState::Waiting => "waiting".to_owned(),
         NodeState::Executed => "executed".to_owned(),
         NodeState::Error(message) => format!("error:{message}"),
     }

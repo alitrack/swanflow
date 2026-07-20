@@ -302,8 +302,14 @@ async fn main() -> anyhow::Result<()> {
                         NodeEvent::StateChanged { node_id, state } => {
                             let short_id = &node_id.to_string()[..8];
                             match state {
+                                swanflow::nodes::NodeState::Pending => {
+                                    println!("  ⏳ Node[{}] Pending", short_id)
+                                }
                                 swanflow::nodes::NodeState::Running => {
                                     println!("  ▶  Node[{}] Running", short_id)
+                                }
+                                swanflow::nodes::NodeState::Waiting => {
+                                    println!("  ⏸  Node[{}] Waiting (external I/O)", short_id)
                                 }
                                 swanflow::nodes::NodeState::Executed => {
                                     executed += 1;

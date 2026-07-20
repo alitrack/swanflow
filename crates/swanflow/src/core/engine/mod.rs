@@ -193,6 +193,18 @@ fn should_invoke_self_healing(diagnostic: &NodeDiagnostic) -> bool {
             .contains("missing node implementation")
 }
 
+/// Detect whether a node type performs external I/O — LLM API calls, Python subprocess,
+/// remote DB queries, or MCP tool invocations. These nodes should report `Waiting` while
+/// blocked on external resources (Herdr-inspired state model).
+fn is_external_io_node(node_type: &str) -> bool {
+    node_type.contains("python")
+        || node_type.contains("ai.")
+        || node_type.contains("llm")
+        || node_type.contains("sqlx_scan")
+        || node_type.contains("mcp.")
+        || node_type.contains("wasm")
+}
+
 /// Count completed and in-progress checkpoint runs from the metadata store.
 fn count_checkpoint_runs(cache_dir: &str) -> (usize, usize) {
     let metadata_path = format!("{}/metadata.duckdb", cache_dir);
@@ -395,9 +407,31 @@ impl SwanFlowEngine {
                 if level < resume_from {
                     continue;
                 }
+                // Emit Pending for all nodes in this level (Herdr-inspired state model)
+                for stage_plan in &terminals {
+                    let _ = tx_err.send(NodeEvent::StateChanged {
+                        node_id: stage_plan.node_id,
+                        state: crate::nodes::NodeState::Pending,
+                    });
+                }
                 for stage_plan in terminals {
                     let node_id = stage_plan.node_id;
+                    let node_type = stage_plan.node_type.clone();
                     let logical_plan = stage_plan.plan;
+
+                    // Emit Running transition
+                    let _ = tx_err.send(NodeEvent::StateChanged {
+                        node_id,
+                        state: crate::nodes::NodeState::Running,
+                    });
+
+                    // Emit Waiting for external-I/O nodes
+                    if is_external_io_node(&node_type) {
+                        let _ = tx_err.send(NodeEvent::StateChanged {
+                            node_id,
+                            state: crate::nodes::NodeState::Waiting,
+                        });
+                    }
 
                     // Compile LogicalPlan to SQL
                     let sql = match engine_clone.compile_to_sql(&logical_plan) {
@@ -597,6 +631,14 @@ impl SwanFlowEngine {
                 // 1. Initial Sync for this level
                 sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
 
+                // Emit Pending for all nodes in this level (Herdr-inspired state model)
+                for stage_plan in &terminals {
+                    let _ = tx.send(NodeEvent::StateChanged {
+                        node_id: stage_plan.node_id,
+                        state: crate::nodes::NodeState::Pending,
+                    });
+                }
+
                 // 2. Planning and execution for all terminals at this level
                 for stage_plan in terminals {
                     let node_id = stage_plan.node_id;
@@ -607,6 +649,21 @@ impl SwanFlowEngine {
                         "DEBUG: Stage Execution for level {}, node {}, port {}",
                         level, node_id, port
                     );
+
+                    // Emit Running (StateProbeExec also sends this during stream, but
+                    // emit early here for immediate feedback before planning starts)
+                    let _ = tx.send(NodeEvent::StateChanged {
+                        node_id,
+                        state: crate::nodes::NodeState::Running,
+                    });
+
+                    // Emit Waiting for external-I/O nodes (LLM, Python, remote DB, MCP)
+                    if is_external_io_node(&node_type) {
+                        let _ = tx.send(NodeEvent::StateChanged {
+                            node_id,
+                            state: crate::nodes::NodeState::Waiting,
+                        });
+                    }
 
                     let state = ctx_shared.state();
                     let state = SessionStateBuilder::new_from_existing(state)

@@ -31,12 +31,24 @@ pub struct NodeSpec {
 }
 
 /// Execution state of a node (The "Traffic Lights").
+///
+/// State transitions follow a 5-stage model inspired by agent runtimes:
+///   Configured → Pending → Running → Executed
+///                    ↓           ↓
+///                 Waiting ←──────┘ (external I/O: LLM API, Python, DB)
+///                    ↓
+///                Error(String)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum NodeState {
     Unconfigured,
     Configured,
+    /// Queued in topological order, waiting for upstream nodes to complete.
+    Pending,
+    /// Actively computing — DataFusion/Python/DuckDB execution in progress.
     Running,
+    /// Blocked on an external resource (LLM API call, Python subprocess, remote DB).
+    Waiting,
     Executed,
     Error(String),
 }
