@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use swanflow::core::connection_config::SwanFlowConnection;
@@ -9,6 +10,8 @@ use swanflow::mcp::server::McpServer;
 use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::NodeEvent;
 use swanflow_knime::KnwfParser;
+use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "swanflow")]
@@ -46,6 +49,12 @@ enum Commands {
     Knime {
         #[command(subcommand)]
         command: KnimeCommands,
+    },
+
+    /// Daemon mode — start a persistent workflow server (Herdr-inspired)
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommands,
     },
 }
 
@@ -104,6 +113,53 @@ enum ConnectCommands {
     Show {
         /// Connection name or ID to show
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonCommands {
+    /// Start the SwanFlow daemon (background workflow server)
+    Start {
+        /// Custom socket path (default: ~/.swanflow/daemon.sock)
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Stop a running SwanFlow daemon
+    Stop {
+        /// Custom socket path
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Check daemon health (ping)
+    Ping {
+        /// Custom socket path
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Submit a KNIME workflow to the daemon for background execution
+    Submit {
+        /// Path to KNIME workflow file (.knwf/.knar)
+        file: PathBuf,
+        /// Custom socket path
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// List running workflows
+    List {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Show status of a specific workflow
+    Status {
+        workflow_id: String,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Cancel a running workflow
+    Cancel {
+        workflow_id: String,
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
 }
 
@@ -625,9 +681,106 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Commands::Daemon { command } => {
+            handle_daemon_command(command).await?;
+        }
     }
 
     Ok(())
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Daemon client helper — talk to the SwanFlow daemon over Unix socket
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async fn handle_daemon_command(cmd: DaemonCommands) -> anyhow::Result<()> {
+    match cmd {
+        DaemonCommands::Start { socket } => {
+            let registry = Arc::new(NodeRegistry::default());
+            let engine = SwanFlowEngine::new(registry);
+            let mut daemon = swanflow::core::engine::daemon::Daemon::new(engine);
+            if let Some(path) = socket {
+                daemon = daemon.with_socket_path(path);
+            }
+            println!("🔄 Starting SwanFlow daemon...");
+            println!("   Socket: {}", swanflow::core::engine::daemon::default_socket_path().display());
+            println!("   Submit workflows with: swanflow daemon submit <file>");
+            daemon.start().await?;
+            Ok(())
+        }
+        DaemonCommands::Stop { socket } => {
+            send_daemon_request(&socket, "daemon.stop", serde_json::json!({})).await
+        }
+        DaemonCommands::Ping { socket } => {
+            send_daemon_request(&socket, "daemon.ping", serde_json::json!({})).await
+        }
+        DaemonCommands::Submit { file, socket } => {
+            let path = file.to_string_lossy().to_string();
+            let resp = send_daemon_raw(&socket, "workflow.submit", serde_json::json!({"path": path})).await?;
+            println!("{}", resp);
+            Ok(())
+        }
+        DaemonCommands::List { socket } => {
+            let resp = send_daemon_raw(&socket, "workflow.list", serde_json::json!({})).await?;
+            println!("{}", resp);
+            Ok(())
+        }
+        DaemonCommands::Status { workflow_id, socket } => {
+            let resp = send_daemon_raw(&socket, "workflow.status", serde_json::json!({"workflow_id": workflow_id})).await?;
+            println!("{}", resp);
+            Ok(())
+        }
+        DaemonCommands::Cancel { workflow_id, socket } => {
+            let resp = send_daemon_raw(&socket, "workflow.cancel", serde_json::json!({"workflow_id": workflow_id})).await?;
+            println!("{}", resp);
+            Ok(())
+        }
+    }
+}
+
+async fn send_daemon_request(
+    socket_override: &Option<PathBuf>,
+    method: &str,
+    params: serde_json::Value,
+) -> anyhow::Result<()> {
+    let resp = send_daemon_raw(socket_override, method, params).await?;
+    let v: serde_json::Value = serde_json::from_str(&resp)?;
+    if v.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        println!("✅ {}", method);
+        Ok(())
+    } else {
+        let err = v.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+        anyhow::bail!("❌ {} failed: {}", method, err)
+    }
+}
+
+async fn send_daemon_raw(
+    socket_override: &Option<PathBuf>,
+    method: &str,
+    params: serde_json::Value,
+) -> anyhow::Result<String> {
+    let socket_path = socket_override
+        .clone()
+        .unwrap_or_else(swanflow::core::engine::daemon::default_socket_path);
+
+    let stream = tokio::net::UnixStream::connect(&socket_path).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut buf_reader = tokio::io::BufReader::new(reader);
+
+    let req = serde_json::json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "method": method,
+        "params": params,
+    });
+    writer
+        .write_all(serde_json::to_string(&req)?.as_bytes())
+        .await?;
+    writer.write_all(b"\n").await?;
+    writer.shutdown().await?;
+
+    let mut resp = String::new();
+    tokio::io::AsyncReadExt::read_to_string(&mut buf_reader, &mut resp).await?;
+    Ok(resp.trim().to_string())
 }
 
 fn load_workflow(file: PathBuf) -> anyhow::Result<Workflow> {

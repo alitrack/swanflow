@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod cache;
 pub mod checkpoint;
+pub mod daemon;
 pub mod flow_vars;
 pub mod health;
 pub mod incremental;
