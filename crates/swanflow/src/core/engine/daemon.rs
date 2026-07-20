@@ -146,7 +146,7 @@ impl Daemon {
     }
 
     /// Start the daemon — listens on Unix socket indefinitely.
-    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Ensure parent directory exists
         if let Some(parent) = self.socket_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -178,7 +178,7 @@ async fn handle_client(
     stream: UnixStream,
     engine: Arc<SwanFlowEngine>,
     workflows: Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
@@ -423,7 +423,7 @@ async fn submit_workflow(
     path: &str,
     engine: &Arc<SwanFlowEngine>,
     workflows: &Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
-) -> Result<Uuid, Box<dyn std::error::Error>> {
+) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
     let wf_id = Uuid::new_v4();
     let cancel_token = CancellationToken::new();
     let cancel = cancel_token.clone();
@@ -543,7 +543,7 @@ fn node_state_to_string(state: &NodeState) -> String {
 async fn write_response(
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     resp: &DaemonResponse,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let json = serde_json::to_string(resp)?;
     writer.write_all(json.as_bytes()).await?;
     writer.write_all(b"\n").await?;
