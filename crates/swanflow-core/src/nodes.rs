@@ -505,3 +505,15 @@ mod serde_datatype {
         })
     }
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Plugin System (Herdr-inspired)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// A SwanFlow plugin that provides custom node types.
+pub trait Plugin: Send + Sync {
+    fn name(&self) -> &str;
+    fn version(&self) -> &str;
+    fn description(&self) -> &str { "" }
+    fn node_types(&self) -> Vec<Box<dyn NodeBehavior>> { vec![] }
+}

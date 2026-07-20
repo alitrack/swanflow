@@ -36,25 +36,16 @@ impl NodeRegistry {
         self.nodes.values().map(|n| n.spec()).collect()
     }
 
-    /// Load a plugin and register all its node types.
-    /// Returns metadata about the loaded plugin.
-    pub fn load_plugin(&mut self, plugin: Box<dyn swanflow_plugin_sdk::Plugin>) -> swanflow_plugin_sdk::PluginInfo {
-        let name = plugin.name().to_string();
-        let version = plugin.version().to_string();
-        let description = plugin.description().to_string();
-        let mut count = 0;
-
-        for behavior in plugin.node_types() {
-            self.register_node(Arc::from(behavior));
-            count += 1;
+    /// Register multiple node types at once (plugin-style bulk load).
+    /// Returns count of registered nodes.
+    pub fn load_plugin_nodes(&mut self, name: &str, nodes: Vec<Arc<dyn NodeBehavior>>) -> usize {
+        let count = nodes.len();
+        for behavior in nodes {
+            let type_id = behavior.spec().type_id.clone();
+            self.nodes.insert(type_id, behavior);
         }
-
-        swanflow_plugin_sdk::PluginInfo {
-            name,
-            version,
-            description,
-            node_count: count,
-        }
+        tracing::info!("Plugin '{}' registered {} node types", name, count);
+        count
     }
 
     /// Number of registered node types.
