@@ -123,6 +123,9 @@ enum DaemonCommands {
         /// Custom socket path (default: ~/.swanflow/daemon.sock)
         #[arg(long)]
         socket: Option<PathBuf>,
+        /// Internal: run in foreground (used when forking)
+        #[arg(long, hide = true)]
+        foreground: bool,
     },
     /// Stop a running SwanFlow daemon
     Stop {
@@ -157,6 +160,12 @@ enum DaemonCommands {
     },
     /// Cancel a running workflow
     Cancel {
+        workflow_id: String,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Stream live events from a running workflow (like Herdr agent attach)
+    Attach {
         workflow_id: String,
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -695,22 +704,66 @@ async fn main() -> anyhow::Result<()> {
 
 async fn handle_daemon_command(cmd: DaemonCommands) -> anyhow::Result<()> {
     match cmd {
-        DaemonCommands::Start { socket } => {
-            let registry = Arc::new(NodeRegistry::default());
-            let engine = SwanFlowEngine::new(registry);
-            let mut daemon = swanflow::core::engine::daemon::Daemon::new(engine);
-            if let Some(path) = socket {
-                daemon = daemon.with_socket_path(path);
+        DaemonCommands::Start { socket, foreground } => {
+            if foreground {
+                // Forked child — run daemon in foreground
+                let registry = Arc::new(NodeRegistry::default());
+                let engine = SwanFlowEngine::new(registry);
+                let mut daemon = swanflow::core::engine::daemon::Daemon::new(engine);
+                if let Some(path) = socket {
+                    daemon = daemon.with_socket_path(path);
+                }
+                daemon.start().await
+                    .map_err(|e| anyhow::anyhow!("Daemon error: {}", e))?;
+                return Ok(());
             }
-            println!("🔄 Starting SwanFlow daemon...");
-            println!("   Socket: {}", swanflow::core::engine::daemon::default_socket_path().display());
-            println!("   Submit workflows with: swanflow daemon submit <file>");
-            daemon.start().await
-                .map_err(|e| anyhow::anyhow!("Daemon error: {}", e))?;
+
+            let socket_path = socket.clone()
+                .unwrap_or_else(swanflow::core::engine::daemon::default_socket_path);
+            let pid_path = swanflow::core::engine::daemon::pid_path();
+
+            // Fork to background
+            let exe = std::env::current_exe()?;
+            let mut child = std::process::Command::new(exe)
+                .arg("daemon")
+                .arg("start")
+                .arg("--foreground")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .stdin(std::process::Stdio::null())
+                .spawn()?;
+            let pid = child.id();
+            // Don't wait — let it run
+            std::thread::sleep(std::time::Duration::from_millis(500));
+
+            // Check if daemon is alive
+            match tokio::net::UnixStream::connect(&socket_path).await {
+                Ok(_) => {
+                    println!("✅ SwanFlow daemon started (PID: {})", pid);
+                    println!("   Socket: {}", socket_path.display());
+                    println!("   Submit: swanflow daemon submit <file>");
+                    println!("   Attach: swanflow daemon attach <workflow_id>");
+                }
+                Err(_) => {
+                    println!("⚠ Daemon process started (PID: {}) but not yet ready. Try 'swanflow daemon ping'.", pid);
+                }
+            }
             Ok(())
         }
         DaemonCommands::Stop { socket } => {
-            send_daemon_request(&socket, "daemon.stop", serde_json::json!({})).await
+            // Try to kill by PID first
+            let pid_path = swanflow::core::engine::daemon::pid_path();
+            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    #[cfg(unix)]
+                    unsafe { libc::kill(pid, libc::SIGTERM); }
+                    let _ = std::fs::remove_file(&pid_path);
+                }
+            }
+            // Also try socket stop as fallback
+            let _ = send_daemon_request(&socket, "daemon.stop", serde_json::json!({})).await;
+            println!("🛑 Daemon stopped.");
+            Ok(())
         }
         DaemonCommands::Ping { socket } => {
             send_daemon_request(&socket, "daemon.ping", serde_json::json!({})).await
@@ -735,6 +788,9 @@ async fn handle_daemon_command(cmd: DaemonCommands) -> anyhow::Result<()> {
             let resp = send_daemon_raw(&socket, "workflow.cancel", serde_json::json!({"workflow_id": workflow_id})).await?;
             println!("{}", resp);
             Ok(())
+        }
+        DaemonCommands::Attach { workflow_id, socket } => {
+            attach_workflow(&socket, &workflow_id).await
         }
     }
 }
@@ -782,6 +838,59 @@ async fn send_daemon_raw(
     let mut resp = String::new();
     tokio::io::AsyncReadExt::read_to_string(&mut buf_reader, &mut resp).await?;
     Ok(resp.trim().to_string())
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Workflow attach — stream live events from daemon (Herdr-style)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async fn attach_workflow(socket_override: &Option<PathBuf>, workflow_id: &str) -> anyhow::Result<()> {
+    let socket_path = socket_override
+        .clone()
+        .unwrap_or_else(swanflow::core::engine::daemon::default_socket_path);
+
+    let stream = tokio::net::UnixStream::connect(&socket_path).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+
+    let req = serde_json::json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "method": "workflow.events",
+        "params": {"workflow_id": workflow_id},
+    });
+    writer.write_all(serde_json::to_string(&req)?.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.shutdown().await?;
+
+    println!("📡 Attached to workflow {}. Streaming events...\n", workflow_id);
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() { continue; }
+        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+            let evt_type = event["event"].as_str().unwrap_or("");
+            match evt_type {
+                "workflow.subscribed" => continue,
+                "workflow.status" => {
+                    let name = event["name"].as_str().unwrap_or("");
+                    let state = event["state"].as_str().unwrap_or("");
+                    let done = event["nodes_done"].as_u64().unwrap_or(0);
+                    let total = event["nodes_total"].as_u64().unwrap_or(0);
+                    let errs = event["nodes_error"].as_u64().unwrap_or(0);
+                    let icon = match state { "running" => "▶", "completed" => "✅", "error" => "❌", "cancelled" => "⏹", _ => "·" };
+                    println!("  {} [{}/{}] {} — {} done, {} errors", icon, done, total, name, done, errs);
+                }
+                "workflow.stream_end" => {
+                    println!("\n✅ Workflow stream ended.");
+                    break;
+                }
+                "workflow.not_found" => {
+                    println!("❌ Workflow not found.");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 fn load_workflow(file: PathBuf) -> anyhow::Result<Workflow> {

@@ -32,6 +32,12 @@ pub fn default_socket_path() -> PathBuf {
     PathBuf::from(home).join(".swanflow").join("daemon.sock")
 }
 
+/// PID file path for tracking the daemon process.
+pub fn pid_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".swanflow").join("daemon.pid")
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Protocol types
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -146,6 +152,7 @@ impl Daemon {
     }
 
     /// Start the daemon — listens on Unix socket indefinitely.
+    /// Writes PID to `~/.swanflow/daemon.pid` on startup.
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Ensure parent directory exists
         if let Some(parent) = self.socket_path.parent() {
@@ -153,6 +160,10 @@ impl Daemon {
         }
         // Remove stale socket file
         let _ = tokio::fs::remove_file(&self.socket_path).await;
+
+        // Write PID file
+        let pid = std::process::id();
+        tokio::fs::write(pid_path(), pid.to_string()).await?;
 
         let listener = UnixListener::bind(&self.socket_path)?;
         tracing::info!("SwanFlow daemon listening on {}", self.socket_path.display());
@@ -202,6 +213,29 @@ async fn handle_client(
                 continue;
             }
         };
+
+        // workflow.events — switch to streaming mode
+        if req.method == "workflow.events" {
+            let wf_id = req
+                .params
+                .get("workflow_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok());
+            if let Some(id) = wf_id {
+                stream_workflow_events(&mut writer, id, &workflows).await;
+            } else {
+                let resp = DaemonResponse {
+                    id: req.id.clone(),
+                    ok: Some(false),
+                    error: Some("Missing or invalid workflow_id".to_string()),
+                    workflow_id: None,
+                    workflows: None,
+                    status: None,
+                };
+                let _ = write_response(&mut writer, &resp).await;
+            }
+            return Ok(());
+        }
 
         let resp = handle_method(&req, &engine, &workflows).await;
         let _ = write_response(&mut writer, &resp).await;
@@ -537,6 +571,58 @@ fn node_state_to_string(state: &NodeState) -> String {
         NodeState::Waiting => "waiting".into(),
         NodeState::Executed => "executed".into(),
         NodeState::Error(_) => "error".into(),
+    }
+}
+
+/// Stream live workflow events over a persistent connection.
+/// Sends newline-delimited JSON events every 500ms until the workflow completes.
+async fn stream_workflow_events(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    wf_id: Uuid,
+    workflows: &Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
+) {
+    // Send initial ack
+    let ack = serde_json::json!({"event":"workflow.subscribed","workflow_id":wf_id.to_string()});
+    let _ = writer.write_all(format!("{}\n", ack).as_bytes()).await;
+
+    loop {
+        let done = {
+            let wfs = workflows.lock().await;
+            if let Some(wf) = wfs.get(&wf_id) {
+                let state = wf.state.blocking_lock();
+                let event = serde_json::json!({
+                    "event": "workflow.status",
+                    "workflow_id": wf_id.to_string(),
+                    "name": wf.name,
+                    "state": state.run_state,
+                    "nodes_done": state.nodes_done,
+                    "nodes_error": state.nodes_error,
+                    "nodes_total": state.nodes_total,
+                });
+                let _ = writer
+                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap_or_default()).as_bytes())
+                    .await;
+
+                state.run_state == "completed" || state.run_state == "error" || state.run_state == "cancelled"
+            } else {
+                let event = serde_json::json!({
+                    "event": "workflow.not_found",
+                    "workflow_id": wf_id.to_string(),
+                });
+                let _ = writer
+                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap_or_default()).as_bytes())
+                    .await;
+                true
+            }
+        };
+
+        if done {
+            let done_event = serde_json::json!({"event":"workflow.stream_end","workflow_id":wf_id.to_string()});
+            let _ = writer.write_all(format!("{}\n", done_event).as_bytes()).await;
+            break;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 
