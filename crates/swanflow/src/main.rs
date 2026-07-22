@@ -771,8 +771,8 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
 
             // Fork to background
             let exe = std::env::current_exe()?;
-            let mut child = std::process::Command::new(exe)
-                .arg("daemon")
+            let mut child = std::process::Command::new(exe);
+            child.arg("daemon")
                 .arg("start")
                 .arg("--foreground")
                 .stdout(std::process::Stdio::null())
