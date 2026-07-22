@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -131,10 +132,37 @@ struct WorkflowRunState {
 // Daemon
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+/// Configuration for the Quack server embedded in the daemon.
+#[derive(Clone)]
+pub struct QuackConfig {
+    /// Host:port to bind (e.g. "0.0.0.0:9494")
+    pub bind: String,
+    /// Auth token (clients must present this to connect)
+    pub token: String,
+    /// Path to the persistent DuckDB database file backing the Quack server
+    pub db_path: String,
+}
+
+impl Default for QuackConfig {
+    fn default() -> Self {
+        Self {
+            bind: "localhost:9494".into(),
+            token: Uuid::new_v4().to_string(),
+            db_path: default_db_path().to_string_lossy().to_string(),
+        }
+    }
+}
+
+fn default_db_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".swanflow").join("quack_server.duckdb")
+}
+
 pub struct Daemon {
     socket_path: PathBuf,
     engine: Arc<SwanFlowEngine>,
     workflows: Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
+    quack_config: Option<QuackConfig>,
 }
 
 impl Daemon {
@@ -143,6 +171,7 @@ impl Daemon {
             socket_path: default_socket_path(),
             engine: Arc::new(engine),
             workflows: Arc::new(Mutex::new(HashMap::new())),
+            quack_config: None,
         }
     }
 
@@ -151,7 +180,14 @@ impl Daemon {
         self
     }
 
+    /// Enable the embedded Quack server so any DuckDB client can ATTACH.
+    pub fn with_quack(mut self, config: QuackConfig) -> Self {
+        self.quack_config = Some(config);
+        self
+    }
+
     /// Start the daemon — listens on Unix socket indefinitely.
+    /// Optionally starts an embedded Quack server for DuckDB client access.
     /// Writes PID to `~/.swanflow/daemon.pid` on startup.
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Ensure parent directory exists
@@ -164,6 +200,29 @@ impl Daemon {
         // Write PID file
         let pid = std::process::id();
         tokio::fs::write(pid_path(), pid.to_string()).await?;
+
+        // ── Start embedded Quack server ──
+        if let Some(ref qc) = self.quack_config {
+            let bind = qc.bind.clone();
+            let token = qc.token.clone();
+            let db_path = qc.db_path.clone();
+            std::thread::spawn(move || {
+                // Use a dedicated DuckDB connection for the Quack server
+                if let Ok(db) = duckdb::Connection::open(&db_path) {
+                    if db.execute_batch("INSTALL quack; LOAD quack;").is_ok() {
+                        tracing::info!("Quack server starting on {} (db: {})", bind, db_path);
+                        let _ = db.execute_batch(&format!(
+                            "CALL quack_serve('quack:{}', token => '{}');",
+                            bind, token
+                        ));
+                    } else {
+                        tracing::error!("Failed to load quack extension");
+                    }
+                } else {
+                    tracing::error!("Failed to open Quack db: {}", db_path);
+                }
+            });
+        }
 
         let listener = UnixListener::bind(&self.socket_path)?;
         tracing::info!("SwanFlow daemon listening on {}", self.socket_path.display());
