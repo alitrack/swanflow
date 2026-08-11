@@ -82,6 +82,7 @@ impl NodeRegistry {
             ExcelReportNode, ExcelSheetNamesNode, ExcelTemplateNode, ExcelWriteNode,
             GraphIndexWriterNode, HttpFetchNode, ParquetReadNode, UniversalReadNode,
         };
+        use crate::nodes::luajit::LuaJitNode;
         use crate::nodes::mcp::McpToolNode;
         use crate::nodes::quality::{
             NullCheckNode, RowCountAssertNode, SchemaAssertNode, UniquenessCheckNode,
@@ -98,6 +99,22 @@ impl NodeRegistry {
         use crate::nodes::wasm::WasmNode;
 
         self.register_node(Arc::new(SqlNode));
+        self.register_node(Arc::new(LuaJitNode));
+
+        // Auto-register duckdb-luajit-libs as canvas nodes ("self-evolution"):
+        // every lib in the INDEX becomes a luajit.<lib> node the agent can add
+        // directly. Missing INDEX is fine — just the generic shell node remains.
+        if let Some(index_path) = crate::nodes::luajit::default_luajit_libs_index() {
+            let libs = crate::nodes::luajit::luajit_libs_from_index(&index_path);
+            for lib in libs {
+                self.register_node(Arc::new(lib));
+            }
+            tracing::info!(
+                "Auto-registered {} luajit lib nodes from {}",
+                self.nodes.len().saturating_sub(1),
+                index_path
+            );
+        }
         self.register_node(Arc::new(CsvReadNode));
         self.register_node(Arc::new(ParquetReadNode));
         self.register_node(Arc::new(UniversalReadNode));
