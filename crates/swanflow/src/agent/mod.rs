@@ -40,6 +40,14 @@ struct AddNodeArguments {
     pub config: JsonValue,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CreateLuaLibArguments {
+    pub lib_name: String,
+    pub source: String,
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // New: AgentTool enum for internal dispatch
 // ---------------------------------------------------------------------------
@@ -66,6 +74,14 @@ pub enum AgentTool {
     },
     /// Infer schema/metadata for the current workflow.
     InferMetadata {},
+    /// Self-evolution: write a new Lua library into duckdb-luajit-libs and
+    /// register it in the INDEX so it becomes a luajit.<name> canvas node.
+    CreateLuaLib {
+        lib_name: String,
+        source: String,
+        #[serde(default)]
+        category: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +230,13 @@ AVAILABLE TOOLS (output as JSON array in the "tool_calls" field):
 5. infer_metadata {{}}
    - Ask the engine to infer schema metadata for the current workflow (for validation).
 
+6. create_lua_lib {{ "lib_name": "...", "source": "<lua code>", "category": "udf|parser|datasource|network|ffi|etl|export|mcp" }}
+   - SELF-EVOLUTION: write a NEW Lua library into duckdb-luajit-libs and register it in the INDEX.
+   - Use this when no existing node type expresses what you need (new parser, new UDF, new data source).
+   - After creation, use it immediately via core.luajit with mode/table + source='<lib_name>',
+     or restart to get a dedicated luajit.<lib_name> node.
+   - The lib runs in the luajit extension's trusted sandbox; io/os/ffi need explicit approval.
+
 REGISTERED NODE TYPES:
 {}
 
@@ -286,6 +309,11 @@ OUTPUT FORMAT — respond with a JSON object:
                     // No-op at apply time; the run_analysis loop handles this
                     println!("[Agent] InferMetadata requested by LLM");
                 }
+                "create_lua_lib" => {
+                    let args: CreateLuaLibArguments = serde_json::from_value(call.arguments.clone())
+                        .context("invalid create_lua_lib arguments")?;
+                    self.create_lua_lib(&args.lib_name, &args.source, args.category.as_deref())?;
+                }
                 other => {
                     println!("[Agent] Unknown tool call: {}", other);
                 }
@@ -295,6 +323,86 @@ OUTPUT FORMAT — respond with a JSON object:
     }
 
     // ── Tool implementations ───────────────────────────────────────────
+
+    /// Self-evolution: write a new Lua library into the duckdb-luajit-libs
+    /// repo and register it in the INDEX. After this, the lib can be used via
+    /// the generic `core.luajit` node immediately, and (on next startup) a
+    /// dedicated `luajit.<name>` node is auto-registered.
+    ///
+    /// Write location priority:
+    /// 1. `SWANFLOW_LUAJIT_LIBS_DIR` — explicit libs repo root
+    /// 2. local dev clone `/mnt/d/wsl2/duckdb-luajit-libs`
+    /// 3. `~/.duckdb/luajit-libs` — extension offline cache (INDEX-less write)
+    fn create_lua_lib(
+        &self,
+        lib_name: &str,
+        source: &str,
+        category: Option<&str>,
+    ) -> Result<()> {
+        // Sanitize lib name: ascii alnum + underscore (like sigil's tool names).
+        let clean: String = lib_name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let clean = clean.trim_matches('_');
+        if clean.is_empty() {
+            anyhow::bail!("lib_name must contain at least one alphanumeric character");
+        }
+        if source.trim().is_empty() {
+            anyhow::bail!("source must not be empty");
+        }
+
+        // Resolve the libs repo root.
+        let root: std::path::PathBuf = if let Ok(dir) = std::env::var("SWANFLOW_LUAJIT_LIBS_DIR") {
+            if !dir.is_empty() {
+                std::path::PathBuf::from(dir)
+            } else {
+                resolve_libs_root()?
+            }
+        } else {
+            resolve_libs_root()?
+        };
+
+        let cat = category.unwrap_or("udf");
+        let dir = root.join("libs").join(cat);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create libs/{cat} dir"))?;
+        let file_path = dir.join(format!("{clean}.lua"));
+        std::fs::write(&file_path, source)
+            .with_context(|| format!("failed to write {}", file_path.display()))?;
+
+        // Update INDEX (name|path, append if not present).
+        let index_path = root.join("INDEX");
+        if index_path.exists() {
+            let index = std::fs::read_to_string(&index_path)?;
+            let entry = format!("{clean}|libs/{cat}/{clean}.lua");
+            if !index.lines().any(|l| l.trim().starts_with(&format!("{clean}|"))) {
+                let mut updated = index.trim_end().to_string();
+                updated.push('\n');
+                updated.push_str(&entry);
+                updated.push('\n');
+                std::fs::write(&index_path, updated)
+                    .with_context(|| format!("failed to update {}", index_path.display()))?;
+            }
+        } else {
+            // No INDEX yet (offline cache): write one.
+            std::fs::write(&index_path, format!("{clean}|libs/{cat}/{clean}.lua\n"))?;
+        }
+
+        println!(
+            "[Agent] create_lua_lib: wrote {} (category={cat}), INDEX updated. \
+             Use it now via core.luajit with source='{clean}', or restart to get \
+             a dedicated luajit.{clean} node.",
+            file_path.display()
+        );
+        Ok(())
+    }
 
     /// Macro Planner: generate a complete YAML workflow from natural language.
     async fn generate_workflow_yaml(
@@ -501,5 +609,82 @@ Description: {}
         }
 
         Ok(workflow)
+    }
+}
+
+/// Resolve the duckdb-luajit-libs repo root for `create_lua_lib` writes.
+/// Priority: env var > dev clone > extension offline cache dir.
+fn resolve_libs_root() -> Result<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("SWANFLOW_LUAJIT_LIBS_DIR") {
+        if !dir.is_empty() {
+            return Ok(std::path::PathBuf::from(dir));
+        }
+    }
+    const CANDIDATES: &[&str] = &[
+        "/mnt/d/wsl2/duckdb-luajit-libs",
+        "/home/lhy/.duckdb/luajit-libs",
+    ];
+    for c in CANDIDATES {
+        if std::path::Path::new(c).exists() {
+            return Ok(std::path::PathBuf::from(c));
+        }
+    }
+    anyhow::bail!(
+        "no duckdb-luajit-libs root found (checked {}); set SWANFLOW_LUAJIT_LIBS_DIR",
+        CANDIDATES.join(", ")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_lua_lib_sanitizes_name_and_writes() {
+        let tmp = std::env::temp_dir().join("swanflow_agent_lib_test");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("INDEX"), "base64|libs/udf/base64.lua\n").unwrap();
+
+        // Use the module-level resolver via env override.
+        std::env::set_var("SWANFLOW_LUAJIT_LIBS_DIR", tmp.to_str().unwrap());
+        struct StubProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for StubProvider {
+            async fn complete(&self, _prompt: &str) -> Result<String> {
+                Ok("{}".into())
+            }
+        }
+        let agent = AnalystAgent {
+            provider: Arc::new(StubProvider),
+            registry: Arc::new(NodeRegistry::new()),
+            engine: Arc::new(SwanFlowEngine::new(Arc::new(NodeRegistry::new()))),
+        };
+        agent
+            .create_lua_lib("my cool-lib", "return function(x) return x end", Some("udf"))
+            .unwrap();
+
+        // File written at libs/udf/my_cool_lib.lua
+        let file = tmp.join("libs/udf/my_cool_lib.lua");
+        assert!(file.exists(), "lib file should exist");
+        assert!(
+            std::fs::read_to_string(&file).unwrap().contains("return function"),
+            "source content should be preserved"
+        );
+        // INDEX updated
+        let index = std::fs::read_to_string(tmp.join("INDEX")).unwrap();
+        assert!(index.contains("my_cool_lib|libs/udf/my_cool_lib.lua"));
+        // no duplicate on second write
+        agent
+            .create_lua_lib("my_cool_lib", "return 1", Some("udf"))
+            .unwrap();
+        let index2 = std::fs::read_to_string(tmp.join("INDEX")).unwrap();
+        assert_eq!(
+            index2.matches("my_cool_lib|").count(),
+            1,
+            "INDEX should not duplicate entries"
+        );
+
+        std::env::remove_var("SWANFLOW_LUAJIT_LIBS_DIR");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }
