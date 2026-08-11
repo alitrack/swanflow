@@ -1246,7 +1246,8 @@ impl SwanFlowEngine {
                 .await;
             }
 
-            // Execute children in parallel
+            // Execute children in parallel, honoring each child's error_mode
+            // (elastic fan-out, borrowed from Forge research #2026081102).
             let mut handles = Vec::new();
             for child in &children {
                 let child_ctx = ctx.clone();
@@ -1264,28 +1265,105 @@ impl SwanFlowEngine {
                 let mut child_step_context = step_context.clone();
 
                 handles.push(tokio::spawn(async move {
-                    Self::compile_and_execute_node(
-                        &child_node,
-                        &child_workflow,
-                        child_idx,
-                        &mut child_step_context,
-                        &child_ctx,
-                        &child_cache,
-                        &child_registry,
-                        &child_tx,
-                        &child_hook,
-                    )
-                    .await
+                    // Execute once, or retry up to max_retries when the
+                    // child's error_mode is Retry (matches the single-node
+                    // retry loop semantics).
+                    let result = match &child_node.error_mode {
+                        crate::core::graph::ErrorMode::Retry(max_retries) => {
+                            let mut last_err: Option<anyhow::Error> = None;
+                            let mut ok_output: Option<String> = None;
+                            for attempt in 1..=*max_retries {
+                                println!(
+                                    "DEBUG: Retrying node {} (attempt {}/{})",
+                                    child_node.id, attempt, max_retries
+                                );
+                                match Self::compile_and_execute_node(
+                                    &child_node,
+                                    &child_workflow,
+                                    child_idx,
+                                    &mut child_step_context,
+                                    &child_ctx,
+                                    &child_cache,
+                                    &child_registry,
+                                    &child_tx,
+                                    &child_hook,
+                                )
+                                .await
+                                {
+                                    Ok(out) => {
+                                        ok_output = Some(out);
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        last_err = Some(anyhow::Error::from(e));
+                                    }
+                                }
+                            }
+                            match ok_output {
+                                Some(out) => Ok(out),
+                                None => Err(last_err
+                                    .unwrap_or_else(|| anyhow::anyhow!("retries exhausted"))),
+                            }
+                        }
+                        _ => Self::compile_and_execute_node(
+                            &child_node,
+                            &child_workflow,
+                            child_idx,
+                            &mut child_step_context,
+                            &child_ctx,
+                            &child_cache,
+                            &child_registry,
+                            &child_tx,
+                            &child_hook,
+                        )
+                        .await
+                        .map_err(anyhow::Error::from),
+                    };
+                    let outcome = classify_child_outcome(&child_node.error_mode, result, false);
+                    (child_node.id, outcome)
                 }));
             }
 
             let mut outputs = Vec::new();
+            let mut hard_errors: Vec<String> = Vec::new();
             for handle in handles {
                 match handle.await {
-                    Ok(Ok(output)) => outputs.push(output),
-                    Ok(Err(e)) => outputs.push(format!("Error: {}", e)),
-                    Err(e) => outputs.push(format!("JoinError: {}", e)),
+                    Ok((child_id, outcome)) => {
+                        aggregate_child_outcome(
+                            &mut outputs,
+                            &mut hard_errors,
+                            &tx,
+                            child_id,
+                            outcome,
+                        );
+                    }
+                    Err(join_err) => {
+                        // Panicked child task: always a hard error (R4).
+                        let outcome = classify_child_outcome(
+                            &crate::core::graph::ErrorMode::Fail,
+                            Err(anyhow::anyhow!("{}", join_err)),
+                            true,
+                        );
+                        if let ChildOutcome::HardError(msg) = outcome {
+                            hard_errors.push(msg);
+                        }
+                    }
                 }
+            }
+
+            if !hard_errors.is_empty() {
+                let _ = tx.send(NodeEvent::StateChanged {
+                    node_id: node.id,
+                    state: crate::nodes::NodeState::Error(format!(
+                        "fan-out step failed: {}",
+                        hard_errors.join("; ")
+                    )),
+                });
+                return Err(datafusion::error::DataFusionError::Plan(format!(
+                    "fan-out step {} failed: {}",
+                    node.id,
+                    hard_errors.join("; ")
+                )));
             }
 
             // Collect mode: if there's a subsequent collect node, it will be processed separately
@@ -1509,6 +1587,187 @@ impl SwanFlowEngine {
         }
 
         Ok(text_output)
+    }
+}
+
+/// Outcome of a single fan-out child task, classified by the child's
+/// `error_mode` (borrowed from Forge's elastic fan-out semantics,
+/// research #2026081102 — see ADR-013).
+#[derive(Debug, Clone, PartialEq)]
+enum ChildOutcome {
+    /// Child succeeded; holds its output.
+    Ok(String),
+    /// Child failed but policy is Skip — execution continues, the error
+    /// string is embedded in the joined output. A `NodeEvent::Error`
+    /// must be emitted by the caller.
+    ContinueWithError(String),
+    /// Child failed under Fail policy, retries exhausted, or the task
+    /// panicked (join error). The fan-out step must fail.
+    HardError(String),
+}
+
+/// Classify a child task result against the child's error mode.
+///
+/// `is_join_error` marks a tokio join failure (panicked task) — always a
+/// hard error regardless of policy (R4).
+fn classify_child_outcome(
+    error_mode: &crate::core::graph::ErrorMode,
+    result: anyhow::Result<String>,
+    is_join_error: bool,
+) -> ChildOutcome {
+    if is_join_error {
+        return match result {
+            Ok(_) => ChildOutcome::HardError("fan-out child task panicked".to_string()),
+            Err(e) => ChildOutcome::HardError(format!("JoinError: {}", e)),
+        };
+    }
+    match (error_mode, result) {
+        (_, Ok(output)) => ChildOutcome::Ok(output),
+        // Retry policy reaching classification means retries were
+        // exhausted → falls back to Fail (matches single-node path).
+        (crate::core::graph::ErrorMode::Retry(_), Err(e))
+        | (crate::core::graph::ErrorMode::Fail, Err(e)) => {
+            ChildOutcome::HardError(e.to_string())
+        }
+        (crate::core::graph::ErrorMode::Skip, Err(e)) => {
+            ChildOutcome::ContinueWithError(format!("Error: {}", e))
+        }
+    }
+}
+
+/// Fold one child outcome into the fan-out aggregates. Emits
+/// `NodeEvent::Error` for failed children (both Skip and Fail policies),
+/// so failures are always observable (Forge principle: log loudly).
+fn aggregate_child_outcome(
+    outputs: &mut Vec<String>,
+    hard_errors: &mut Vec<String>,
+    tx: &mpsc::UnboundedSender<NodeEvent>,
+    child_id: uuid::Uuid,
+    outcome: ChildOutcome,
+) {
+    match outcome {
+        ChildOutcome::Ok(output) => outputs.push(output),
+        ChildOutcome::ContinueWithError(msg) => {
+            let _ = tx.send(NodeEvent::Error {
+                node_id: child_id,
+                message: msg.clone(),
+            });
+            outputs.push(msg);
+        }
+        ChildOutcome::HardError(msg) => {
+            let _ = tx.send(NodeEvent::Error {
+                node_id: child_id,
+                message: msg.clone(),
+            });
+            hard_errors.push(msg);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::graph::ErrorMode;
+
+    fn err_msg() -> anyhow::Error {
+        anyhow::anyhow!("boom")
+    }
+
+    #[test]
+    fn ok_result_is_ok_for_all_policies() {
+        for mode in [
+            ErrorMode::Fail,
+            ErrorMode::Skip,
+            ErrorMode::Retry(3),
+        ] {
+            assert_eq!(
+                classify_child_outcome(&mode, Ok("data".to_string()), false),
+                ChildOutcome::Ok("data".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn fail_policy_hard_errors() {
+        let outcome = classify_child_outcome(&ErrorMode::Fail, Err(err_msg()), false);
+        assert!(matches!(outcome, ChildOutcome::HardError(m) if m == "boom"));
+    }
+
+    #[test]
+    fn skip_policy_continues_with_error() {
+        let outcome = classify_child_outcome(&ErrorMode::Skip, Err(err_msg()), false);
+        assert!(matches!(outcome, ChildOutcome::ContinueWithError(m) if m == "Error: boom"));
+    }
+
+    #[test]
+    fn retry_exhausted_falls_back_to_fail() {
+        let outcome = classify_child_outcome(&ErrorMode::Retry(2), Err(err_msg()), false);
+        assert!(matches!(outcome, ChildOutcome::HardError(m) if m == "boom"));
+    }
+
+    #[test]
+    fn join_error_always_hard() {
+        for mode in [ErrorMode::Fail, ErrorMode::Skip, ErrorMode::Retry(1)] {
+            let outcome = classify_child_outcome(&mode, Err(err_msg()), true);
+            assert!(
+                matches!(outcome, ChildOutcome::HardError(m) if m.contains("JoinError")),
+                "mode {:?} should hard-fail on join error",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_ok_and_skip_push_outputs_emit_error_event() {
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::nodes::NodeEvent>();
+        let mut outputs = Vec::new();
+        let mut hard_errors = Vec::new();
+        let id_ok = uuid::Uuid::new_v4();
+        let id_skip = uuid::Uuid::new_v4();
+
+        aggregate_child_outcome(
+            &mut outputs,
+            &mut hard_errors,
+            &tx,
+            id_ok,
+            ChildOutcome::Ok("good".to_string()),
+        );
+        aggregate_child_outcome(
+            &mut outputs,
+            &mut hard_errors,
+            &tx,
+            id_skip,
+            ChildOutcome::ContinueWithError("Error: boom".to_string()),
+        );
+
+        assert_eq!(outputs, vec!["good", "Error: boom"]);
+        assert!(hard_errors.is_empty());
+        // Skip failure must still be observable via the event bus.
+        let evt = rx.try_recv().expect("error event for skipped child");
+        assert!(matches!(evt, crate::nodes::NodeEvent::Error { node_id, .. } if node_id == id_skip));
+    }
+
+    #[test]
+    fn aggregate_hard_error_collects_and_emits() {
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::nodes::NodeEvent>();
+        let mut outputs = Vec::new();
+        let mut hard_errors = Vec::new();
+        let id_fail = uuid::Uuid::new_v4();
+
+        aggregate_child_outcome(
+            &mut outputs,
+            &mut hard_errors,
+            &tx,
+            id_fail,
+            ChildOutcome::HardError("boom".to_string()),
+        );
+
+        assert!(outputs.is_empty());
+        assert_eq!(hard_errors, vec!["boom"]);
+        let evt = rx.try_recv().expect("error event for failed child");
+        assert!(matches!(evt, crate::nodes::NodeEvent::Error { node_id, .. } if node_id == id_fail));
     }
 }
 
