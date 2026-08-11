@@ -32,15 +32,20 @@ pub struct NodeSpec {
 
 /// Execution state of a node (The "Traffic Lights").
 ///
-/// State transitions follow a 5-stage model inspired by agent runtimes:
-///   Configured → Pending → Running → Executed
-///                    ↓           ↓
-///                 Waiting ←──────┘ (external I/O: LLM API, Python, DB)
-///                    ↓
-///                Error(String)
+/// State transitions follow a 7-stage model:
+///   Provisioning → Configured → Pending → Running → Executed
+///                      ↓           ↓           ↓
+///                   Waiting ←──────┘     Stopped(by user)
+///                      ↓
+///                  Error(String)
+///
+/// Inspired by Feldera's PipelineExecutor lifecycle (provision→start→run→stop)
+/// and ArkFlow's stream state management.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum NodeState {
+    /// Resources are being acquired (DB connections, file handles) — per Feldera
+    Provisioning,
     Unconfigured,
     Configured,
     /// Queued in topological order, waiting for upstream nodes to complete.
@@ -50,6 +55,8 @@ pub enum NodeState {
     /// Blocked on an external resource (LLM API call, Python subprocess, remote DB).
     Waiting,
     Executed,
+    /// User-initiated stop, node is paused and can be resumed.
+    Stopped,
     Error(String),
 }
 

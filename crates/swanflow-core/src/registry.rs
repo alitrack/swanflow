@@ -155,3 +155,20 @@ impl Default for NodeRegistry {
         Self::new()
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Meta column conventions — per ArkFlow's __meta_* pattern
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Standard metadata column names injected by the engine into every output.
+/// Enables SQL-level data lineage and debugging without polluting user columns.
+pub mod meta {
+    /// The node id that produced this row.
+    pub const SOURCE: &str = "__meta_source";
+    /// Row number within the node's output.
+    pub const ROW: &str = "__meta_row";
+    /// Timestamp when this row was computed.
+    pub const TIMESTAMP: &str = "__meta_timestamp";
+    /// Input partition that produced this row (streaming sources).
+    pub const PARTITION: &str = "__meta_partition";
+}
