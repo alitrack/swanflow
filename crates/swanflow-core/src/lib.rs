@@ -6,6 +6,7 @@ pub mod kernel;
 pub mod missing;
 pub mod nodes;
 pub mod registry;
+pub mod validation;
 
 // Re-export commonly used types
 pub use error::SwanFlowError;
@@ -16,3 +17,4 @@ pub use nodes::{
     OptionDesignMetadata, OptionValueType, Plugin, PortDesignMetadata, PortSpec, TypedNodeBehavior,
 };
 pub use registry::NodeRegistry;
+pub use validation::SchemaValidator;
