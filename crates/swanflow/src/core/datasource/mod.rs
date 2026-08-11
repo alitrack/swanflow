@@ -492,13 +492,26 @@ impl ExecutionPlan for DuckDBScanExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let conn = duckdb::Connection::open(&self.connection_path)
+        // allow_unsigned_extensions so locally-built extensions (e.g. luajit)
+        // can be LOADed by absolute path; registry extensions are unaffected.
+        let config = duckdb::Config::default()
+            .allow_unsigned_extensions()
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        let conn = duckdb::Connection::open_with_flags(&self.connection_path, config)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
         for ext in &self.extensions {
-            conn.execute(&format!("INSTALL {};", ext), []).ok();
-            conn.execute(&format!("LOAD {};", ext), [])
-                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            // Absolute paths (or bare .duckdb_extension paths) are LOADed
+            // directly — they're local unsigned builds, INSTALL would fail.
+            // Bare names go through INSTALL + LOAD (registry extensions).
+            if ext.contains('/') || ext.contains('\\') || ext.ends_with(".duckdb_extension") {
+                conn.execute(&format!("LOAD '{}';", ext), [])
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            } else {
+                conn.execute(&format!("INSTALL {};", ext), []).ok();
+                conn.execute(&format!("LOAD {};", ext), [])
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            }
         }
 
         if let Some(ref attach) = self.attach_sql {

@@ -7,7 +7,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit}
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{Result, ScalarValue};
 use datafusion::logical_expr::LogicalPlan;
-use duckdb::Connection;
+use duckdb::{Config, Connection};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -40,8 +40,28 @@ impl DuckDBEngine {
     /// Open or create a DuckDB database at the given path.
     /// Use `":memory:"` for an in-memory database.
     pub fn open(db_path: &str) -> Result<Self> {
-        let conn = Connection::open(db_path)
+        // allow_unsigned_extensions is required to LOAD locally-built (unsigned)
+        // extensions such as the luajit UDF extension. Signed extensions from
+        // the official/community registries are unaffected.
+        let config = Config::default().allow_unsigned_extensions().map_err(|e| {
+            datafusion::error::DataFusionError::External(Box::new(e))
+        })?;
+        let conn = Connection::open_with_flags(db_path, config)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+
+        // Optional: load extra DuckDB extensions listed in SWANFLOW_DUCKDB_EXTENSIONS
+        // (comma-separated paths). Missing files are warned, not fatal — this must
+        // never break workflows that don't use extensions.
+        if let Ok(exts) = std::env::var("SWANFLOW_DUCKDB_EXTENSIONS") {
+            for ext in exts.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                match conn.execute_batch(&format!("LOAD '{ext}'")) {
+                    Ok(()) => eprintln!("[duckdb] loaded extension: {ext}"),
+                    Err(e) => eprintln!(
+                        "[duckdb] WARNING: failed to load extension '{ext}': {e}"
+                    ),
+                }
+            }
+        }
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -194,35 +214,52 @@ impl QueryEngine for DuckDBEngine {
             .prepare(sql)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
+        // Execute first, THEN read column metadata. The duckdb crate's
+        // column_count()/schema() panic if the query hasn't been executed
+        // ("The statement was not executed yet") — the C API has no way to
+        // get column counts without executing. Streaming table functions
+        // (e.g. the luajit extension's luajit_table) hit this even for
+        // ordinary SELECTs.
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        // schema() is available after query() — yields the duckdb crate's
+        // Arrow schema (arrow-58). We map its fields to our own DataType
+        // via the string bridge below (arrow-57 / datafusion 52).
+        let duck_schema = rows
+            .as_ref()
+            .expect("statement reference after query")
+            .schema();
+
         // Build schema from column info
-        let col_count = stmt.column_count();
+        let col_count = duck_schema.fields().len();
         let duckdb_to_arrow = |col_type: &str| -> DataType {
             match col_type.to_uppercase().as_str() {
                 "BOOLEAN" => DataType::Boolean,
-                "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" => DataType::Int64,
-                "FLOAT" | "DOUBLE" | "REAL" | "DECIMAL" => DataType::Float64,
+                "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "INT8" | "INT16"
+                | "INT32" | "INT64" | "UINT8" | "UINT16" | "UINT32" | "UINT64" => {
+                    DataType::Int64
+                }
+                "FLOAT" | "DOUBLE" | "REAL" | "DECIMAL" | "FLOAT32" | "FLOAT64" => {
+                    DataType::Float64
+                }
                 "TIMESTAMP" | "TIMESTAMP WITH TIME ZONE" | "DATETIME" => {
                     DataType::Timestamp(TimeUnit::Nanosecond, None)
                 }
                 "DATE" => DataType::Date32,
-                "VARCHAR" | "TEXT" | "STRING" | "BLOB" | "UUID" | "ENUM" => DataType::Utf8,
+                "VARCHAR" | "TEXT" | "STRING" | "BLOB" | "UUID" | "ENUM" | "UTF8"
+                | "LARGEUTF8" | "BINARY" | "LARGEBINARY" => DataType::Utf8,
                 _ => DataType::Utf8,
             }
         };
 
         let mut fields = Vec::with_capacity(col_count);
-        for i in 0..col_count {
-            let col_type = duckdb_type_to_str(&stmt.column_type(i));
-            let col_name = stmt
-                .column_name(i)
-                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        for field in duck_schema.fields().iter() {
+            let col_type = duckdb_type_to_str(field.data_type());
+            let col_name = field.name().clone();
             fields.push(Field::new(col_name, duckdb_to_arrow(&col_type), true));
         }
         let schema = Arc::new(Schema::new(fields));
-
-        let mut rows = stmt
-            .query([])
-            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
         // Read all rows into column builders
         let mut builders: Vec<Box<dyn ColumnBuilder>> = schema
@@ -755,6 +792,46 @@ mod tests {
                 .unwrap();
             let tables = engine.list_tables().await.unwrap();
             assert!(tables.contains(&"test".to_string()));
+        });
+    }
+
+    /// Integration: luajit extension loads and executes via SWANFLOW_DUCKDB_EXTENSIONS.
+    /// Requires a locally-built unsigned luajit.duckdb_extension (see duckdb-luajit repo).
+    /// Gated on the env var — never a hard dependency in CI.
+    #[test]
+    fn test_luajit_extension_via_env() {
+        let ext = match std::env::var("SWANFLOW_LUAJIT_EXT") {
+            Ok(p) if !p.is_empty() => p,
+            _ => return, // not configured — skip
+        };
+        // Duplicate the env plumbing: the engine reads SWANFLOW_DUCKDB_EXTENSIONS at open.
+        std::env::set_var("SWANFLOW_DUCKDB_EXTENSIONS", &ext);
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let engine = DuckDBEngine::new_in_memory().unwrap();
+            // Probe row.get with raw Value first to isolate builder vs FromSql.
+            {
+                let guard = engine.connection().lock().await;
+                let mut stmt = guard
+                    .prepare("SELECT * FROM luajit_table('return {\"a\", \"b\"}')")
+                    .unwrap();
+                let mut rows = stmt.query([]).unwrap();
+                let mut got: Vec<(duckdb::types::Value, duckdb::types::Value)> = vec![];
+                while let Some(row) = rows.next().unwrap() {
+                    let v0 = row.get::<usize, duckdb::types::Value>(0).unwrap();
+                    let v1 = row.get::<usize, duckdb::types::Value>(1).unwrap();
+                    got.push((v0, v1));
+                }
+                assert_eq!(got.len(), 2);
+                assert_eq!(got[0].1, duckdb::types::Value::Text("a".into()));
+            }
+            // Full path through execute_sql (builder conversion).
+            let result = engine
+                .execute_sql("SELECT * FROM luajit_table('return {\"a\", \"b\"}')")
+                .await
+                .unwrap();
+            assert_eq!(result.len(), 1);
+            assert_eq!(result[0].num_rows(), 2);
         });
     }
 }
