@@ -218,7 +218,17 @@ pub trait NodeBehavior: Send + Sync {
     fn spec(&self) -> NodeSpec;
 
     /// Validates the provided configuration against the node's schema.
-    fn validate(&self, config: &JsonValue) -> Result<()>;
+    ///
+    /// Default implementation is schema-driven: validates `config` against
+    /// [`NodeSpec::config_schema`] via [`crate::validation::SchemaValidator`].
+    /// Nodes whose semantics cannot be expressed in JSON Schema (e.g. "non-empty
+    /// array", cross-field constraints) override this method and keep their
+    /// hand-written logic. New nodes get schema validation for free.
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        let spec = self.spec();
+        crate::validation::SchemaValidator::validate_single(&spec.type_id, &spec.config_schema, config)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
 
     /// Current implementation version for this node.
     fn impl_version(&self) -> u32 {

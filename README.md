@@ -161,6 +161,10 @@ cargo run -- mcp call -- python /path/to/mcp-server.py tool_name '{"arg": 42}'
 └───────┴──────────┴────────────┴─────────────┴──────────┘
 ```
 
+节点配置采用 **schema 契约**：每个节点的 `config_schema`（JSON Schema）
+是配置校验的唯一真源（`SchemaValidator`），并经 adapter `Inspect`
+暴露给外部编辑器渲染配置表单——声明与校验不会漂移（ADR-011）。
+
 ## 技术栈
 
 | 层 | 技术 |
