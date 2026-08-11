@@ -1414,6 +1414,28 @@ impl SwanFlowEngine {
             }
         }
 
+        // 3a. Apply declarative middleware stack (borrowed from Forge's
+        // middleware compiler, research #2026081102 — see ADR-012).
+        let middleware_stack =
+            crate::nodes::middleware::compile_middleware_stack(&rendered_config).map_err(|e| {
+                datafusion::error::DataFusionError::Plan(format!(
+                    "Middleware compilation failed for {}: {}",
+                    node.id, e
+                ))
+            })?;
+        let input_plans = if middleware_stack.is_empty() {
+            input_plans
+        } else {
+            crate::nodes::middleware::apply_stack_all(&middleware_stack, input_plans).map_err(
+                |e| {
+                    datafusion::error::DataFusionError::Plan(format!(
+                        "Middleware execution failed for {}: {}",
+                        node.id, e
+                    ))
+                },
+            )?
+        };
+
         let compiled_plans = spec
             .propose_plan(input_plans, &rendered_config)
             .await

@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod missing;
 pub mod quality;
 pub mod registry;
+pub mod middleware;
 pub mod script;
 pub mod sql;
 pub mod transform;
