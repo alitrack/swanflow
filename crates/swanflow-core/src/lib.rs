@@ -6,6 +6,7 @@ pub mod kernel;
 pub mod missing;
 pub mod nodes;
 pub mod registry;
+pub mod repair;
 pub mod validation;
 
 // Re-export commonly used types
