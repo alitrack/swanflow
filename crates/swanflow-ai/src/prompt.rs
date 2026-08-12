@@ -82,6 +82,9 @@ pub struct PromptContext {
     pub domain_hints: Vec<String>,
     /// History of previous fix attempts.
     pub fix_history: Vec<FixRecord>,
+    /// Full DAG topology around the failed node, as "source→target" edge
+    /// strings (used by INSERT_PREREQ / REWIRE operators).
+    pub graph_topology: Vec<String>,
 }
 
 /// Builds AI prompts from modular context using section-based assembly.
@@ -149,12 +152,32 @@ impl PromptBuilder {
             config = config_truncated,
         ));
 
+        // Topology section (only when provided by caller)
+        if let Some(s) = self.build_graph_topology_section(ctx) {
+            sections.push(s);
+        }
+
         // Tools and instructions (always present)
         sections.push(format!(
             "Available tools: {tools}\n\n\
              Instructions: {instructions}\n\n\
-             Return ONLY a JSON object: {{\"fixed_config\": {{...}}}}\n\
-             Only change the fields that need fixing. Keep all other fields unchanged.",
+             Return ONLY a JSON object describing a repair OPERATOR. Choose the \\\n\
+             minimal operator that fixes the failure:\n\
+             - REBIND (default, when only parameters need fixing): \\\
+               {{\"operator\":\"REBIND\",\"fixed_config\":{{...}}}} — include ALL \\\
+               fields of the node config, with the broken ones corrected.\n\
+             - INSERT_PREREQ (when a missing precondition, e.g. a table/view/\\\n\
+               file, must be created upstream): \\\
+               {{\"operator\":\"INSERT_PREREQ\",\"insert_node\":{{\"type_id\":\"...\",\\\
+               \"config\":{{...}}}},\"insert_before\":\"<failed-node-id>\"}}\n\
+             - SUBSTITUTE (when the node type itself is wrong): \\\
+               {{\"operator\":\"SUBSTITUTE\",\"new_type\":\"...\",\"new_config\":{{...}}}}\n\
+             - REWIRE (when the failure is a wrong edge between nodes): \\\
+               {{\"operator\":\"REWIRE\",\"add_edges\":[{{\"source\":\"a\",\"target\":\"b\"}}],\\\
+               \"remove_edges\":[{{\"source\":\"a\",\"target\":\"b\"}}]}}\n\
+             - BYPASS (when the node can be skipped, downstream already satisfied): \\\
+               {{\"operator\":\"BYPASS\"}}\n\
+             Use the graph topology section for node ids. Never invent node ids.",
             tools = tools_str,
             instructions = ctx.fix_instructions,
         ));
@@ -210,6 +233,19 @@ impl PromptBuilder {
             }
         }
 
+        Some(lines.join("\n"))
+    }
+
+    /// Build the full graph topology section (edges around the failed node).
+    /// Returns `None` when no topology was provided by the caller.
+    fn build_graph_topology_section(&self, ctx: &PromptContext) -> Option<String> {
+        if ctx.graph_topology.is_empty() {
+            return None;
+        }
+        let mut lines = vec!["Graph topology (node ids):".to_string()];
+        for edge in &ctx.graph_topology {
+            lines.push(format!("  - {edge}"));
+        }
         Some(lines.join("\n"))
     }
 
@@ -282,6 +318,7 @@ mod tests {
             downstream_nodes: vec![],
             domain_hints: vec![],
             fix_history: vec![],
+            graph_topology: vec![],
         };
 
         let prompt = builder.build_fix_prompt(&ctx);
@@ -307,6 +344,7 @@ mod tests {
             downstream_nodes: vec![],
             domain_hints: vec![],
             fix_history: vec![],
+            graph_topology: vec![],
         };
 
         let prompt = builder.build_fix_prompt(&ctx);
@@ -332,6 +370,7 @@ mod tests {
             downstream_nodes: vec![],
             domain_hints: vec![],
             fix_history: vec![],
+            graph_topology: vec![],
         };
 
         let prompt = builder.build_fix_prompt(&ctx);
@@ -355,6 +394,7 @@ mod tests {
             downstream_nodes: vec![],
             domain_hints: vec![],
             fix_history: vec![],
+            graph_topology: vec![],
         };
 
         let prompt = builder.build_fix_prompt(&ctx);
@@ -389,6 +429,7 @@ mod tests {
             ],
             domain_hints: vec![],
             fix_history: vec![],
+            graph_topology: vec![],
         };
 
         let prompt = builder.build_fix_prompt(&ctx);
@@ -413,6 +454,7 @@ mod tests {
             downstream_nodes: vec![],
             domain_hints: vec![],
             fix_history: vec![],
+            graph_topology: vec![],
         };
 
         let prompt = builder.build_fix_prompt(&ctx);
@@ -434,6 +476,7 @@ mod tests {
             downstream_nodes: vec![],
             domain_hints: vec!["financial data".into(), "time-series".into()],
             fix_history: vec![],
+            graph_topology: vec![],
         };
 
         let prompt = builder.build_fix_prompt(&ctx);
@@ -470,6 +513,7 @@ mod tests {
                     result_error: None,
                 },
             ],
+            graph_topology: vec![],
         };
 
         let prompt = builder.build_fix_prompt(&ctx);
@@ -494,6 +538,7 @@ mod tests {
             downstream_nodes: vec![],
             domain_hints: vec![],
             fix_history: vec![],
+            graph_topology: vec![],
         };
 
         let prompt = builder.build_fix_prompt(&ctx);
@@ -543,6 +588,7 @@ mod tests {
                     result_error: Some("Column 'uid' not found".into()),
                 },
             ],
+            graph_topology: vec![],
         };
 
         let prompt = builder.build_fix_prompt(&ctx);

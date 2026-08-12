@@ -7,18 +7,17 @@ use crate::client::LlmClient;
 use crate::prompt::{PromptBuilder, PromptContext};
 use crate::router::{ConfigComplexity, ErrorKind, ErrorSignal, ModelRouter};
 use crate::KeyProvider;
-use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
+use swanflow_core::repair::{RepairOperator, RepairResponse};
 use tokio::time::timeout;
 use tracing::warn;
 
-/// Expected response format from the LLM fix prompt.
-#[derive(Debug, Deserialize)]
-struct FixResponse {
-    fixed_config: Value,
-}
+/// Expected response format from the LLM fix prompt: a tagged repair
+/// operator (GraSP-style), or the legacy bare `{"fixed_config": ...}` shape
+/// (handled by [`RepairResponse`]'s untagged deserialization).
+type FixResponse = RepairResponse;
 
 /// Maps a generic error message to an ErrorKind for routing.
 fn classify_error(error: &str) -> ErrorKind {
@@ -126,8 +125,12 @@ impl OpenAiHook {
 
     /// Attempt to fix a node error using an LLM.
     ///
-    /// Returns `Some(fixed_config)` if the LLM successfully proposed a fix,
-    /// or `None` if the fix attempt failed or timed out.
+    /// Returns `Some(repair_operator)` if the LLM successfully proposed a
+    /// fix, or `None` if the fix attempt failed or timed out. The returned
+    /// operator must be applied via `swanflow::core::repair::apply_repair`.
+    ///
+    /// `graph_topology` carries the DAG edges around the failed node as
+    /// "source→target" strings (used by INSERT_PREREQ / REWIRE operators).
     ///
     /// Now populates enhanced `ErrorSignal` (5-dimension scoring) and
     /// enriched `PromptContext` (schema, topology, domain hints, fix history).
@@ -137,7 +140,8 @@ impl OpenAiHook {
         node_description: &str,
         config: &Value,
         error: &str,
-    ) -> Option<Value> {
+        graph_topology: &[String],
+    ) -> Option<RepairOperator> {
         // Build enhanced error signal with all 5 dimensions
         let config_complexity = measure_config_complexity(config);
         let signal = ErrorSignal {
@@ -159,7 +163,7 @@ impl OpenAiHook {
             available_tools: vec![],
             fix_instructions: format!(
                 "The node '{}' failed with the above error. \
-                 Suggest a fix by modifying the config. \
+                 Suggest a repair. \
                  Error type: {:?}, config complexity: {:?}.",
                 node_type, signal.error_kind, signal.config_complexity
             ),
@@ -168,6 +172,7 @@ impl OpenAiHook {
             downstream_nodes: vec![],
             domain_hints: vec![],
             fix_history: vec![],
+            graph_topology: graph_topology.to_vec(),
         };
 
         let prompt = self.prompt_builder.build_fix_prompt(&ctx);
@@ -179,7 +184,7 @@ impl OpenAiHook {
         .await
         {
             Ok(Ok(response)) => match serde_json::from_str::<FixResponse>(&response) {
-                Ok(fix) => Some(fix.fixed_config),
+                Ok(parsed) => Some(parsed.into_operator()),
                 Err(e) => {
                     warn!("Failed to parse LLM fix response: {}", e);
                     None
