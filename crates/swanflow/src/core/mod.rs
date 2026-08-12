@@ -6,4 +6,5 @@ pub mod error;
 pub mod graph;
 pub mod kernel;
 pub mod observer;
+pub mod repair;
 pub mod templating;

@@ -213,6 +213,70 @@ impl Workflow {
             Err(anyhow!("Node index not found"))
         }
     }
+
+    /// Find a node index by its UUID id.
+    pub fn find_node_by_id(&self, id: &Uuid) -> Option<NodeIndex> {
+        self.graph.node_indices().find(|&idx| {
+            self.graph
+                .node_weight(idx)
+                .map(|n| n.id == *id)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Remove the edge between two nodes (if present).
+    pub fn remove_edge(&mut self, source: NodeIndex, target: NodeIndex) -> Result<()> {
+        if let Some(edge_idx) = self.graph.find_edge(source, target) {
+            self.graph.remove_edge(edge_idx);
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "No edge between nodes {} and {}",
+                source.index(),
+                target.index()
+            ))
+        }
+    }
+
+    /// Collect all upstream node indices of `idx` (direct predecessors).
+    pub fn upstream_of(&self, idx: NodeIndex) -> Vec<NodeIndex> {
+        use petgraph::visit::EdgeRef as _;
+        self.graph
+            .edges_directed(idx, petgraph::Direction::Incoming)
+            .map(|e| e.source())
+            .collect()
+    }
+
+    /// Collect all downstream node indices of `idx` (direct successors).
+    pub fn downstream_of(&self, idx: NodeIndex) -> Vec<NodeIndex> {
+        use petgraph::visit::EdgeRef as _;
+        self.graph
+            .edges_directed(idx, petgraph::Direction::Outgoing)
+            .map(|e| e.target())
+            .collect()
+    }
+
+    /// Collect all nodes within `h` hops downstream of `idx` (BFS, exclusive
+    /// of `idx` itself). Used for repair invalidation scope.
+    pub fn downstream_up_to_h(&self, idx: NodeIndex, h: usize) -> Vec<NodeIndex> {
+        use petgraph::visit::{VisitMap, Visitable as _};
+        let mut visited = self.graph.visit_map();
+        visited.visit(idx);
+        let mut out = Vec::new();
+        let mut frontier = vec![(idx, 0usize)];
+        while let Some((cur, depth)) = frontier.pop() {
+            if depth >= h {
+                continue;
+            }
+            for nxt in self.downstream_of(cur) {
+                if visited.visit(nxt) {
+                    out.push(nxt);
+                    frontier.push((nxt, depth + 1));
+                }
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]

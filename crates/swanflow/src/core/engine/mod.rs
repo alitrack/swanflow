@@ -113,14 +113,16 @@ where
 #[async_trait]
 pub trait IntelligenceHook: Send + Sync {
     /// Called when a node execution fails.
-    /// Returns Some(new_config) to retry, or None to fail.
+    /// Returns `Some(RepairOperator)` to propose a repair (the caller applies
+    /// it via `swanflow::core::repair::apply_repair` and re-runs), or `None`
+    /// to escalate to the existing human-in-the-loop error path.
     async fn on_error(
         &self,
         node_id: Uuid,
         type_id: &str,
         config: &serde_json::Value,
         error: &str,
-    ) -> Option<serde_json::Value>;
+    ) -> Option<swanflow_core::repair::RepairOperator>;
 
     /// Called after a node completes to inspect data quality.
     async fn on_data_quality(
@@ -718,7 +720,7 @@ impl SwanFlowEngine {
                                     let mut handled = false;
                                     if let Some(hook) = &hook_shared {
                                         if should_invoke_self_healing(&diagnostic) {
-                                            if let Some(_fix) = hook
+                                            if let Some(repair) = hook
                                                 .on_error(
                                                     node_id,
                                                     &node_type,
@@ -727,7 +729,10 @@ impl SwanFlowEngine {
                                                 )
                                                 .await
                                             {
-                                                println!("DEBUG: IntelligenceHook proposed a fix for node {}", node_id);
+                                                println!(
+                                                    "[Intelligence] proposed repair {:?} for node {} — apply and re-run",
+                                                    repair, node_id
+                                                );
                                                 handled = true;
                                             }
                                         }
@@ -777,7 +782,7 @@ impl SwanFlowEngine {
                                             let mut handled = false;
                                             if let Some(hook) = &hook_shared {
                                                 if should_invoke_self_healing(&diagnostic) {
-                                                    if let Some(_fix) = hook
+                                                    if let Some(repair) = hook
                                                         .on_error(
                                                             node_id,
                                                             &node_type,
@@ -786,6 +791,10 @@ impl SwanFlowEngine {
                                                         )
                                                         .await
                                                     {
+                                                        println!(
+                                                            "[Intelligence] proposed repair {:?} for node {} — apply and re-run",
+                                                            repair, node_id
+                                                        );
                                                         handled = true;
                                                     }
                                                 }
@@ -812,7 +821,7 @@ impl SwanFlowEngine {
                                     let mut handled = false;
                                     if let Some(hook) = &hook_shared {
                                         if should_invoke_self_healing(&diagnostic) {
-                                            if let Some(_fix) = hook
+                                            if let Some(repair) = hook
                                                 .on_error(
                                                     node_id,
                                                     &node_type,
@@ -821,7 +830,10 @@ impl SwanFlowEngine {
                                                 )
                                                 .await
                                             {
-                                                println!("DEBUG: IntelligenceHook proposed a fix for planning error on node {}", node_id);
+                                                println!(
+                                                    "[Intelligence] proposed repair {:?} for node {} — apply and re-run",
+                                                    repair, node_id
+                                                );
                                                 handled = true;
                                             }
                                         }
