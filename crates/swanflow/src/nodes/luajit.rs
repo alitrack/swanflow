@@ -157,12 +157,15 @@ impl NodeBehavior for LuaJitNode {
                 )
             }
             "action" => {
-                // luajit_s('lib', {'op':'run', ...}) — executes an action lib
-                // (incremental/scd2 style: DML/DDL against DuckDB tables via
-                // _duckdb_call/_duckdb_query), returns a single-row JSON string.
+                // Module-table libs: install registers the lib (cached
+                // source), then luajit_s resolves the table's .run method
+                // (luajit extension v0.32+). CTE form keeps it one statement.
                 let args = config.get("args").cloned().unwrap_or(JsonValue::Null);
                 let args_sql = struct_literal(&args)?;
-                format!("SELECT luajit_s('{}', {}) AS result", esc, args_sql)
+                format!(
+                    "WITH _reg AS (SELECT * FROM luajit_module(mode:='install', sql_name:='{}')) SELECT luajit_s('{}', {}) AS result FROM _reg",
+                    esc, esc, args_sql
+                )
             }
             _ => unreachable!("validated above"),
         };
@@ -630,11 +633,10 @@ mod tests {
                     .downcast_ref::<DuckDBScanLogical>()
                     .expect("should be DuckDBScanLogical");
                 assert!(
-                    scan.query.contains("luajit_s('incremental', {'op':'run', 'target':'tgt', 'source':'src', 'ts_col':'ts', 'mode':'ts'})"),
+                    scan.query.contains("WITH _reg AS (SELECT * FROM luajit_module(mode:='install', sql_name:='incremental')) SELECT luajit_s('incremental', {'op':'run', 'target':'tgt', 'source':'src', 'ts_col':'ts', 'mode':'ts'}) AS result FROM _reg"),
                     "unexpected action SQL: {}",
                     scan.query
                 );
-                assert!(scan.query.contains("AS result"));
             } else {
                 panic!("expected Extension plan");
             }
@@ -666,7 +668,7 @@ mod tests {
                     .downcast_ref::<DuckDBScanLogical>()
                     .expect("should be DuckDBScanLogical");
                 assert!(
-                    scan.query.contains("luajit_s('incremental', {'op':'run', 'target':'', 'source':'', 'ts_col':'', 'mode':'ts'})"),
+                    scan.query.contains("WITH _reg AS (SELECT * FROM luajit_module(mode:='install', sql_name:='incremental')) SELECT luajit_s('incremental', {'op':'run', 'target':'', 'source':'', 'ts_col':'', 'mode':'ts'}) AS result FROM _reg"),
                     "unexpected prefilled action SQL: {}",
                     scan.query
                 );

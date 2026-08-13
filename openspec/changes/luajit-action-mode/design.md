@@ -8,10 +8,13 @@
 
 ## 设计决策
 
-### 1. action 模式 SQL 形态
+### 1. action 模式 SQL 形态（单语句 CTE）
 ```
-SELECT luajit_s('<source>', {'op':'run','target':'tgt',...}) AS result
+WITH _reg AS (SELECT * FROM luajit_module(mode:='install', sql_name:='incremental'))
+SELECT luajit_s('incremental', {'op':'run','target':'tgt',...}) AS result FROM _reg
 ```
+- install 从缓存/远程取源码注册（幂等，重复执行覆盖同名）——**:memory: 连接每次新 db 也可靠**
+- **扩展侧配套改动（luajit v0.32+ e7c68d4）**：`luajit_s` 解析到模块表（install 注册的 global 是 table）时自动取 `.run` 方法调用——`luajit_s('incremental', opts)` 直接执行 `incremental.run(opts)`，不再需要 quick_compile + regexp 包装（旧包装形态仍兼容）
 - 无输入端口（同 table 模式）；返回单行单列 `result`（VARCHAR JSON）
 - `args` 缺失时渲染 `NULL`（validate 已拦）
 
@@ -40,3 +43,6 @@ SELECT luajit_s('<source>', {'op':'run','target':'tgt',...}) AS result
 - **MACRO 参数 cast**：`luajit_vs('x', CAST(x1 AS VARCHAR))` 把 struct 转字符串 → Lua 侧 `p.target` 为 nil（静默失败，返回 NULL）
 - **INDEX 行尾换行**：regexp 替换 lib 尾部 `return <name>` 时用 `[\r\n]*$`
 - **action 模式返回**：luajit_s 返回 Lua table 显示 `table: 0x...` 指针不可读 → lib 必须返回 JSON 字符串（incremental/scd2 已实现 `{"loaded":N,...}`）
+- **luajit_module 表函数参数不能含子查询**（`source:=(SELECT ...)` 报 Binder Error）→ 注册必须走 install（缓存/远程自动取源）
+- **模块表 vs 函数**：install 注册的是 module table（global=table），luajit_s 解析 table 无 `.run` 时仍 NULL（如 etl 旧式三参数 lib）——动作型 lib 契约 = 模块表 + `.run(opts)` 返回 JSON 字符串
+- **C 注释陷阱**：注释内容含 `*/` 会提前闭合注释块（`etl.*/udf.*` 编译报 stray 错误）
