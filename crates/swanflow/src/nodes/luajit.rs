@@ -20,6 +20,9 @@ use crate::core::datasource::{DuckDBScanExec, DuckDBScanLogical};
 ///   a data generator/reader (dirscan, dicom, id3, zip_list, ...).
 /// - `scalar`: `SELECT * FROM (SELECT luajit_s(source, col) AS result FROM input_0)`
 ///   — transforms the upstream input table with a scalar UDF.
+/// - `action`: `SELECT luajit_s(source, {op:'run', ...}) AS result` — executes an
+///   action lib (incremental/scd2: DML/DDL against DuckDB tables) with a JSON
+///   opts struct from config `args`; returns a single-row JSON string.
 pub struct LuaJitNode;
 
 #[async_trait]
@@ -48,7 +51,7 @@ impl NodeBehavior for LuaJitNode {
                 "properties": {
                     "mode": {
                         "type": "string",
-                        "enum": ["table", "scalar"],
+                        "enum": ["table", "scalar", "action"],
                         "default": "table"
                     },
                     "source": { "type": "string", "description": "Lua source passed to luajit_table/luajit_s" },
@@ -57,9 +60,8 @@ impl NodeBehavior for LuaJitNode {
                         "description": "Optional registered UDF name (luajit_module install/quick_compile)"
                     },
                     "args": {
-                        "type": "array",
-                        "items": { "type": "any" },
-                        "description": "Extra args appended after source (luajit_s multi-arg style)"
+                        "type": ["object", "array"],
+                        "description": "action mode: opts struct passed to luajit_s, e.g. {\"op\":\"run\",\"target\":\"tgt\",\"source\":\"src\",\"ts_col\":\"ts\",\"mode\":\"ts\"}"
                     },
                     "columns": {
                         "type": "array",
@@ -80,8 +82,11 @@ impl NodeBehavior for LuaJitNode {
             return Err(anyhow!("Lua source must not be empty"));
         }
         let mode = config["mode"].as_str().unwrap_or("table");
-        if mode != "table" && mode != "scalar" {
-            return Err(anyhow!("mode must be 'table' or 'scalar', got '{mode}'"));
+        if mode != "table" && mode != "scalar" && mode != "action" {
+            return Err(anyhow!("mode must be 'table', 'scalar' or 'action', got '{mode}'"));
+        }
+        if mode == "action" && config.get("args").is_none() {
+            return Err(anyhow!("action mode requires an 'args' object"));
         }
         Ok(())
     }
@@ -151,6 +156,14 @@ impl NodeBehavior for LuaJitNode {
                     "SELECT * FROM (SELECT {select_all} FROM input_0) AS _luajit_transform"
                 )
             }
+            "action" => {
+                // luajit_s('lib', {'op':'run', ...}) — executes an action lib
+                // (incremental/scd2 style: DML/DDL against DuckDB tables via
+                // _duckdb_call/_duckdb_query), returns a single-row JSON string.
+                let args = config.get("args").cloned().unwrap_or(JsonValue::Null);
+                let args_sql = struct_literal(&args)?;
+                format!("SELECT luajit_s('{}', {}) AS result", esc, args_sql)
+            }
             _ => unreachable!("validated above"),
         };
 
@@ -184,6 +197,30 @@ impl TypedNodeBehavior for LuaJitNode {
     const OUTPUT_COUNT: usize = 1;
 }
 
+/// Render a JSON value as a DuckDB literal (struct/list/string/number/bool).
+/// DuckDB struct literal syntax (verified on 1.5.5): `{'op':'run','n':1}` —
+/// keys single-quoted, strings single-quoted and escaped, numbers/bools bare,
+/// null → NULL. Nested objects/lists render recursively.
+fn struct_literal(v: &JsonValue) -> Result<String> {
+    match v {
+        JsonValue::Object(o) => {
+            let parts: Result<Vec<String>> = o
+                .iter()
+                .map(|(k, val)| Ok(format!("'{}':{}", k, struct_literal(val)?)))
+                .collect();
+            Ok(format!("{{{}}}", parts?.join(", ")))
+        }
+        JsonValue::Array(a) => {
+            let parts: Result<Vec<String>> = a.iter().map(struct_literal).collect();
+            Ok(format!("[{}]", parts?.join(", ")))
+        }
+        JsonValue::String(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
+        JsonValue::Number(n) => Ok(n.to_string()),
+        JsonValue::Bool(b) => Ok(if *b { "true".to_string() } else { "false".to_string() }),
+        JsonValue::Null => Ok("NULL".to_string()),
+    }
+}
+
 /// A LuaJitNode variant pre-bound to a specific duckdb-luajit-libs library
 /// (e.g. `luajit.dirscan`). Auto-registered by scanning the libs INDEX —
 /// this is how "new nodes grow on the canvas" without writing Rust code.
@@ -191,6 +228,9 @@ pub struct LuaJitLibNode {
     pub lib_name: String,
     pub source: String,
     pub description: String,
+    /// Action-mode libs (incremental/scd2): default args template pre-filled
+    /// into the node config. None = table/scalar lib.
+    pub action_args: Option<JsonValue>,
 }
 
 #[async_trait]
@@ -216,11 +256,10 @@ impl NodeBehavior for LuaJitLibNode {
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "mode": { "type": "string", "enum": ["table", "scalar"], "default": "table" },
+                    "mode": { "type": "string", "enum": ["table", "scalar", "action"], "default": "table" },
                     "args": {
-                        "type": "array",
-                        "items": { "type": "any" },
-                        "description": "Args passed after the lib source (luajit_table/luajit_s named or positional)"
+                        "type": ["object", "array"],
+                        "description": "action mode opts (e.g. {\"op\":\"run\",\"target\":\"tgt\",\"source\":\"src\",\"ts_col\":\"ts\",\"mode\":\"ts\"}); table/scalar libs ignore this"
                     }
                 }
             }),
@@ -239,6 +278,17 @@ impl NodeBehavior for LuaJitLibNode {
         // Delegate to the generic shell node with the lib source pre-filled.
         let mut cfg = config.clone();
         cfg["source"] = serde_json::Value::String(self.source.clone());
+        // Action libs: pre-fill mode=action + args template unless the user
+        // explicitly configured them.
+        if let Some(args) = &self.action_args {
+            let mode = cfg.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+            if mode != "action" {
+                cfg["mode"] = serde_json::Value::String("action".into());
+            }
+            if cfg.get("args").is_none() {
+                cfg["args"] = args.clone();
+            }
+        }
         let inner = LuaJitNode;
         inner.propose_plan(inputs, &cfg).await
     }
@@ -274,12 +324,33 @@ pub fn luajit_libs_from_index(index_path: &str) -> Vec<LuaJitLibNode> {
         if name.is_empty() {
             continue;
         }
+        // Action-mode libs (run DML/DDL via _duckdb_call, return JSON): give
+        // their canvas node a pre-filled args template. New action libs should
+        // be added here (kept in sync with duckdb-luajit-libs INDEX).
+        let action_args = match name {
+            "incremental" => Some(serde_json::json!({
+                "op": "run", "target": "", "source": "", "ts_col": "", "mode": "ts"
+            })),
+            "scd2" => Some(serde_json::json!({
+                "op": "run", "target": "", "source": "", "key_col": "",
+                "attr_cols": [], "ts_col": ""
+            })),
+            _ => None,
+        };
+        let description = match action_args {
+            Some(_) => format!(
+                "LuaJIT action lib '{}' (runs DML/DDL, returns JSON — fill args)",
+                name
+            ),
+            None => format!("LuaJIT lib '{}' from duckdb-luajit-libs", name),
+        };
         nodes.push(LuaJitLibNode {
             lib_name: name.to_string(),
             // libs are invoked by registered name; the extension's install
             // mechanism (luajit_module install / offline cache) resolves it.
             source: name.to_string(),
-            description: format!("LuaJIT lib '{}' from duckdb-luajit-libs", name),
+            description,
+            action_args,
         });
     }
     nodes
@@ -405,6 +476,41 @@ mod tests {
         // spec type_ids
         assert_eq!(nodes[0].spec().type_id, "luajit.dicom");
         assert_eq!(nodes[1].spec().type_id, "luajit.dirscan");
+        // non-action libs have no args template
+        assert!(nodes[0].action_args.is_none());
+    }
+
+    #[test]
+    fn test_libs_index_action_libs() {
+        let tmp = std::env::temp_dir().join("luajit_index_action_test.txt");
+        std::fs::write(
+            &tmp,
+            "incremental|libs/etl/incremental.lua\nscd2|libs/etl/scd2.lua\nbase64|libs/udf/base64.lua\n",
+        )
+        .unwrap();
+        let nodes = luajit_libs_from_index(tmp.to_str().unwrap());
+        std::fs::remove_file(&tmp).ok();
+        assert_eq!(nodes.len(), 3);
+        let incr = nodes.iter().find(|n| n.lib_name == "incremental").unwrap();
+        assert!(incr.action_args.is_some());
+        assert_eq!(incr.action_args.as_ref().unwrap()["op"], "run");
+        let scd2 = nodes.iter().find(|n| n.lib_name == "scd2").unwrap();
+        assert!(scd2.action_args.is_some());
+        let b64 = nodes.iter().find(|n| n.lib_name == "base64").unwrap();
+        assert!(b64.action_args.is_none());
+    }
+
+    #[test]
+    fn test_struct_literal() {
+        assert_eq!(
+            struct_literal(&serde_json::json!({"op": "run", "n": 1, "b": true, "x": null})).unwrap(),
+            "{'op':'run', 'n':1, 'b':true, 'x':NULL}"
+        );
+        // single-quote escaping + nested list
+        assert_eq!(
+            struct_literal(&serde_json::json!({"attr_cols": ["city", "tier"], "q": "it's"})).unwrap(),
+            "{'attr_cols':['city', 'tier'], 'q':'it''s'}"
+        );
     }
 
     #[test]
@@ -462,6 +568,10 @@ mod tests {
         node.validate(&serde_json::json!({"source": "return {\"a\"}"})).unwrap();
         // valid scalar mode
         node.validate(&serde_json::json!({"mode": "scalar", "source": "return x"})).unwrap();
+        // valid action mode (with args)
+        node.validate(&serde_json::json!({"mode": "action", "source": "x", "args": {"op": "run"}})).unwrap();
+        // action mode without args → error
+        assert!(node.validate(&serde_json::json!({"mode": "action", "source": "x"})).is_err());
         // missing source
         assert!(node.validate(&serde_json::json!({})).is_err());
         // bad mode
@@ -490,6 +600,76 @@ mod tests {
                 assert!(scan.query.contains("luajit_table"));
                 assert!(scan.query.contains("return"));
                 assert!(!scan.extensions.is_empty());
+            } else {
+                panic!("expected Extension plan");
+            }
+        });
+    }
+
+    #[test]
+    fn test_query_building_action_mode() {
+        let node = LuaJitNode;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let plans = node
+                .propose_plan(
+                    vec![],
+                    &serde_json::json!({
+                        "mode": "action",
+                        "source": "incremental",
+                        "args": {"op": "run", "target": "tgt", "source": "src", "ts_col": "ts", "mode": "ts"}
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(plans.len(), 1);
+            if let LogicalPlan::Extension(ext) = &plans[0] {
+                let scan = ext
+                    .node
+                    .as_any()
+                    .downcast_ref::<DuckDBScanLogical>()
+                    .expect("should be DuckDBScanLogical");
+                assert!(
+                    scan.query.contains("luajit_s('incremental', {'op':'run', 'target':'tgt', 'source':'src', 'ts_col':'ts', 'mode':'ts'})"),
+                    "unexpected action SQL: {}",
+                    scan.query
+                );
+                assert!(scan.query.contains("AS result"));
+            } else {
+                panic!("expected Extension plan");
+            }
+        });
+    }
+
+    /// Action lib pre-fill: LuaJitLibNode with action_args auto-configures
+    /// mode=action + args template on an empty config.
+    #[test]
+    fn test_lib_node_action_prefill() {
+        let node = LuaJitLibNode {
+            lib_name: "incremental".to_string(),
+            source: "incremental".to_string(),
+            description: "test".to_string(),
+            action_args: Some(serde_json::json!({
+                "op": "run", "target": "", "source": "", "ts_col": "", "mode": "ts"
+            })),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let plans = node
+                .propose_plan(vec![], &serde_json::json!({}))
+                .await
+                .unwrap();
+            if let LogicalPlan::Extension(ext) = &plans[0] {
+                let scan = ext
+                    .node
+                    .as_any()
+                    .downcast_ref::<DuckDBScanLogical>()
+                    .expect("should be DuckDBScanLogical");
+                assert!(
+                    scan.query.contains("luajit_s('incremental', {'op':'run', 'target':'', 'source':'', 'ts_col':'', 'mode':'ts'})"),
+                    "unexpected prefilled action SQL: {}",
+                    scan.query
+                );
             } else {
                 panic!("expected Extension plan");
             }
