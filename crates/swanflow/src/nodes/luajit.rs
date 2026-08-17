@@ -263,6 +263,12 @@ impl NodeBehavior for LuaJitLibNode {
                     "args": {
                         "type": ["object", "array"],
                         "description": "action mode opts (e.g. {\"op\":\"run\",\"target\":\"tgt\",\"source\":\"src\",\"ts_col\":\"ts\",\"mode\":\"ts\"}); table/scalar libs ignore this"
+                    },
+                    "backend": {
+                        "type": "string",
+                        "enum": ["auto", "gpu", "cpu"],
+                        "default": "auto",
+                        "description": "Compute backend for JSON-args libs (linalg): auto = env-gated GPU (LUA_LINALG_GPU=1), gpu = force GPU, cpu = force CPU. Merged into args as 'backend'."
                     }
                 }
             }),
@@ -290,6 +296,21 @@ impl NodeBehavior for LuaJitLibNode {
             }
             if cfg.get("args").is_none() {
                 cfg["args"] = args.clone();
+            }
+        }
+        // Backend override for JSON-args libs (linalg): merge into args so
+        // the Lua side sees `backend: "gpu"|"cpu"` per call. 'auto' (default)
+        // leaves args untouched (env-gated GPU selection in linalg.lua).
+        let backend_override = cfg
+            .get("backend")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if !backend_override.is_empty() && backend_override != "auto" {
+            if let Some(args) = cfg.get_mut("args") {
+                if args.is_object() {
+                    args["backend"] = serde_json::Value::String(backend_override);
+                }
             }
         }
         let inner = LuaJitNode;
@@ -338,14 +359,25 @@ pub fn luajit_libs_from_index(index_path: &str) -> Vec<LuaJitLibNode> {
                 "op": "run", "target": "", "source": "", "key_col": "",
                 "attr_cols": [], "ts_col": ""
             })),
+            // linalg: JSON-args matrix lib (GPU-capable). Prefill a 2×2 SVD
+            // anchor case; user edits args to their own matrix/op.
+            "linalg" => Some(serde_json::json!({
+                "op": "svd", "a": [4, 7, 2, 6], "m": 2, "n": 2
+            })),
             _ => None,
         };
-        let description = match action_args {
-            Some(_) => format!(
-                "LuaJIT action lib '{}' (runs DML/DDL, returns JSON — fill args)",
-                name
-            ),
-            None => format!("LuaJIT lib '{}' from duckdb-luajit-libs", name),
+        let description = if name == "linalg" {
+            format!(
+                "LuaJIT linalg lib (GPU-capable matmul/SVD/eigh/inv/lu/chol/qr — set args; backend: auto/gpu/cpu)"
+            )
+        } else {
+            match action_args {
+                Some(_) => format!(
+                    "LuaJIT action lib '{}' (runs DML/DDL, returns JSON — fill args)",
+                    name
+                ),
+                None => format!("LuaJIT lib '{}' from duckdb-luajit-libs", name),
+            }
         };
         nodes.push(LuaJitLibNode {
             lib_name: name.to_string(),
@@ -488,17 +520,22 @@ mod tests {
         let tmp = std::env::temp_dir().join("luajit_index_action_test.txt");
         std::fs::write(
             &tmp,
-            "incremental|libs/etl/incremental.lua\nscd2|libs/etl/scd2.lua\nbase64|libs/udf/base64.lua\n",
+            "incremental|libs/etl/incremental.lua\nscd2|libs/etl/scd2.lua\nlinalg|libs/linalg/linalg.lua\nbase64|libs/udf/base64.lua\n",
         )
         .unwrap();
         let nodes = luajit_libs_from_index(tmp.to_str().unwrap());
         std::fs::remove_file(&tmp).ok();
-        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes.len(), 4);
         let incr = nodes.iter().find(|n| n.lib_name == "incremental").unwrap();
         assert!(incr.action_args.is_some());
         assert_eq!(incr.action_args.as_ref().unwrap()["op"], "run");
         let scd2 = nodes.iter().find(|n| n.lib_name == "scd2").unwrap();
         assert!(scd2.action_args.is_some());
+        // linalg: JSON-args GPU-capable lib → action template with SVD anchor
+        let linalg = nodes.iter().find(|n| n.lib_name == "linalg").unwrap();
+        assert!(linalg.action_args.is_some());
+        assert_eq!(linalg.action_args.as_ref().unwrap()["op"], "svd");
+        assert!(linalg.description.contains("GPU-capable"));
         let b64 = nodes.iter().find(|n| n.lib_name == "base64").unwrap();
         assert!(b64.action_args.is_none());
     }
@@ -670,6 +707,81 @@ mod tests {
                 assert!(
                     scan.query.contains("WITH _reg AS (SELECT * FROM luajit_module(mode:='install', sql_name:='incremental')) SELECT luajit_s('incremental', {'op':'run', 'target':'', 'source':'', 'ts_col':'', 'mode':'ts'}) AS result FROM _reg"),
                     "unexpected prefilled action SQL: {}",
+                    scan.query
+                );
+            } else {
+                panic!("expected Extension plan");
+            }
+        });
+    }
+
+    /// Backend override: LuaJitLibNode config `backend: gpu|cpu` merges into
+    /// the args JSON so the Lua lib (linalg) selects the compute backend.
+    #[test]
+    fn test_lib_node_backend_merge() {
+        let node = LuaJitLibNode {
+            lib_name: "linalg".to_string(),
+            source: "linalg".to_string(),
+            description: "test".to_string(),
+            action_args: Some(serde_json::json!({
+                "op": "svd", "a": [4, 7, 2, 6], "m": 2, "n": 2
+            })),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // backend=gpu → args carry 'backend':'gpu'
+            let plans = node
+                .propose_plan(vec![], &serde_json::json!({"backend": "gpu"}))
+                .await
+                .unwrap();
+            if let LogicalPlan::Extension(ext) = &plans[0] {
+                let scan = ext
+                    .node
+                    .as_any()
+                    .downcast_ref::<DuckDBScanLogical>()
+                    .expect("should be DuckDBScanLogical");
+                assert!(
+                    scan.query.contains("'backend':'gpu'"),
+                    "backend=gpu should merge into args: {}",
+                    scan.query
+                );
+                assert!(scan.query.contains("luajit_s('linalg'"), "linalg action SQL: {}", scan.query);
+            } else {
+                panic!("expected Extension plan");
+            }
+            // backend=cpu → args carry 'backend':'cpu'
+            let plans2 = node
+                .propose_plan(vec![], &serde_json::json!({"backend": "cpu"}))
+                .await
+                .unwrap();
+            if let LogicalPlan::Extension(ext) = &plans2[0] {
+                let scan = ext
+                    .node
+                    .as_any()
+                    .downcast_ref::<DuckDBScanLogical>()
+                    .expect("should be DuckDBScanLogical");
+                assert!(
+                    scan.query.contains("'backend':'cpu'"),
+                    "backend=cpu should merge into args: {}",
+                    scan.query
+                );
+            } else {
+                panic!("expected Extension plan");
+            }
+            // backend=auto (default) → args untouched
+            let plans3 = node
+                .propose_plan(vec![], &serde_json::json!({}))
+                .await
+                .unwrap();
+            if let LogicalPlan::Extension(ext) = &plans3[0] {
+                let scan = ext
+                    .node
+                    .as_any()
+                    .downcast_ref::<DuckDBScanLogical>()
+                    .expect("should be DuckDBScanLogical");
+                assert!(
+                    !scan.query.contains("'backend'"),
+                    "auto backend should leave args untouched: {}",
                     scan.query
                 );
             } else {
