@@ -45,47 +45,58 @@ fn resolve_string(s: &str, context: &std::collections::HashMap<String, JsonValue
     let mut result = s.to_string();
 
     // Resolve %%var_name%% or %%var_name:default%%
+    let mut scan_from = 0usize;
     loop {
-        let start = result.find("%%");
-        if start.is_none() {
-            break;
-        }
-        let start = start.unwrap();
-        let end = result[start + 2..].find("%%");
-        if end.is_none() {
-            break;
-        }
-        let end = start + 2 + end.unwrap();
+        let start = match result[scan_from..].find("%%") {
+            Some(off) => scan_from + off,
+            None => break,
+        };
+        let end = match result[start + 2..].find("%%") {
+            Some(off) => start + 2 + off,
+            None => break,
+        };
         let inner = &result[start + 2..end];
-
         let replacement = resolve_variable(inner, context);
         let mut new_result = String::with_capacity(result.len());
         new_result.push_str(&result[..start]);
         new_result.push_str(&replacement);
         new_result.push_str(&result[end + 2..]);
+
+        if new_result == result {
+            // Variable missing and has no default — left as-is. Skip to
+            // avoid spinning forever on the same unresolved template.
+            break;
+        }
         result = new_result;
+        scan_from = start + replacement.len();
     }
 
     // Resolve {{var_name}} or {{var_name:default}}
+    let mut scan_from = 0usize;
     loop {
-        let start = result.find("{{");
-        if start.is_none() {
-            break;
-        }
-        let start = start.unwrap();
-        let end = result[start + 2..].find("}}");
-        if end.is_none() {
-            break;
-        }
-        let end = start + 2 + end.unwrap();
+        let start = match result[scan_from..].find("{{") {
+            Some(off) => scan_from + off,
+            None => break,
+        };
+        let end = match result[start + 2..].find("}}") {
+            Some(off) => start + 2 + off,
+            None => break,
+        };
         let inner = &result[start + 2..end];
-
         let replacement = resolve_variable(inner, context);
         let mut new_result = String::with_capacity(result.len());
         new_result.push_str(&result[..start]);
         new_result.push_str(&replacement);
         new_result.push_str(&result[end + 2..]);
+
+        if new_result == result {
+            // Variable missing and has no default — left as-is. Skip this
+            // placeholder to keep making progress; otherwise the loop would
+            // spin forever re-replacing the same unresolved template.
+            break;
+        }
         result = new_result;
+        scan_from = start + replacement.len();
     }
 
     result

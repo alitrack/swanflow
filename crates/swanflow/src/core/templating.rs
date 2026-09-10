@@ -34,6 +34,7 @@ impl TemplateEngine {
     }
 
     /// Replaces placeholders like ${context.key} in a string with values from the context.
+    /// Also resolves {{mustache}} style placeholders (same semantics as render_json).
     pub fn render_string(input: &str, context: &HashMap<String, JsonValue>) -> String {
         let mut output = input.to_string();
 
@@ -48,7 +49,8 @@ impl TemplateEngine {
             output = output.replace(&placeholder, &replacement);
         }
 
-        output
+        // Also resolve {{mustache}} style placeholders
+        Self::resolve_mustache_placeholder(&output, context)
     }
 
     /// Recursively renders a JSON value (e.g., node configuration).
@@ -59,10 +61,8 @@ impl TemplateEngine {
                 if let Some(value) = Self::resolve_exact_context_placeholder(s, context) {
                     return value;
                 }
-                // Also resolve {{mustache}} style placeholders
-                let rendered = Self::resolve_mustache_placeholder(s, context);
-                // Then resolve ${context.key} style within the string
-                let rendered = Self::render_string(&rendered, context);
+                // Resolve ${context.key} and {{mustache}} placeholders in one pass
+                let rendered = Self::render_string(s, context);
                 JsonValue::String(rendered)
             }
             JsonValue::Array(arr) => {
