@@ -33,10 +33,13 @@
 
 ## 4. Agent and UX
 
-- [ ] 4.1 Update `AnalystAgent` system prompt to highlight the Python node is "High Performance".
-  - **真缺口**：agent/mod.rs system prompt 未突出 Python 节点的高性能定位。
+- [x] 4.1 Update `AnalystAgent` system prompt to highlight the Python node is "High Performance".
+  - **已落地 (2026-09-11)**：`agent/mod.rs` prompt 新增 "PERFORMANCE & REPORTING GUIDANCE" 段，
+    明确 "core.script.python ... zero-copy over the Arrow batch and is the high-performance path"，
+    并指引重数值/ML 走 Python、UDF 高速走 core.script.wasm。渲染测试守门。
 - [ ] 4.2 Add a demo workflow where the Agent uses Python for outlier detection.
-  - **真缺口**：examples/agent-analyst.yaml 提及 outlier 但无专用 Python outlier 检测 demo 流程。
+  - **真缺口**：examples/ 无专用 Python outlier 检测 demo 工作流（prompt 已引导，但缺可运行样例）。
 
 ## 收尾
-- 待做（可选，未阻塞）：4.1 agent prompt 文案、4.2 Python outlier demo 工作流
+- 待做（可选，未阻塞）：4.2 Python outlier demo 工作流。
+- ~~4.1 agent prompt 文案~~ 已于 2026-09-11 落地。

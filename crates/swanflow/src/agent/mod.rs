@@ -210,6 +210,24 @@ impl AnalystAgent {
             .map(|s| format!("- {} ({}): {}", s.type_id, s.display_name, s.description))
             .collect();
 
+        // Plain (non-format) string: braces are literal, so we can document
+        // ${context.key} / {{var}} / %%var%% without format! escaping.
+        let guidance = r#"VARIABLES & CONFIG INTERPOLATION
+Node config string values are interpolated at run time. Use:
+- ${context.key}         read a value from the workflow/step context (preferred for cross-node data passing)
+- {{var}} / {{var:default}}   flow variable; the default is used if the var is missing
+- %%var%% / %%var:default%%   KNIME-compatible flow variable form
+Always prefer a form with a safe default (e.g. {{var:default}}) so a missing variable cannot break the run.
+
+PERFORMANCE & REPORTING GUIDANCE
+- Heavy numeric / ML / stats work (outlier detection, scaling, clustering) -> use core.script.python.
+  Python runs zero-copy over the Arrow batch and is the high-performance path; do NOT chain many
+  SQL steps where one Python transform does the job. Use core.script.wasm only when you need 10-100x UDF speed.
+- Dashboards & multi-sheet reports -> use core.io.excel_report (auto charts) or core.io.excel_write.
+- Spread a column into one column per distinct value (pivot) -> use core.transform.pivot
+  (row + column + value + aggregator).
+- Pivot results feed straight into an Excel writer node for formatted export."#;
+
         format!(
             r#"You are SwanFlow AI Analyst Agent. You build data workflow graphs by issuing tool calls.
 
@@ -238,7 +256,9 @@ AVAILABLE TOOLS (output as JSON array in the "tool_calls" field):
    - The lib runs in the luajit extension's trusted sandbox; io/os/ffi need explicit approval.
 
 REGISTERED NODE TYPES:
-{}
+{0}
+
+{1}
 
 WORKFLOW: The graph is a DAG. Nodes process data in topological order.
 Node configs use the schema defined by each type. Use the generate_workflow_yaml
@@ -252,7 +272,8 @@ OUTPUT FORMAT — respond with a JSON object:
     ],
     "final_answer": "summary (optional)"
 }}"#,
-            node_types.join("\n")
+            node_types.join("\n"),
+            guidance
         )
     }
 
@@ -638,6 +659,38 @@ fn resolve_libs_root() -> Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_system_prompt_renders_variable_and_perf_guidance() {
+        struct StubProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for StubProvider {
+            async fn complete(&self, _prompt: &str) -> Result<String> {
+                Ok("{}".into())
+            }
+        }
+        let agent = AnalystAgent {
+            provider: Arc::new(StubProvider),
+            registry: Arc::new(NodeRegistry::new()),
+            engine: Arc::new(SwanFlowEngine::new(Arc::new(NodeRegistry::new()))),
+        };
+        let prompt = agent.build_agent_system_prompt();
+
+        // Interpolation syntax must survive format! verbatim (braces not eaten).
+        assert!(prompt.contains("${context.key}"), "context.key syntax missing");
+        assert!(prompt.contains("{{var:default}}"), "flow-var default syntax missing");
+        assert!(prompt.contains("%%var:default%%"), "knime var syntax missing");
+
+        // Performance / reporting guidance must be present.
+        assert!(prompt.contains("PERFORMANCE & REPORTING GUIDANCE"));
+        assert!(prompt.contains("core.script.python"));
+        assert!(prompt.contains("core.script.wasm"));
+        assert!(prompt.contains("core.io.excel_report"));
+        assert!(prompt.contains("core.transform.pivot"));
+
+        // JSON output block braces survived format! escaping.
+        assert!(prompt.contains("\"tool_calls\""));
+    }
 
     #[test]
     fn test_create_lua_lib_sanitizes_name_and_writes() {

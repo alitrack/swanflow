@@ -1,8 +1,8 @@
 # Tasks: Variable Management
 
 > **记账修正 (2026-09-11)**：原勾选全部为 0%，但代码已落地大部分。
-> 本次按代码实证回填；3.1 与 4.1 仍为真缺口，单独标注。
-> 验证：`cargo test --lib -- --test-threads=1`（flow_vars/templating 全绿）。
+> 本次按代码实证回填；**4.1 已于同日落地**（agent prompt 变量段），唯一剩余 3.1。
+> 验证：`cargo test --lib -- --test-threads=1`（flow_vars/templating/agent 全绿）。
 
 ## 1. Data Model and Infrastructure
 
@@ -31,12 +31,16 @@
 
 ## 4. AI and Validation
 
-- [ ] 4.1 Update `AnalystAgent` system prompt to explain how to use the `${context.key}` syntax.
-  - **真缺口**：agent/mod.rs system prompt 未提及变量占位符语法。
+- [x] 4.1 Update `AnalystAgent` system prompt to explain how to use the `${context.key}` syntax.
+  - **已落地 (2026-09-11)**：`agent/mod.rs` `build_agent_system_prompt` 新增
+    "VARIABLES & CONFIG INTERPOLATION" 段，教 `${context.key}` / `{{var:default}}` /
+    `%%var:default%%` 三种运行时插值语法（均经实测：compiler.rs:297 + engine/mod.rs:1457
+    都调 render_json，flow_vars 处理 `{{var}}`/`%%var%%`）+ 渲染测试 `test_system_prompt_renders_variable_and_perf_guidance` 守门。
 - [x] 4.2 Create a demo tutorial: `Tutorial 10: Dynamic Parameterization`.
   - 实证：`TUTORIALS.md:47` + `tutorials/10_dynamic_parameterization.yaml`
 - [x] 4.3 End-to-End: Agent uses a global variable to control a SQL filter.
   - 实证：`tests/agent_variable_tests.rs`（E2E：agent 经全局变量控制 SQL filter）
 
 ## 收尾
-- 待做（可选，未阻塞）：3.1 隐式依赖、4.1 agent prompt 变量语法文档
+- 唯一剩余：**3.1** 拓扑隐式变量依赖（重排依赖分析，非阻塞）。
+- ~~4.1 agent prompt 变量语法~~ 已于 2026-09-11 落地。

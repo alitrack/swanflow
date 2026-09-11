@@ -1,7 +1,7 @@
 # Tasks: Professional Excel Dashboards
 
 > **记账修正 (2026-09-11)**：原 0/12 勾选，实际多 sheet 报告 + 模板节点 + Tutorial 已落地。
-> 按代码实证回填；2.x（原生 pivot/样式注册表）与 4.1（agent 报告推理）为真缺口。
+> 按代码实证回填；2.x（xlsx 原生 pivot/样式注册表）仍为真缺口。**4.1 已于 2026-09-11 落地**（agent prompt 报告引导段）。
 > 验证：`cargo test --lib` 全绿；excel_tests.rs（test_report_data.csv / test_style_data.csv fixture）。
 
 ## 1. Multi-Input Excel Sink
@@ -37,8 +37,11 @@
 
 ## 4. Agent and UX
 
-- [ ] 4.1 Update `AnalystAgent` to recognize professional reporting tasks.
-  - **真缺口**：agent/mod.rs 无报告/图表选择推理逻辑。
+- [x] 4.1 Update `AnalystAgent` to recognize professional reporting tasks.
+  - **已落地 (2026-09-11)**：`agent/mod.rs` prompt 新增 "PERFORMANCE & REPORTING GUIDANCE" 段，
+    明确 "Dashboards & multi-sheet reports -> core.io.excel_report (auto charts) or core.io.excel_write"，
+    并 "Pivot results feed straight into an Excel writer node"。渲染测试守门。
+    （注：这是 prompt 层引导；更深的"报告任务意图识别"推理仍属可选增强。）
 - [x] 4.2 Add "Chart Recommendation" logic.
   - 实证：ExcelReportNode 自动图表（automated charts）
 - [x] 4.3 Create `Tutorial 09: Professional Excel Reports` showing pivots and branding.
