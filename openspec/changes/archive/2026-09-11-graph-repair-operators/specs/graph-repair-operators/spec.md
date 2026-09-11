@@ -54,3 +54,13 @@ Every repair SHALL preserve graph validity: acyclicity, reachability from source
 ### Requirement: LLM Repair Agent Output
 
 `OpenAiHook::try_fix` SHALL return a `RepairOperator` instead of a bare config value. The fix prompt SHALL include the full graph topology and operator selection rules. Responses in the legacy format (`{"operator":"REBIND","fixed_config":...}` or bare `{"fixed_config":...}`) SHALL remain parseable.
+
+#### Scenario: Operator-bearing fix response
+- **WHEN** a node fails with a classified, recoverable error
+- **THEN** `OpenAiHook::try_fix` SHALL return a typed `RepairOperator` (one of `REBIND | INSERT_PREREQ | SUBSTITUTE | REWIRE | BYPASS`) with the node id, classified failure type, and any proposed config/edge/node payload
+- **AND** the fix prompt sent to the LLM SHALL include the full graph topology and the operator selection rules.
+
+#### Scenario: Legacy response remains parseable
+- **WHEN** the LLM responds in the legacy format (`{"operator":"REBIND","fixed_config":{...}}` or a bare `{"fixed_config":{...}}`)
+- **THEN** the parser SHALL still decode it into the equivalent `RepairOperator`
+- **AND** the engine SHALL re-execute the failed node exactly once with the repaired config.
