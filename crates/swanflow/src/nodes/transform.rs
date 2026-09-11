@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
 use serde_json::Value as JsonValue;
@@ -971,5 +972,281 @@ impl NodeBehavior for AiRouterNode {
         }
 
         Ok(plans)
+    }
+}
+
+/// Pivot table: group by row columns, optionally split by a column value
+/// (one output column per distinct value), aggregate the value column.
+///
+/// SQL translation (DataFusion):
+/// `SELECT r1, r2, SUM(CASE WHEN c = 'v' THEN v END) AS "c_v", ... FROM in GROUP BY r1, r2`
+pub struct PivotNode;
+
+#[async_trait]
+impl NodeBehavior for PivotNode {
+    fn spec(&self) -> NodeSpec {
+        NodeSpec {
+            type_id: "core.transform.pivot".to_string(),
+            display_name: "Pivot Table".to_string(),
+            description:
+                "Pivot data: group by rows, split by column values, aggregate value column."
+                    .to_string(),
+            input_ports: vec![PortSpec {
+                id: 0,
+                name: "input".into(),
+                description: "Data to pivot".into(),
+            }],
+            output_ports: vec![PortSpec {
+                id: 0,
+                name: "output".into(),
+                description: "Pivoted table".into(),
+            }],
+            config_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "row": { "type": "string", "description": "Row grouping column." },
+                    "column": { "type": "string", "description": "Column to spread (one output col per distinct value). Optional." },
+                    "value": { "type": "string", "description": "Value column to aggregate. Defaults to COUNT(*)." },
+                    "aggregator": { "type": "string", "enum": ["sum", "avg", "min", "max", "count"], "default": "sum" }
+                },
+                "required": ["row"]
+            }),
+        }
+    }
+
+    fn validate(&self, config: &JsonValue) -> Result<()> {
+        cfg::required_string(config, "row")?;
+        let agg = cfg::optional_string(config, "aggregator").unwrap_or_else(|| "sum".to_string());
+        if !matches!(
+            agg.as_str(),
+            "sum" | "avg" | "min" | "max" | "count"
+        ) {
+            anyhow::bail!(
+                "PivotNode aggregator must be one of sum/avg/min/max/count, got '{agg}'"
+            );
+        }
+        if let Some(value) = cfg::optional_string(config, "value") {
+            if value.trim().is_empty() {
+                anyhow::bail!("PivotNode 'value' must be non-empty when set");
+            }
+        }
+        Ok(())
+    }
+
+    fn capability(&self) -> NodeCapability {
+        NodeCapability::ReadOnly
+    }
+
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            anyhow::bail!("PivotNode requires at least one input");
+        }
+        let row = cfg::required_string(config, "row")?;
+        let column = cfg::optional_string(config, "column");
+        let value = cfg::optional_string(config, "value");
+        let aggregator = cfg::optional_string(config, "aggregator")
+            .unwrap_or_else(|| "sum".to_string());
+
+        let ctx = SessionContext::new();
+        let df = DataFrame::new(ctx.state(), inputs[0].clone());
+        ctx.register_table("pivot_input", df.into_view())?;
+
+        let q = |s: &str| format!("\"{}\"", s);
+
+        // Determine the values to spread:
+        //  - if `column` is given and `value` is not: spread counts per distinct value
+        //  - if `column` is given and `value` is given: spread aggregates per distinct value
+        //  - otherwise: plain group-by aggregation (no spread)
+        let distinct_values: Vec<String> = if column.is_some() {
+            let col = column.as_deref().unwrap();
+            let sql = format!(
+                "SELECT DISTINCT {} FROM pivot_input ORDER BY 1",
+                q(col)
+            );
+            let df = ctx.sql(&sql).await?;
+            let batches = df.collect().await?;
+            let mut out = Vec::new();
+            for batch in &batches {
+                let col_arr = batch
+                    .column_by_name(col)
+                    .ok_or_else(|| anyhow!("pivot column '{}' not in input", col))?;
+                match col_arr.data_type() {
+                    datafusion::arrow::datatypes::DataType::Utf8 => {
+                        for v in col_arr
+                            .as_any()
+                            .downcast_ref::<datafusion::arrow::array::StringArray>()
+                            .unwrap()
+                        {
+                            if let Some(s) = v {
+                                out.push(s.to_string());
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(anyhow!(
+                            "PivotNode column '{}' must be a string column, got {:?}",
+                            col,
+                            other
+                        ));
+                    }
+                }
+            }
+            out
+        } else {
+            Vec::new()
+        };
+
+        let mut select_parts = vec![q(&row)];
+        if let Some(col) = column.as_deref() {
+            let inner = match value.as_deref() {
+                Some(v) => q(v),
+                None => "1".to_string(),
+            };
+            for v in &distinct_values {
+                let label = format!("{}__{}", col, v);
+                select_parts.push(format!(
+                    "{}(CASE WHEN {} = '{}' THEN {} END) AS {}",
+                    aggregator.to_uppercase(),
+                    q(col),
+                    v.replace('\'', "''"),
+                    inner,
+                    q(&label)
+                ));
+            }
+        } else if let Some(v) = value.as_deref() {
+            select_parts.push(format!(
+                "{}({}) AS {}",
+                aggregator.to_uppercase(),
+                q(v),
+                q(&format!("{}_{}", aggregator, v))
+            ));
+        } else {
+            select_parts.push("COUNT(*) AS row_count".to_string());
+        }
+
+        let sql = format!(
+            "SELECT {} FROM pivot_input GROUP BY {} ORDER BY {}",
+            select_parts.join(", "),
+            q(&row),
+            q(&row)
+        );
+
+        let out_df = ctx.sql(&sql).await?;
+        Ok(vec![out_df.into_optimized_plan()?])
+    }
+}
+
+#[cfg(test)]
+mod pivot_tests {
+    use super::*;
+    use datafusion::arrow::array::{Int64Array, StringArray};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use serde_json::json;
+
+    fn sample_batch() -> Result<RecordBatch> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, false),
+            Field::new("product", DataType::Utf8, false),
+            Field::new("sales", DataType::Int64, false),
+        ]));
+        Ok(RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["east", "east", "west", "west"])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+                Arc::new(Int64Array::from(vec![10, 20, 30, 40])),
+            ],
+        )?
+    )}
+
+    async fn plan_from_batch(batch: &RecordBatch) -> Result<LogicalPlan> {
+        let ctx = SessionContext::new();
+        let provider = datafusion::datasource::MemTable::try_new(
+            batch.schema(),
+            vec![vec![batch.clone()]],
+        )?;
+        ctx.register_table("t", Arc::new(provider))?;
+        Ok(ctx.table("t").await?.into_optimized_plan()?)
+    }
+
+    #[tokio::test]
+    async fn test_pivot_spreads_column_values() -> Result<()> {
+        let node = PivotNode;
+        let plan = plan_from_batch(&sample_batch()?).await?;
+        let config = json!({
+            "row": "region",
+            "column": "product",
+            "value": "sales",
+            "aggregator": "sum"
+        });
+        let plans = node.propose_plan(vec![plan], &config).await?;
+        assert_eq!(plans.len(), 1);
+
+        let ctx = SessionContext::new();
+        let df = DataFrame::new(ctx.state(), plans[0].clone());
+        let batches = df.collect().await?;
+        let mut rows: Vec<(String, i64, i64)> = Vec::new();
+        for b in &batches {
+            let region = b
+                .column_by_name("region")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let pa = b
+                .column_by_name("product__a")
+                .ok_or_else(|| anyhow!("missing product__a"))?
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let pb = b
+                .column_by_name("product__b")
+                .ok_or_else(|| anyhow!("missing product__b"))?
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for i in 0..b.num_rows() {
+                rows.push((
+                    region.value(i).to_string(),
+                    pa.value(i),
+                    pb.value(i),
+                ));
+            }
+        }
+        rows.sort();
+        assert_eq!(rows, vec![("east".into(), 10, 20), ("west".into(), 30, 40)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pivot_plain_groupby_without_column() -> Result<()> {
+        let node = PivotNode;
+        let plan = plan_from_batch(&sample_batch()?).await?;
+        let config = json!({"row": "region", "value": "sales", "aggregator": "count"});
+        let plans = node.propose_plan(vec![plan], &config).await?;
+        let ctx = SessionContext::new();
+        let df = DataFrame::new(ctx.state(), plans[0].clone());
+        let batches = df.collect().await?;
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 2, "two regions");
+        Ok(())
+    }
+
+    #[test]
+    fn test_pivot_validate_rejects_bad_aggregator() {
+        let node = PivotNode;
+        let config = json!({"row": "region", "aggregator": "median"});
+        assert!(node.validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_pivot_validate_requires_row() {
+        let node = PivotNode;
+        let config = json!({"value": "sales"});
+        assert!(node.validate(&config).is_err());
     }
 }

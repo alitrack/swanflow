@@ -68,6 +68,7 @@ python3 generate_data.py
 | `core.transform.aggregate` | Aggregate | GroupBy and multi-column aggregation. |
 | `core.transform.window` | Window | Analytical window functions. |
 | `core.transform.profiler` | Data Profiler | Statistical metrics (min, max, nulls, unique). |
+| `core.transform.pivot` | Pivot Table | Group by rows, spread a column into one column per distinct value, aggregate (sum/avg/min/max/count). |
 | `core.flow.condition` | Condition (IF) | Logical branching based on SQL expressions. |
 | `core.flow.foreach` | ForEach Loop | Iterate over a list of values. |
 | `core.flow.variable_creator` | Var Creator | Manually define flow variables. |

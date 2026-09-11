@@ -93,7 +93,7 @@ impl NodeRegistry {
         use crate::nodes::sql::SqlNode;
         use crate::nodes::transform::{
             AggregateNode, AiRouterNode, ConditionNode, FilterNode, ForEachNode, GraphMergerNode,
-            ProfilerNode, ProjectNode, SemanticCleanerNode, TableSchemaValidatorNode,
+            PivotNode, ProfilerNode, ProjectNode, SemanticCleanerNode, TableSchemaValidatorNode,
             TableToVariableNode, VariableCreatorNode, WindowNode,
         };
         use crate::nodes::wasm::WasmNode;
@@ -138,6 +138,7 @@ impl NodeRegistry {
         self.register_node(Arc::new(ConditionNode));
         self.register_node(Arc::new(ForEachNode));
         self.register_node(Arc::new(ProfilerNode));
+        self.register_node(Arc::new(PivotNode));
         self.register_node(Arc::new(VariableCreatorNode));
         self.register_node(Arc::new(TableToVariableNode));
         self.register_node(Arc::new(GraphMergerNode));

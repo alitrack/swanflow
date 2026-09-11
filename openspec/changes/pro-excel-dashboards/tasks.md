@@ -16,9 +16,13 @@
 ## 2. Advanced Visuals and Pivots
 
 - [ ] 2.1 Implement `PivotTableSpec` in node configuration（rows/columns/aggregate）.
-  - **真缺口**：excel.rs 无 PivotTableSpec 结构。
+  - **真缺口**：excel.rs 无 PivotTableSpec 结构（xlsx 原生 pivot 配置）。
+  - **替代已落地 (2026-09-11)**：新增 DAG 级 `core.transform.pivot` 节点（transform.rs PivotNode），
+    row/column/value/aggregator 配置 → SQL CASE-WHEN 透视，4/4 单测绿。
+    这是分析层透视（输出仍是普通表），非 xlsx 原生可交互 pivot 对象。
 - [ ] 2.2 Enhance `ExcelWritingStream` to generate native Excel Pivot Tables.
-  - **真缺口**：未实现原生 pivot 生成（图表有，pivot 无）。
+  - **真缺口**：未实现原生 pivot 生成（`core.transform.pivot` 已能算出透视结果表，
+    可直接 ExcelWriteNode 落盘，但非"打开 xlsx 后可拖拽"的原生 pivot 控件）。
 - [ ] 2.3 Implement "Style Registry" support：map JSON style definitions to `rust_xlsxwriter::Format`.
   - **真缺口**：无条件格式/品牌样式注册表（基础写入有）。
 
