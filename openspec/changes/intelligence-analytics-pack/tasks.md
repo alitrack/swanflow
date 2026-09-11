@@ -37,7 +37,15 @@
     - `ValidateSchema` → `infer_metadata` 工具（#5）+ `run_analysis` 的 Plan→Verify→Fix 闭环
       （每轮自动 `engine.infer_metadata` 校验，错误回灌 LLM 重试）。
     再建重复工具属降级，故保留 `[ ]` 并标注，不实现。
-- [ ] 4.3 Implement the **HOTL (Human-on-the-Loop)** CLI interface for workflow approval.
+- [x] 4.3 Implement the **HOTL (Human-on-the-Loop)** CLI interface for workflow approval.
+  - **已落地 (2026-09-11)**：`core` 层 `hotl.rs`（`render_summary` / `parse_approval` /
+    `ApprovalGate`，纯函数可单测）+ CLI `swanflow agent approve <file> [--yes|--dry-run|--explain]`。
+    设计：**保守审批**——仅显式肯定（y/yes/approve/ok/go/1/true）放行，空/EOF/未识别一律拒绝，
+    无人值守管道（EOF）永远不会误执行。`--dry-run` 只预览不执行，`--yes` 跳过提示（自动化），
+    `--explain` 审批前先打印推断 schema + diagnostics。
+    9/9 单测绿；端到端真实验证：`swanflow agent approve examples/etl_flow.yaml`
+    三场景（dry-run 不执行 / 人工 n 取消 / 人工 y 真实执行到 Executed）。
+    agent 产出的工作流存 YAML 后同样经此门把关，形成"AI 起草 → 人工把关 → 执行"闭环。
 
 ## 5. End-to-End Validation
 

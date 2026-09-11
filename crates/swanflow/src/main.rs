@@ -66,6 +66,35 @@ enum Commands {
         #[command(subcommand)]
         command: DaemonCommands,
     },
+
+    /// AI Agent commands (generate + human-on-the-loop approval)
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// Review a workflow and approve execution (Human-on-the-Loop gate).
+    ///
+    /// Loads the workflow, prints a summary, and asks for an explicit
+    /// yes/no before running it. Use --yes to skip the prompt (automation),
+    /// --dry-run to preview without executing, --explain to also show the
+    /// inferred per-node schemas.
+    Approve {
+        /// Path to the workflow file (.yaml / .json)
+        file: PathBuf,
+        /// Skip the interactive prompt and approve immediately.
+        #[arg(long)]
+        yes: bool,
+        /// Show the summary and exit without executing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Also print the inferred schemas for each node.
+        #[arg(long)]
+        explain: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -293,6 +322,80 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::Agent { command } => match command {
+            AgentCommands::Approve { file, yes, dry_run, explain } => {
+                use swanflow::hotl::ApprovalGate;
+
+                let workflow = load_workflow(file)?;
+                let registry = Arc::new(NodeRegistry::default());
+                let engine = SwanFlowEngine::new(registry);
+
+                // Optional: show inferred schemas before the approval prompt.
+                if explain {
+                    if let Ok(metadata) = engine.infer_metadata(&workflow).await {
+                        println!("📋 Inferred schemas:");
+                        for (node_id, node_schemas) in metadata.schemas {
+                            println!("  Node[{}]:", node_id);
+                            for (i, schema) in node_schemas.iter().enumerate() {
+                                let cols: Vec<String> = schema
+                                    .fields()
+                                    .iter()
+                                    .map(|f| format!("{}: {:?}", f.name(), f.data_type()))
+                                    .collect();
+                                println!("    Port {}: [{}]", i, cols.join(", "));
+                            }
+                        }
+                        if !metadata.diagnostics.is_empty() {
+                            let all: Vec<&String> = metadata
+                                .diagnostics
+                                .values()
+                                .flat_map(|v| v.iter())
+                                .collect();
+                            println!("⚠️  Diagnostics:");
+                            for d in all {
+                                println!("    - {d}");
+                            }
+                        }
+                        println!();
+                    }
+                }
+
+                if dry_run {
+                    // Preview only: print the summary, never execute, never prompt.
+                    println!("🔍 Dry-run summary (no execution):\n");
+                    print!("{}", swanflow::hotl::render_summary(&workflow));
+                    return Ok(());
+                }
+
+                // Interactive (or --yes) approval gate on stdout/stdin.
+                let gate = if yes {
+                    ApprovalGate::auto_approve()
+                } else {
+                    ApprovalGate::new()
+                };
+                let stdin = std::io::stdin();
+                let stdout = std::io::stdout();
+                let mut lock_in = stdin.lock();
+                let mut lock_out = stdout.lock();
+                let approved = gate.review(&workflow, &mut lock_in, &mut lock_out)?;
+                drop(lock_in);
+                drop(lock_out);
+
+                if !approved {
+                    println!("❌ Execution cancelled by human reviewer.");
+                    return Ok(());
+                }
+
+                println!("✅ Approved — executing workflow: {} ({})", workflow.name, workflow.id);
+                let mut rx = engine.execute_workflow(&workflow).await?;
+                while let Some(event) = rx.recv().await {
+                    if let NodeEvent::StateChanged { node_id, state } = event {
+                        println!("  Node[{}] -> {:?}\n", node_id, state);
+                    }
+                }
+                println!("✅ Execution Finished.");
+            }
+        },
         Commands::Mcp { command } => match command {
             McpCommands::Serve => {
                 println!("🧩 Starting SwanFlow MCP Server (stdio)...");
