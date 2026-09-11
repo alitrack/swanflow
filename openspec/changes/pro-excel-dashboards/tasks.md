@@ -34,8 +34,11 @@
       `add_conditional_format`（数据区，列可指定或全列）。颜色支持命名色 + 6 位 hex。
     实现要点：`conditional_formatting` 此前在 `ExcelWritingStream` 被丢（stream 没带该字段），
     已补传递 ExcelSinkLogical→Exec→Stream；数值规则用 f64（i64 不满足 IntoConditionalFormatValue）。
-    7/7 单测绿（解析 + rust_xlsxwriter 集成 smoke）。
-    **剩余**：data_bar / color_scale / icon_set 等高级条件格式类型未接（cell 规则已覆盖最常见场景）。
+    规则按 `type` 分发：`cell`（比较规则）→ `ConditionalFormatCell`，`data_bar`
+    （数据条，`fill_color`/`solid`/`bar_only`/`min`/`max`）→ `ConditionalFormatDataBar`。
+    11/11 单测绿（解析 + rust_xlsxwriter 集成 smoke：cell rule 与 data bar 各写入真实 workbook）。
+    **剩余**：color_scale / icon_set 未接（rust_xlsxwriter 0.93 无 ColorScale API；
+    IconSet 可用但需图标阈值映射，价值低于已覆盖的 cell + data_bar）。
 
 ## 3. Template Engine
 

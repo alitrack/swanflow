@@ -246,7 +246,7 @@ impl NodeBehavior for ExcelWriteNode {
                     },
                     "conditional_formatting": {
                         "type": "array",
-                        "description": "Declarative conditional-format rules applied to the data region. Each item: {\"column\":\"name\"|null,\"type\":\"cell\",\"operator\":\"equal|not_equal|greater_than|greater_than_equal|less_than|less_than_equal|between|not_between\",\"value\":num|\"min\":num,\"max\":num,\"format\":{\"font_color\":\"hex\",\"bg_color\":\"hex\"}}.",
+                        "description": "Declarative conditional-format rules applied to the data region. Each item: cell rule {\"column\":\"name\"|null,\"type\":\"cell\",\"operator\":\"equal|not_equal|greater_than|greater_than_equal|less_than|less_than_equal|between|not_between\",\"value\":num|\"min\":num,\"max\":num,\"format\":{\"font_color\":\"hex\",\"bg_color\":\"hex\"}} OR data bar {\"column\":\"name\"|null,\"type\":\"data_bar\",\"fill_color\":\"hex\",\"solid\":bool,\"bar_only\":bool,\"min\":num,\"max\":num}.",
                         "default": []
                     }
                 },

@@ -29,6 +29,14 @@
 
 - [x] 4.1 Create `src/agent/loop_.rs` by adapting ZeroClaw's Reasoning Loop.
 - [ ] 4.2 Define **SwanFlow Tools** for the Agent: `ListNodes`, `DraftWorkflow`, `ValidateSchema`.
+  - **记账修正 (2026-09-11)**：这三项**已以优于"按需工具调用的形式存在**，非真缺口：
+    - `ListNodes` → `agent/mod.rs` `build_agent_system_prompt`(207-211)每次把**完整节点目录**
+      注入 system prompt（`registry.list_specs()`，零往返、永远最新）——比按需调用 `ListNodes`
+      工具更省 token、更可靠。
+    - `DraftWorkflow` → 即 `generate_workflow_yaml` 工具（system prompt 工具 #1）。
+    - `ValidateSchema` → `infer_metadata` 工具（#5）+ `run_analysis` 的 Plan→Verify→Fix 闭环
+      （每轮自动 `engine.infer_metadata` 校验，错误回灌 LLM 重试）。
+    再建重复工具属降级，故保留 `[ ]` 并标注，不实现。
 - [ ] 4.3 Implement the **HOTL (Human-on-the-Loop)** CLI interface for workflow approval.
 
 ## 5. End-to-End Validation

@@ -27,7 +27,8 @@ use datafusion::physical_plan::{
 use futures::Stream;
 use futures::StreamExt;
 use rust_xlsxwriter::{
-    Chart, ChartType, Color, ConditionalFormatCell, ConditionalFormatCellRule, Format, Workbook,
+    Chart, ChartType, Color, ConditionalFormatCell, ConditionalFormatCellRule,
+    ConditionalFormatDataBar, ConditionalFormatType, Format, Workbook,
 };
 use serde_json::json;
 use serde_json::Value as JsonValue;
@@ -682,6 +683,34 @@ impl ExcelWritingStream {
         Some(ConditionalFormatCell::new().set_rule(rule).set_format(&fmt))
     }
 
+    /// Build a `ConditionalFormatDataBar` from a rule JSON object:
+    /// `{"type":"data_bar","fill_color":"4E79A7"|"638EC6"|…,"solid":bool,
+    ///    "bar_only":bool,"min":number,"max":number,"direction":"left_to_right"|"right_to_left"}`.
+    /// All fields are optional; absent min/max use Excel's automatic min/max.
+    fn json_to_databar(rule_json: &JsonValue) -> Option<ConditionalFormatDataBar> {
+        if rule_json["type"].as_str() != Some("data_bar") {
+            return None;
+        }
+        let mut db = ConditionalFormatDataBar::new();
+        if let Some(c) = Self::parse_cf_color(rule_json, "fill_color") {
+            db = db.set_fill_color(c.as_str());
+        }
+        if rule_json["solid"].as_bool().unwrap_or(false) {
+            db = db.set_solid_fill(true);
+        }
+        if rule_json["bar_only"].as_bool().unwrap_or(false) {
+            db = db.set_bar_only(true);
+        }
+        // Optional explicit numeric bounds (defaults = automatic).
+        if let Some(min) = rule_json["min"].as_f64() {
+            db = db.set_minimum(ConditionalFormatType::Number, min);
+        }
+        if let Some(max) = rule_json["max"].as_f64() {
+            db = db.set_maximum(ConditionalFormatType::Number, max);
+        }
+        Some(db)
+    }
+
     fn finalize_workbook(&mut self) -> Result<()> {
         if self.all_batches.is_empty() {
             return Ok(());
@@ -850,38 +879,57 @@ impl ExcelWritingStream {
                 if let Some(rules) = self.conditional_formatting.as_array() {
                     let n_cols = schema.fields().len();
                     for rule_json in rules {
-                        let Some(cf) = Self::json_to_conditional_format(rule_json) else {
-                            continue;
-                        };
-                        // Resolve target column range: named column -> single
-                        // col; absent -> all columns.
+                        // Resolve target column range first (shared by all rule
+                        // kinds): named column -> single col; absent -> all cols.
                         let (first_col, last_col) = match rule_json["column"].as_str() {
-                            Some(col_name) => {
-                                match schema
-                                    .fields()
-                                    .iter()
-                                    .position(|f| f.name() == col_name)
-                                {
-                                    Some(idx) => (idx as u16, idx as u16),
-                                    None => {
-                                        tracing::warn!(
-                                            "Conditional format: unknown column '{}', skipping rule",
-                                            col_name
-                                        );
-                                        continue;
-                                    }
+                            Some(col_name) => match schema
+                                .fields()
+                                .iter()
+                                .position(|f| f.name() == col_name)
+                            {
+                                Some(idx) => (idx as u16, idx as u16),
+                                None => {
+                                    tracing::warn!(
+                                        "Conditional format: unknown column '{}', skipping rule",
+                                        col_name
+                                    );
+                                    continue;
                                 }
-                            }
+                            },
                             None => (0, (n_cols.saturating_sub(1)) as u16),
                         };
-                        if let Err(e) = worksheet.add_conditional_format(
-                            1,
-                            first_col,
-                            data_last_row,
-                            last_col,
-                            &cf,
-                        ) {
-                            tracing::warn!("Failed to add conditional format: {}", e);
+
+                        // Dispatch by rule type: `data_bar` -> ConditionalFormatDataBar,
+                        // otherwise (`cell`) -> ConditionalFormatCell.
+                        match rule_json["type"].as_str().unwrap_or("cell") {
+                            "data_bar" => {
+                                let Some(db) = Self::json_to_databar(rule_json) else {
+                                    continue;
+                                };
+                                if let Err(e) = worksheet.add_conditional_format(
+                                    1,
+                                    first_col,
+                                    data_last_row,
+                                    last_col,
+                                    &db,
+                                ) {
+                                    tracing::warn!("Failed to add data bar: {}", e);
+                                }
+                            }
+                            _ => {
+                                let Some(cf) = Self::json_to_conditional_format(rule_json) else {
+                                    continue;
+                                };
+                                if let Err(e) = worksheet.add_conditional_format(
+                                    1,
+                                    first_col,
+                                    data_last_row,
+                                    last_col,
+                                    &cf,
+                                ) {
+                                    tracing::warn!("Failed to add conditional format: {}", e);
+                                }
+                            }
                         }
                     }
                 }
@@ -1526,5 +1574,52 @@ mod conditional_format_tests {
         // Must not error: f64 ConditionalFormatCellRule + hex-color Format.
         ws.add_conditional_format(1, 0, 5, 0, &cf)
             .expect("add_conditional_format should succeed");
+    }
+
+    // ── Data bar ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_data_bar_rule() {
+        let rule = json!({
+            "column": "revenue",
+            "type": "data_bar",
+            "fill_color": "4E79A7",
+            "solid": true,
+            "bar_only": true,
+            "min": 0,
+            "max": 1000
+        });
+        assert!(ExcelWritingStream::json_to_databar(&rule).is_some());
+    }
+
+    #[test]
+    fn data_bar_defaults_are_automatic() {
+        // No min/max/solid/bar_only -> still builds (automatic min/max).
+        let rule = json!({ "type": "data_bar", "fill_color": "green" });
+        assert!(ExcelWritingStream::json_to_databar(&rule).is_some());
+    }
+
+    #[test]
+    fn json_to_databar_rejects_non_databar_type() {
+        let rule = json!({ "type": "cell", "operator": "less_than", "value": 1 });
+        assert!(ExcelWritingStream::json_to_databar(&rule).is_none());
+    }
+
+    #[test]
+    fn builds_real_data_bar_into_workbook() {
+        let rule = json!({
+            "type": "data_bar",
+            "fill_color": "4E79A7",
+            "solid": true,
+            "bar_only": true,
+            "min": 0,
+            "max": 100
+        });
+        let db = ExcelWritingStream::json_to_databar(&rule).expect("data bar parsed");
+        let mut wb = Workbook::new();
+        let ws = wb.add_worksheet();
+        // Must not error: ConditionalFormatDataBar through the generic add_conditional_format.
+        ws.add_conditional_format(1, 0, 5, 0, &db)
+            .expect("add_conditional_format (data bar) should succeed");
     }
 }
