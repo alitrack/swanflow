@@ -514,7 +514,11 @@ mod tests {
     /// the <config key="model"> section. Nested configs (like 
     /// table_spec_config_Internals with column info) are NOT parsed yet.
     /// Once the parser is enhanced, extract_columns will work.
+    ///
+    /// Requires the real `/tmp/test_walmart.knwf` fixture (machine-specific,
+    /// not committed). Run with: cargo test -- --ignored
     #[test]
+    #[ignore = "requires /tmp/test_walmart.knwf fixture (not committed)"]
     fn test_extract_columns_parser_enhanced() {
         let archive = KnwfParser::parse_file("/tmp/test_walmart.knwf")
             .expect("Failed to parse Walmart workflow");
@@ -542,6 +546,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires /tmp/test_walmart.knwf fixture (not committed)"]
     fn test_generate_no_viz_nodes() {
         // Walmart workflow has no visualization nodes — should return empty
         let archive = KnwfParser::parse_file("/tmp/test_walmart.knwf")
@@ -553,6 +558,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires /tmp/test_walmart.knwf fixture (not committed)"]
     fn test_upstream_trace() {
         let archive = KnwfParser::parse_file("/tmp/test_walmart.knwf")
             .expect("Failed to parse Walmart workflow");
