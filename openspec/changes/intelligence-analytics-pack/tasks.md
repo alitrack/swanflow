@@ -15,8 +15,15 @@
 ## 3. Excel Pro: Pivot and Charts
 
 - [x] 3.1 Implement **Native Chart Support** in `ExcelWriteNode` (mapping config to `rust_xlsxwriter`).
-- [x] 3.2 Implement **Native Pivot Table** support (Definition injection into `.xlsx`).
-- [ ] 3.3 Create an **Excel Styling DSL** for conditional formatting and headers.
+  - 实证：`ExcelReportSink` 的 `charts` 配置被消费 → `insert_chart`（excel.rs:1404 区域）。
+- [ ] 3.2 Implement **Native Pivot Table** support (Definition injection into `.xlsx`).
+  - **记账修正 (2026-09-11)**：原标 `[x]` 为**失真**——写入层（core/datasource/excel.rs +
+    nodes/io/excel.rs）grep 无任何 pivot/pivotTable 代码，xlsx 原生可拖拽 pivot 对象未实现。
+    实际落地的是分析层透视：`core.transform.pivot`（PivotNode，输出普通表，可接 ExcelWriter 落盘）。
+- [x] 3.3 Create an **Excel Styling DSL** for conditional formatting and headers.
+  - **已落地 (2026-09-11)**：`core.io.excel_write` 暴露 `styles`（按列静态样式）+
+    `conditional_formatting`（cell 规则，8 种比较操作符 + 命名/hex 颜色）DSL，
+    见 pro-excel-dashboards 2.3。7/7 单测绿。
 
 ## 4. Analyst Agent (ZeroClaw Migration)
 

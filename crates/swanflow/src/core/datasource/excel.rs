@@ -26,7 +26,9 @@ use datafusion::physical_plan::{
 };
 use futures::Stream;
 use futures::StreamExt;
-use rust_xlsxwriter::{Chart, ChartType, Color, Format, Workbook};
+use rust_xlsxwriter::{
+    Chart, ChartType, Color, ConditionalFormatCell, ConditionalFormatCellRule, Format, Workbook,
+};
 use serde_json::json;
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
@@ -508,6 +510,7 @@ impl ExecutionPlan for ExcelSinkExec {
             path: self.path.clone(),
             sheets: self.sheets.clone(),
             styles: self.styles.clone(),
+            conditional_formatting: self.conditional_formatting.clone(),
             convert_to_table: self.convert_to_table,
             all_batches: vec![Vec::new(); input_count],
             finished_mask: vec![false; input_count],
@@ -520,6 +523,7 @@ struct ExcelWritingStream {
     path: PathBuf,
     sheets: Vec<String>,
     styles: JsonValue,
+    conditional_formatting: JsonValue,
     convert_to_table: bool,
     /// Stores batches per input (sheet)
     all_batches: Vec<Vec<RecordBatch>>,
@@ -605,6 +609,77 @@ impl ExcelWritingStream {
             format = format.set_num_format(num_format);
         }
         format
+    }
+
+    /// Parse a color value that is either a named color (`red`/`blue`/…) or a
+    /// 6-digit hex string (`"9C0006"`). Returns None when absent.
+    ///
+    /// Used by the conditional-formatting path, where the example API shows
+    /// `set_font_color("9C0006")` accepts hex directly (unlike the named-color
+    /// path in `json_to_format`).
+    fn parse_cf_color(json: &JsonValue, key: &str) -> Option<String> {
+        let s = json[key].as_str()?;
+        let t = s.trim().trim_start_matches('#');
+        if t.len() == 6 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+            Some(t.to_string())
+        } else {
+            match t.to_lowercase().as_str() {
+                "red" => Some("C00000".to_string()),
+                "green" => Some("00B050".to_string()),
+                "blue" => Some("0070C0".to_string()),
+                "yellow" => Some("FFC000".to_string()),
+                "white" => Some("FFFFFF".to_string()),
+                "black" => Some("000000".to_string()),
+                _ => None,
+            }
+        }
+    }
+
+    /// Build a `Format` for a conditional-formatting rule from its JSON spec:
+    /// `{"font_color":"…","bg_color":"…"}`. Colors may be named or 6-digit hex.
+    fn json_to_cf_format(format_json: &JsonValue) -> Format {
+        let mut format = Format::new();
+        if let Some(c) = Self::parse_cf_color(format_json, "font_color") {
+            format = format.set_font_color(c.as_str());
+        }
+        if let Some(c) = Self::parse_cf_color(format_json, "bg_color") {
+            format = format.set_background_color(c.as_str());
+        }
+        format
+    }
+
+    /// Build a `ConditionalFormatCell` from a single rule JSON object:
+    /// `{"type":"cell","operator":"greater_than_equal","value":50,"format":{…}}`
+    /// or `{"type":"cell","operator":"between","min":30,"max":70,"format":{…}}`.
+    fn json_to_conditional_format(rule_json: &JsonValue) -> Option<ConditionalFormatCell> {
+        if rule_json["type"].as_str() != Some("cell") {
+            return None;
+        }
+        let op = rule_json["operator"].as_str()?;
+        let fmt = Self::json_to_cf_format(&rule_json["format"]);
+        // Numeric rules use f64 (in `IntoConditionalFormatValue`; i64 is not).
+        let rule: ConditionalFormatCellRule<f64> = match op {
+            "equal" => ConditionalFormatCellRule::EqualTo(rule_json["value"].as_f64()?),
+            "not_equal" => ConditionalFormatCellRule::NotEqualTo(rule_json["value"].as_f64()?),
+            "greater_than" => ConditionalFormatCellRule::GreaterThan(rule_json["value"].as_f64()?),
+            "greater_than_equal" => {
+                ConditionalFormatCellRule::GreaterThanOrEqualTo(rule_json["value"].as_f64()?)
+            }
+            "less_than" => ConditionalFormatCellRule::LessThan(rule_json["value"].as_f64()?),
+            "less_than_equal" => {
+                ConditionalFormatCellRule::LessThanOrEqualTo(rule_json["value"].as_f64()?)
+            }
+            "between" => ConditionalFormatCellRule::Between(
+                rule_json["min"].as_f64()?,
+                rule_json["max"].as_f64()?,
+            ),
+            "not_between" => ConditionalFormatCellRule::NotBetween(
+                rule_json["min"].as_f64()?,
+                rule_json["max"].as_f64()?,
+            ),
+            _ => return None,
+        };
+        Some(ConditionalFormatCell::new().set_rule(rule).set_format(&fmt))
     }
 
     fn finalize_workbook(&mut self) -> Result<()> {
@@ -759,6 +834,56 @@ impl ExcelWritingStream {
                     &table,
                 ) {
                     tracing::warn!("Failed to add Excel table: {}", e);
+                }
+            }
+
+            // Task 2.3 (style registry / conditional formatting): apply any
+            // declarative conditional-format rules to the data region.
+            // Rule JSON (per array element):
+            //   {"column": "score", "type": "cell",
+            //    "operator": "less_than", "value": 60,
+            //    "format": {"bg_color": "FFC7CE", "font_color": "9C0006"}}
+            // `column` is optional — omitted means all data columns. The range
+            // is the data rows only (row 1..row_offset-1; row 0 is the header).
+            let data_last_row = (row_offset - 1) as u32;
+            if row_offset > 1 {
+                if let Some(rules) = self.conditional_formatting.as_array() {
+                    let n_cols = schema.fields().len();
+                    for rule_json in rules {
+                        let Some(cf) = Self::json_to_conditional_format(rule_json) else {
+                            continue;
+                        };
+                        // Resolve target column range: named column -> single
+                        // col; absent -> all columns.
+                        let (first_col, last_col) = match rule_json["column"].as_str() {
+                            Some(col_name) => {
+                                match schema
+                                    .fields()
+                                    .iter()
+                                    .position(|f| f.name() == col_name)
+                                {
+                                    Some(idx) => (idx as u16, idx as u16),
+                                    None => {
+                                        tracing::warn!(
+                                            "Conditional format: unknown column '{}', skipping rule",
+                                            col_name
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                            None => (0, (n_cols.saturating_sub(1)) as u16),
+                        };
+                        if let Err(e) = worksheet.add_conditional_format(
+                            1,
+                            first_col,
+                            data_last_row,
+                            last_col,
+                            &cf,
+                        ) {
+                            tracing::warn!("Failed to add conditional format: {}", e);
+                        }
+                    }
                 }
             }
 
@@ -1316,5 +1441,90 @@ impl ExcelReportWritingStream {
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod conditional_format_tests {
+    use super::*;
+    use rust_xlsxwriter::Workbook;
+
+    // ── Pure parse logic (no IO) ─────────────────────────────────────────
+
+    #[test]
+    fn parses_greater_than_equal_rule() {
+        let rule = json!({
+            "column": "score",
+            "type": "cell",
+            "operator": "greater_than_equal",
+            "value": 50,
+            "format": { "bg_color": "FFC7CE", "font_color": "9C0006" }
+        });
+        assert!(ExcelWritingStream::json_to_conditional_format(&rule).is_some());
+    }
+
+    #[test]
+    fn parses_between_rule() {
+        let rule = json!({
+            "type": "cell",
+            "operator": "between",
+            "min": 30,
+            "max": 70,
+            "format": { "bg_color": "green" }
+        });
+        assert!(ExcelWritingStream::json_to_conditional_format(&rule).is_some());
+    }
+
+    #[test]
+    fn rejects_non_cell_type() {
+        let rule = json!({ "type": "data_bar", "operator": "between", "min": 0, "max": 10 });
+        assert!(ExcelWritingStream::json_to_conditional_format(&rule).is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_operator() {
+        let rule = json!({ "type": "cell", "operator": "vibes", "value": 1 });
+        assert!(ExcelWritingStream::json_to_conditional_format(&rule).is_none());
+    }
+
+    #[test]
+    fn rejects_missing_value() {
+        let rule = json!({ "type": "cell", "operator": "greater_than" });
+        assert!(ExcelWritingStream::json_to_conditional_format(&rule).is_none());
+    }
+
+    #[test]
+    fn parses_hex_and_named_colors() {
+        assert_eq!(
+            ExcelWritingStream::parse_cf_color(&json!({ "font_color": "#9C0006" }), "font_color"),
+            Some("9C0006".to_string())
+        );
+        assert_eq!(
+            ExcelWritingStream::parse_cf_color(&json!({ "font_color": "Red" }), "font_color"),
+            Some("C00000".to_string())
+        );
+        // Invalid (not 6-hex, not a known name) -> None.
+        assert_eq!(
+            ExcelWritingStream::parse_cf_color(&json!({ "font_color": "plum" }), "font_color"),
+            None
+        );
+    }
+
+    // ── rust_xlsxwriter integration smoke (f64 rule + hex color writes) ──
+
+    #[test]
+    fn builds_real_conditional_format_into_workbook() {
+        let rule = json!({
+            "type": "cell",
+            "operator": "less_than",
+            "value": 60,
+            "format": { "bg_color": "FFC7CE", "font_color": "9C0006" }
+        });
+        let cf = ExcelWritingStream::json_to_conditional_format(&rule).expect("rule parsed");
+        let mut wb = Workbook::new();
+        let ws = wb.add_worksheet();
+        // Must not error: f64 ConditionalFormatCellRule + hex-color Format.
+        ws.add_conditional_format(1, 0, 5, 0, &cf)
+            .expect("add_conditional_format should succeed");
     }
 }

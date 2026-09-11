@@ -238,7 +238,17 @@ impl NodeBehavior for ExcelWriteNode {
                 "properties": {
                     "path": { "type": "string" },
                     "sheet": { "type": "string", "default": "Sheet1" },
-                    "convert_to_table": { "type": "boolean", "default": true }
+                    "convert_to_table": { "type": "boolean", "default": true },
+                    "styles": {
+                        "type": "array",
+                        "description": "Per-column static styles. Each item: {\"column\":\"name\",\"format\":{\"bold\":bool,\"font_color\":\"red|hex\",\"bg_color\":\"green|hex\",\"num_format\":\"0.00\"}}.",
+                        "default": []
+                    },
+                    "conditional_formatting": {
+                        "type": "array",
+                        "description": "Declarative conditional-format rules applied to the data region. Each item: {\"column\":\"name\"|null,\"type\":\"cell\",\"operator\":\"equal|not_equal|greater_than|greater_than_equal|less_than|less_than_equal|between|not_between\",\"value\":num|\"min\":num,\"max\":num,\"format\":{\"font_color\":\"hex\",\"bg_color\":\"hex\"}}.",
+                        "default": []
+                    }
                 },
                 "required": ["path"]
             }),
@@ -258,15 +268,18 @@ impl NodeBehavior for ExcelWriteNode {
         let path = PathBuf::from(cfg::required_string(config, "path")?);
         let sheet = cfg::optional_string(config, "sheet").unwrap_or_else(|| "Sheet1".to_string());
         let convert_to_table = cfg::optional_bool(config, "convert_to_table").unwrap_or(true);
+        let styles = config.get("styles").cloned().unwrap_or_else(|| json!([]));
+        let conditional_formatting =
+            config.get("conditional_formatting").cloned().unwrap_or_else(|| json!([]));
 
         let sink_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(ExcelSinkLogical {
                 path,
                 sheets: vec![sheet],
                 inputs,
-                styles: json!({}),
+                styles,
                 convert_to_table,
-                conditional_formatting: json!([]),
+                conditional_formatting,
             }),
         });
 

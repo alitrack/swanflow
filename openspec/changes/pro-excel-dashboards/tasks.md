@@ -1,7 +1,7 @@
 # Tasks: Professional Excel Dashboards
 
 > **记账修正 (2026-09-11)**：原 0/12 勾选，实际多 sheet 报告 + 模板节点 + Tutorial 已落地。
-> 按代码实证回填；2.x（xlsx 原生 pivot/样式注册表）仍为真缺口。**4.1 已于 2026-09-11 落地**（agent prompt 报告引导段）。
+> 按代码实证回填；**2.3（样式注册表+条件格式）已于 2026-09-11 落地**，2.1/2.2（xlsx 原生 pivot 控件）为真缺口。
 > 验证：`cargo test --lib` 全绿；excel_tests.rs（test_report_data.csv / test_style_data.csv fixture）。
 
 ## 1. Multi-Input Excel Sink
@@ -23,8 +23,19 @@
 - [ ] 2.2 Enhance `ExcelWritingStream` to generate native Excel Pivot Tables.
   - **真缺口**：未实现原生 pivot 生成（`core.transform.pivot` 已能算出透视结果表，
     可直接 ExcelWriteNode 落盘，但非"打开 xlsx 后可拖拽"的原生 pivot 控件）。
-- [ ] 2.3 Implement "Style Registry" support：map JSON style definitions to `rust_xlsxwriter::Format`.
-  - **真缺口**：无条件格式/品牌样式注册表（基础写入有）。
+- [x] 2.3 Implement "Style Registry" support：map JSON style definitions to `rust_xlsxwriter::Format`.
+  - **已落地 (2026-09-11)**：`core/datasource/excel.rs` 两条样式通道，均在 `core.io.excel_write`
+    配置暴露（原来硬编码空）：
+    - **静态列样式** `styles`：`[{column, format:{bold,font_color,bg_color,num_format}}]`
+      → `json_to_format` → `write_with_format`（按列）。
+    - **条件格式** `conditional_formatting`：`[{column?, type:"cell",
+      operator:equal|not_equal|greater_than|greater_than_equal|less_than|less_than_equal|between|not_between,
+      value|min|max, format:{font_color,bg_color}}]` → `json_to_conditional_format` →
+      `add_conditional_format`（数据区，列可指定或全列）。颜色支持命名色 + 6 位 hex。
+    实现要点：`conditional_formatting` 此前在 `ExcelWritingStream` 被丢（stream 没带该字段），
+    已补传递 ExcelSinkLogical→Exec→Stream；数值规则用 f64（i64 不满足 IntoConditionalFormatValue）。
+    7/7 单测绿（解析 + rust_xlsxwriter 集成 smoke）。
+    **剩余**：data_bar / color_scale / icon_set 等高级条件格式类型未接（cell 规则已覆盖最常见场景）。
 
 ## 3. Template Engine
 
