@@ -33,7 +33,7 @@
 - [x] 4.1 ADR-013-elastic-fanout-error-policy.md（Forge §3.3 弹性 fan-out 出处 + 默认值变更说明 + retry helper 否决记录）
 - [x] 4.2 `cargo check --workspace` 零错误 + `cargo test -p swanflow-core` 84/84 不变
 - [x] 4.3 engine::tests 7/7 绿（分类 5 + 聚合 2）
-- [ ] 4.4 提交 → 用户确认推送合并（待办）
+- [x] 4.4 提交 → 用户确认推送合并（已 merge 进 main：a49a3bc；2026-09-11 记账补勾）
 
 ## 行为变更说明（默认值变更）
 

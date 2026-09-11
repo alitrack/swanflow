@@ -35,7 +35,7 @@
 - [x] 4.2 CONTRIBUTING.md（新建，含 middleware 三处注册扩展指南 + 测试环境）
 - [x] 4.3 `cargo check --workspace` 零错误 + `cargo test -p swanflow-core` 84/84 不变
 - [x] 4.4 middleware 测试 15/15 绿
-- [ ] 4.5 提交 → 用户确认推送合并（待办）
+- [x] 4.5 提交 → 用户确认推送合并（已 merge 进 main：d9828df；2026-09-11 记账补勾）
 
 ## 基线记录（2026-08-11 预规划门实测）
 

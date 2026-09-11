@@ -23,12 +23,22 @@
 
 ## 2. Milestone 2: NodeBehavior 默认实现
 
-- [ ] 2.1 `NodeBehavior::validate` 增加 schema 驱动默认方法（`validate_single` 实现）
-- [ ] 2.2 grep 确认主 crate 是否重复定义 NodeSpec（`crates/swanflow/src/nodes/mod.rs:44`）；若重复 → 同步加默认方法或 re-export（不擅自重构）
-- [ ] 2.3 抽查 3 个节点（boundary / excel / python）确认 schema 与手写 validate 语义一致；不一致处记录到 2.4
+> **记账修正 (2026-09-11)**：本 change 已 merge 进 main（d423256），但 tasks.md 未回填、目录未归档。按代码实证修正：
+> - 2.1 已落地：`crates/swanflow/src/nodes/mod.rs` `NodeBehavior::validate` 默认实现委托
+>   `swanflow_core::validation::SchemaValidator::validate_single`（实测行 11-13）
+> - 2.2 已完成：主 crate 确实重复定义 `NodeSpec`（`src/nodes/mod.rs:40` vs `swanflow-core/src/nodes.rs:24`），
+>   按本 change 约定"不擅自重构"，双定义保留为已知状态，默认方法已在两侧对齐
+> - 2.3/2.5 由 `tests/m0_contract_validation_tests.rs` + `m0_contracts_tests.rs` 覆盖
+>   （boundary 拒绝式校验 + 契约测试，240f391 合入）
+> - 2.4 **真缺口**：`x-semantic-validate` 标记 grep 全仓为空，未添加
+> - 2.6 通过：当前 workspace 全量 323 passed / 0 failed（2026-09-11 实测）
+
+- [x] 2.1 `NodeBehavior::validate` 增加 schema 驱动默认方法（`validate_single` 实现）
+- [x] 2.2 grep 确认主 crate 是否重复定义 NodeSpec（`crates/swanflow/src/nodes/mod.rs:44`）；若重复 → 同步加默认方法或 re-export（不擅自重构）
+- [x] 2.3 抽查 3 个节点（boundary / excel / python）确认 schema 与手写 validate 语义一致；不一致处记录到 2.4
 - [ ] 2.4 语义 override 节点在 schema 加 `x-semantic-validate: true` 标记（如 python.rs）
-- [ ] 2.5 CI 对比测试：schema 校验 ⊆ 手写校验（新增测试文件）
-- [ ] 2.6 `cargo test --workspace` 全绿
+- [x] 2.5 CI 对比测试：schema 校验 ⊆ 手写校验（新增测试文件）
+- [x] 2.6 `cargo test --workspace` 全绿
 
 ## 3. Milestone 3: adapter 暴露 schema ✅（2026-08-11）
 
@@ -45,4 +55,4 @@
 - [x] 4.2 ADR-011-schema-driven-config-contract.md（Context = Forge 契约三角调研 / Decision 三项 / Consequences / Evidence / Alternatives）
 - [x] 4.3 提交实现代码（openspec/ 不入 git）—— commit `5d308e4`（9 文件 460+/15-；他人改动零混入：nodes.rs NodeState 部分/registry.rs 留在工作区）
 - [x] 4.4 回归：`cargo clippy -p swanflow-core` 零 error 零新增告警（validation.rs 干净）；全量测试受环境限制用子集验证（见 M3 注）
-- [ ] 4.5 用户确认后推送（分支 `feat/schema-config-contract`）
+- [x] 4.5 用户确认后推送（已 merge 进 main：d423256；2026-09-11 记账补勾）
