@@ -279,12 +279,85 @@ OUTPUT FORMAT — respond with a JSON object:
 
     // ── Response parsing ──────────────────────────────────────────────
 
+    /// Extract the top-level JSON object/array from a raw LLM completion,
+    /// being AWARE of JSON string literals (so braces inside `"..."` don't
+    /// corrupt the balance count). This is more robust than the shared
+    /// `ConfigWizard::extract_json_from_response` helper, which does naive
+    /// brace counting and truncates responses whose strings contain braces
+    /// or fences (e.g. a thought mentioning "```").
+    fn extract_top_level_json<'a>(completion: &'a str) -> Option<&'a str> {
+        // Pick the opening bracket: prefer a leading `[` or `{`; otherwise
+        // use whichever of `{`/`[` appears first in the text.
+        let open: char = if completion.trim_start().starts_with('[') {
+            '['
+        } else if completion.trim_start().starts_with('{') {
+            '{'
+        } else {
+            let (b, k) = (completion.find('{'), completion.find('['));
+            match (b, k) {
+                (Some(b), Some(k)) => {
+                    if b <= k {
+                        '{'
+                    } else {
+                        '['
+                    }
+                }
+                (Some(_), None) => '{',
+                (None, Some(_)) => '[',
+                _ => return None,
+            }
+        };
+        let close: char = if open == '{' {
+            '}'
+        } else {
+            ']'
+        };
+        let start = completion.find(open)?;
+
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut escaped = false;
+
+        for (i, c) in completion[start..].char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                c if c == open => depth += 1,
+                c if c == close => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&completion[start..start + i + 1]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn parse_response(&self, completion: &str) -> Result<AgentResponse> {
-        let json_block = crate::nodes::ai::ConfigWizard::extract_json_from_response(completion)
-            .unwrap_or(completion);
-        // Try as an array of tool calls first (alternate format)
-        if json_block.trim().starts_with('[') {
-            let calls: Vec<AgentToolCall> = serde_json::from_str(json_block.trim())
+        // Prefer the robust string-aware extractor; fall back to the shared
+        // helper (which handles ```json fences) if it finds nothing.
+        let json_block = match Self::extract_top_level_json(completion) {
+            Some(s) => s.trim().to_string(),
+            None => crate::nodes::ai::ConfigWizard::extract_json_from_response(completion)
+                .unwrap_or(completion)
+                .trim()
+                .to_string(),
+        };
+
+        // Array-of-tool-calls alternate format.
+        if json_block.starts_with('[') {
+            let calls: Vec<AgentToolCall> = serde_json::from_str(&json_block)
                 .with_context(|| format!("failed to parse agent tool array: {}", completion))?;
             return Ok(AgentResponse {
                 thought: None,
@@ -292,7 +365,7 @@ OUTPUT FORMAT — respond with a JSON object:
                 final_answer: None,
             });
         }
-        serde_json::from_str::<AgentResponse>(json_block.trim())
+        serde_json::from_str::<AgentResponse>(&json_block)
             .with_context(|| format!("failed to parse agent response JSON: {}", completion))
     }
 
@@ -431,13 +504,25 @@ OUTPUT FORMAT — respond with a JSON object:
         description: &str,
         workflow: &mut Workflow,
     ) -> Result<()> {
+        /// A node as described in the LLM's flat YAML (before conversion
+        /// into a real petgraph NodeInstance).
+        struct FlatNode {
+            type_id: String,
+            uuid: String,
+            config: JsonValue,
+        }
+
         let prompt = format!(
             r#"You are a SwanFlow YAML workflow generator.
 
-Convert the following natural language description into a valid SwanFlow workflow in YAML format.
+Convert the description into a valid SwanFlow workflow.
 
-The YAML structure is:
-```yaml
+RULES:
+- Output ONLY the YAML document, starting with `name:` on the first line.
+- Do NOT add a language tag, comment, or any non-YAML prefix line.
+- Use each node's `id` (UUID) in the edges, NOT the type_id.
+
+YAML structure:
 name: <workflow-name>
 nodes:
   - id: <uuid>
@@ -445,13 +530,12 @@ nodes:
     config:
       key: value
 edges:
-  - source: <source-type_id>
-    target: <target-type_id>
+  - source: <source-node-uuid>
+    target: <target-node-uuid>
     source_port: 0
     target_port: 0
-```
 
-Available node types (with their type_id and config schema):
+Available node types:
 {}
 
 Description: {}
@@ -459,7 +543,7 @@ Description: {}
             self.registry
                 .list_specs()
                 .iter()
-                .map(|s| { format!("- {}: config_schema={}", s.type_id, s.config_schema) })
+                .map(|s| format!("- {}: config_schema={}", s.type_id, s.config_schema))
                 .collect::<Vec<_>>()
                 .join("\n"),
             description
@@ -469,29 +553,111 @@ Description: {}
         let yaml_str = crate::nodes::ai::ConfigWizard::extract_json_from_response(&completion)
             .unwrap_or(&completion);
 
-        // Parse YAML into a temporary workflow structure
-        // The LLM may output YAML directly or inside a code block
+        // Strip markdown fences and any stray "yaml"/"yml" prefix line that
+        // the LLM sometimes emits before the actual YAML document.
         let raw = yaml_str.trim();
-        let parsed: Workflow = if raw.starts_with('{') {
-            serde_json::from_str(raw)
-                .with_context(|| format!("failed to parse workflow JSON: {}", raw))?
-        } else {
-            // Try YAML, strip any markdown fences if present
-            let cleaned = raw
-                .strip_prefix("```yaml")
-                .or_else(|| raw.strip_prefix("```yml"))
-                .or_else(|| raw.strip_prefix("```"))
-                .map(|s| s.strip_suffix("```").unwrap_or(s))
-                .unwrap_or(raw)
-                .trim();
-            serde_yaml::from_str(cleaned)
-                .with_context(|| format!("failed to parse workflow YAML: {}", cleaned))?
+        let cleaned = raw
+            .strip_prefix("```yaml")
+            .or_else(|| raw.strip_prefix("```yml"))
+            .or_else(|| raw.strip_prefix("```"))
+            .map(|s| s.strip_suffix("```").unwrap_or(s))
+            .unwrap_or(raw)
+            .trim();
+        let cleaned = {
+            let first_nl = cleaned.find('\n').unwrap_or(cleaned.len());
+            let first_line = cleaned[..first_nl].trim().to_lowercase();
+            if first_line == "yaml" || first_line == "yml" {
+                cleaned[first_nl..]
+                    .trim_start_matches(|c: char| c == '\n' || c == '\r')
+            } else {
+                cleaned
+            }
         };
 
-        // Merge: replace workflow content with the parsed one
-        workflow.name = parsed.name;
-        workflow.graph = parsed.graph;
-        workflow.context = parsed.context;
+        // Parse into a JSON Value. The LLM outputs a FLAT structure
+        // (name/nodes[]/edges[] at the top level), NOT the nested
+        // Workflow serde shape (name/id/context/graph{nodes,edges}).
+        let flat: JsonValue = if cleaned.starts_with('{') {
+            serde_json::from_str(cleaned)
+                .with_context(|| format!("failed to parse workflow JSON: {}", cleaned))?
+        } else {
+            let yaml_val: serde_yaml::Value = serde_yaml::from_str(cleaned)
+                .with_context(|| format!("failed to parse workflow YAML:\n{}", cleaned))?;
+            serde_json::to_value(&yaml_val)
+                .with_context(|| "failed to convert YAML→JSON")?
+        };
+
+        // Build a real Workflow from the flat structure.
+        let mut wf = Workflow::new(
+            flat["name"].as_str().unwrap_or("agent-workflow"),
+        );
+
+        // Phase 1: collect flat node descriptors.
+        let flat_nodes: Vec<FlatNode> = flat["nodes"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|n| {
+                        let type_id = n["type_id"].as_str()?.to_string();
+                        let uuid = n["id"]
+                            .as_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| Uuid::new_v4().to_string());
+                        Some(FlatNode {
+                            type_id,
+                            uuid,
+                            config: n["config"].clone(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Phase 2: add nodes to the graph, recording each NodeIndex by position.
+        let mut graph_idx: Vec<_> = Vec::with_capacity(flat_nodes.len());
+        for node in &flat_nodes {
+            let ni = NodeInstance::new(
+                Uuid::parse_str(&node.uuid).unwrap_or_else(|_| Uuid::new_v4()),
+                node.type_id.clone(),
+                node.config.clone(),
+                NodeState::Configured,
+            );
+            graph_idx.push(wf.graph.add_node(ni));
+        }
+
+        // Phase 3: add edges. Resolve source/target by UUID first, then type_id.
+        fn find_node_pos<'a>(flat_nodes: &'a [FlatNode], key: &str) -> Option<usize> {
+            flat_nodes.iter().position(|d| d.uuid == key || d.type_id == key)
+        }
+
+        if let Some(edges_arr) = flat["edges"].as_array() {
+            for e in edges_arr {
+                let src = e["source"].as_str().unwrap_or("");
+                let dst = e["target"].as_str().unwrap_or("");
+                if src.is_empty() || dst.is_empty() {
+                    continue;
+                }
+                let from_pos = find_node_pos(&flat_nodes, src)
+                    .ok_or_else(|| anyhow::anyhow!("edge source '{}' not found in nodes list", src))?;
+                let to_pos = find_node_pos(&flat_nodes, dst)
+                    .ok_or_else(|| anyhow::anyhow!("edge target '{}' not found in nodes list", dst))?;
+                let sp = e["source_port"].as_u64().unwrap_or(0) as u32;
+                let tp = e["target_port"].as_u64().unwrap_or(0) as u32;
+                wf.graph.add_edge(
+                    graph_idx[from_pos],
+                    graph_idx[to_pos],
+                    EdgeInstance {
+                        source_port: sp,
+                        target_port: tp,
+                    },
+                );
+            }
+        }
+
+        // Merge into the passed-in workflow (in-place, so run_analysis sees it).
+        workflow.name = wf.name;
+        workflow.graph = wf.graph;
+        workflow.context = wf.context;
 
         println!(
             "[Agent] Generated workflow '{}' with {} nodes, {} edges",
@@ -690,6 +856,81 @@ mod tests {
 
         // JSON output block braces survived format! escaping.
         assert!(prompt.contains("\"tool_calls\""));
+    }
+
+    /// Unit tests for the robust JSON extractor.
+    #[test]
+    fn test_extract_top_level_json_handles_braces_in_strings() {
+        // Braces inside a JSON string must NOT corrupt the balance count.
+        let input = r#"Thought first. Then: {"thought":"has {braces} inside","tool_calls":[{"name":"x","arguments":{}}],"final_answer":""}"#;
+        let s = AnalystAgent::extract_top_level_json(input).unwrap();
+        assert!(s.starts_with('{'));
+        assert!(s.ends_with('}'));
+        let v: serde_json::Value = serde_json::from_str(s).unwrap();
+        assert_eq!(v["thought"], "has {braces} inside");
+    }
+
+    #[test]
+    fn test_extract_top_level_json_handles_array_of_tool_calls() {
+        let input = "Here is the plan:\n[{\"name\":\"add_node\",\"arguments\":{\"type_id\":\"a\"}}]";
+        let s = AnalystAgent::extract_top_level_json(input).unwrap();
+        assert!(s.starts_with('['));
+        let arr: Vec<AgentToolCall> = serde_json::from_str(s).unwrap();
+        assert_eq!(arr[0].name, "add_node");
+    }
+
+    #[test]
+    fn test_parse_response_recovers_from_truncated_fence() {
+        // Simulates the real failure mode: a response whose naive brace
+        // counting would truncate (string contains braces).
+        struct StubProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for StubProvider {
+            async fn complete(&self, _prompt: &str) -> Result<String> {
+                Ok("{}".into())
+            }
+        }
+        let agent: &AnalystAgent = &AnalystAgent {
+            provider: Arc::new(StubProvider),
+            registry: Arc::new(NodeRegistry::new()),
+            engine: Arc::new(SwanFlowEngine::new(Arc::new(NodeRegistry::new()))),
+        };
+        let completion = r#"{"thought":"the user wants {a} filter","tool_calls":[{"name":"generate_workflow_yaml","arguments":{"description":"read csv"}}],"final_answer":""}"#;
+        let resp = agent.parse_response(completion).unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].name, "generate_workflow_yaml");
+    }
+
+    #[test]
+    fn test_generate_workflow_yaml_parses_flat_llm_yaml() {
+        struct StubProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for StubProvider {
+            async fn complete(&self, _prompt: &str) -> Result<String> {
+                // Exactly the shape the real LLM emitted (with a stray "yaml"
+                // prefix line and markdown-style edges referencing UUIDs).
+                Ok("yaml\nname: users_csv_filter_to_excel\nnodes:\n  - id: 11111111-1111-4111-8111-111111111111\n    type_id: core.io.csv_read\n    config:\n      path: users.csv\n  - id: 22222222-2222-4222-8222-222222222222\n    type_id: core.transform.filter\n    config:\n      expr: \"age > 30\"\n  - id: 33333333-3333-4333-8333-333333333333\n    type_id: core.io.excel_write\n    config:\n      path: adults.xlsx\nedges:\n  - source: 11111111-1111-4111-8111-111111111111\n    target: 22222222-2222-4222-8222-222222222222\n    source_port: 0\n    target_port: 0\n  - source: 22222222-2222-4222-8222-222222222222\n    target: 33333333-3333-4333-8333-333333333333\n    source_port: 0\n    target_port: 0\n".into())
+            }
+        }
+        let agent = AnalystAgent {
+            provider: Arc::new(StubProvider),
+            registry: Arc::new(NodeRegistry::new()),
+            engine: Arc::new(SwanFlowEngine::new(Arc::new(NodeRegistry::new()))),
+        };
+        let mut wf = Workflow::new("before");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(agent.generate_workflow_yaml("desc", &mut wf))
+            .unwrap();
+        assert_eq!(wf.name, "users_csv_filter_to_excel");
+        assert_eq!(wf.graph.node_count(), 3);
+        assert_eq!(wf.graph.edge_count(), 2);
+        // The graph must be a real chain: csv_read -> filter -> excel_write.
+        let mut types: Vec<&str> = wf.graph.node_weights().map(|n| n.type_id.as_str()).collect();
+        types.sort();
+        assert_eq!(types, ["core.io.csv_read", "core.io.excel_write", "core.transform.filter"]);
     }
 
     #[test]

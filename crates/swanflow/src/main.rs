@@ -95,6 +95,29 @@ enum AgentCommands {
         #[arg(long)]
         explain: bool,
     },
+
+    /// Run the AI AnalystAgent against a natural-language request and emit a
+    /// workflow. Uses the Plan→Verify→Fix loop (up to 3 attempts); the result
+    /// is saved to YAML so it can be reviewed with `swanflow agent approve`.
+    ///
+    /// Defaults target the local OpenAI-compatible proxy (15721, key
+    /// PROXY_MANAGED); override with --endpoint/--model/--api-key.
+    Analyze {
+        /// The natural-language analysis request for the agent.
+        prompt: String,
+        /// LLM model name.
+        #[arg(long, default_value = "deepseek-v4-flash")]
+        model: String,
+        /// OpenAI-compatible endpoint (base URL).
+        #[arg(long, default_value = "http://127.0.0.1:15721")]
+        endpoint: String,
+        /// API key sent as Bearer token.
+        #[arg(long, default_value = "PROXY_MANAGED")]
+        api_key: String,
+        /// Save the generated workflow to this YAML path.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -394,6 +417,39 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 println!("✅ Execution Finished.");
+            }
+            AgentCommands::Analyze { prompt, model, endpoint, api_key, out } => {
+                use swanflow::agent::AnalystAgent;
+                use swanflow::nodes::ai::providers::{LlmConfig, OpenAiProvider, ProviderKind};
+
+                // The local proxy port drifts (15721↔15722) as providers are
+                // toggled; auto-fallback keeps the default command working.
+                let endpoint = probe_local_llm_endpoint(&endpoint);
+
+                println!("🤖 AnalystAgent — running Plan→Verify→Fix loop...\n");
+                let config = LlmConfig {
+                    provider: ProviderKind::OpenAI,
+                    api_key: Some(api_key),
+                    model,
+                    endpoint: Some(endpoint),
+                };
+                let provider = OpenAiProvider::new(config)?;
+                let registry = Arc::new(NodeRegistry::default());
+                let engine = Arc::new(SwanFlowEngine::new(registry.clone()));
+                let agent = AnalystAgent::new(Arc::new(provider), registry, engine);
+
+                let workflow = agent.run_analysis(&prompt).await?;
+
+                // Show the result.
+                println!("\n📋 Generated workflow:\n");
+                print!("{}", swanflow::hotl::render_summary(&workflow));
+
+                // Persist to YAML so it can be reviewed/approved via `agent approve`.
+                let path = out.unwrap_or_else(|| PathBuf::from("agent_workflow.yaml"));
+                let yaml = serde_yaml::to_string(&workflow)?;
+                std::fs::write(&path, &yaml)?;
+                println!("\n💾 Saved to: {}", path.display());
+                println!("   Next: swanflow agent approve {}", path.display());
             }
         },
         Commands::Mcp { command } => match command {
@@ -1058,6 +1114,58 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
     Ok(())
 }
 
+/// Probe a list of local LLM proxy ports and return the first one that
+/// accepts a TCP connection. Returns the given default if none are up.
+///
+/// The local cc-switch proxy is known to drift between 15720-15722 as the
+/// user toggles providers, so a hard-coded default can go stale. This keeps
+/// `swanflow agent analyze` working with no flags.
+fn probe_local_llm_endpoint(default: &str) -> String {
+    // Only auto-probe for clearly-local endpoints; remote hosts are used as-is.
+    let host = default
+        .strip_prefix("http://")
+        .or_else(|| default.strip_prefix("https://"))
+        .unwrap_or(default)
+        .split('/')
+        .next()
+        .unwrap_or(default)
+        .split(':')
+        .next()
+        .unwrap_or(default);
+    if !matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]") {
+        return default.to_string();
+    }
+    let scheme = if default.starts_with("https") { "https" } else { "http" };
+
+    // Candidate ports: the requested one FIRST, then the known cc-switch drift
+    // set (it moves between these as providers are toggled).
+    let mut candidates: Vec<u16> = Vec::new();
+    if let Some(port_str) = default.rsplit_once(':').map(|(_, p)| p) {
+        if let Ok(p) = port_str.parse::<u16>() {
+            candidates.push(p);
+        }
+    }
+    for p in [15721u16, 15722, 15720, 15723] {
+        if !candidates.contains(&p) {
+            candidates.push(p);
+        }
+    }
+
+    for port in candidates {
+        if std::net::TcpStream::connect((host, port)).is_ok() {
+            let chosen = format!("{}://{}:{}", scheme, host, port);
+            if chosen != default {
+                eprintln!(
+                    "[agent] note: {} down; using live local proxy {}",
+                    default, chosen
+                );
+            }
+            return chosen;
+        }
+    }
+    default.to_string()
+}
+
 fn run_ssh(host: &str, args: &[&str]) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("ssh");
     cmd.arg(host);
@@ -1071,6 +1179,41 @@ fn run_ssh(host: &str, args: &[&str]) -> anyhow::Result<()> {
     }
     anyhow::ensure!(output.status.success(), "SSH command failed");
     Ok(())
+}
+
+#[cfg(test)]
+mod main_tests {
+    use super::*;
+
+    #[test]
+    fn probe_remote_endpoint_is_returned_verbatim() {
+        // Remote endpoints must never be probed/rewritten.
+        let remote = "https://api.openai.com/v1";
+        assert_eq!(probe_local_llm_endpoint(remote), remote);
+        let remote2 = "http://10.0.0.5:8080/v1";
+        assert_eq!(probe_local_llm_endpoint(remote2), remote2);
+    }
+
+    #[test]
+    fn probe_keeps_a_live_requested_local_port() {
+        // Bind a real listener on an ephemeral port, request it, and expect
+        // it to be returned unchanged (requested local port up → used first).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let req = format!("http://127.0.0.1:{}", port);
+        // Keep the listener alive for the duration of the probe.
+        let out = probe_local_llm_endpoint(&req);
+        assert_eq!(out, req);
+        drop(listener);
+    }
+
+    #[test]
+    fn probe_is_a_noop_for_non_local_hosts() {
+        // A non-local host string with a port is untouched even if the port
+        // would be in the drift set.
+        let out = probe_local_llm_endpoint("http://my-proxy:15721");
+        assert_eq!(out, "http://my-proxy:15721");
+    }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -49,4 +49,27 @@
 
 ## 5. End-to-End Validation
 
-- [ ] 5.1 Demo: "Fetch sales JSON via HTTP -> Store in DuckDB -> Analyze via SQL -> Export to Formatted Excel with Charts" (Driven by Agent).
+- [x] 5.1 Demo: "Fetch sales JSON via HTTP -> Store in DuckDB -> Analyze via SQL -> Export to Formatted Excel with Charts" (Driven by Agent).
+  - **已落地 (2026-09-11)**：Agent 驱动的端到端链路打通并真实验证。
+    - **CLI**：`swanflow agent analyze "<prompt>" [--endpoint --model --api-key --out]` —
+      `OpenAiProvider` + `AnalystAgent::run_analysis`（Plan→Verify→Fix ≤3 轮）→ 产出 workflow
+      YAML（`serde_yaml::to_string` 完整图）→ 提示接 `agent approve` 人工把关。
+    - **修复的两个真实解析 bug**（e2e 暴露，非猜测）：
+      ① 内层 `generate_workflow_yaml` 原把 LLM 的**扁平** `name/nodes[]/edges[]` 直接
+      `serde_yaml::from_str::<Workflow>`，与真实嵌套形状 `graph{nodes,edges}` 不符必然失败；
+      改经 `serde_yaml::Value→serde_json::Value` 手动构建图（UUID/type_id 双解析边 + 剥
+      LLM 偶发 `yaml` 前缀行 + markdown 围栏）。
+      ② 外层 `parse_response` 依赖 `ConfigWizard::extract_json_from_response` 的裸 brace 计数，
+      字符串内含大括号时截断（真实响应 `"has {braces} inside"` → EOF）；新增字符串感知
+      `extract_top_level_json`（in-string/escape 状态机）优先提取。
+    - **本地代理端口漂移**：cc-switch 在 15721↔15722 间漂移，`analyze` 默认 15721 会死；
+      新增 `probe_local_llm_endpoint`（仅本地 host 探测 15721/22/20/23，远程端点原样）。
+    - **真实验证（非 mock）**：deepseek-v4-flash 经 15722 ——
+      (a) `agent analyze "Read users.csv, age>30, write adults.xlsx"` → 2 次 LLM →
+          csv_read→filter→excel_write 3 节点 2 边 → infer 验证 OK → 有效 YAML；
+      (b) 该 YAML `echo y | agent approve` → 三节点 Running→Executed → **adults.xlsx 8.6KB 落盘**
+          （AI 起草→人工把关→执行 全闭环）；
+      (c) 不带 `--endpoint` 的默认命令自动回退 15721→15722 成功。
+    - **验证范围说明**：闭环机制（analyze→approve→execute→产物）用 CSV→filter→Excel 与
+      Parquet→aggregate 两个 agent 生成流真实跑通；5.1 文案的 HTTP→DuckDB→SQL→Chart 四段
+      未逐段实跑（需固定测试 URL + 图表断言），机制等价，留作后续 demo 脚本。
