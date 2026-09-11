@@ -2,8 +2,8 @@
 
 > **记账修正 (2026-09-11)**：原 0/27 勾选，实际 swanflow-ai crate（1638 行）已完整落地：
 > LlmClient / ModelRouter / PromptBuilder / OpenAiHook + SELECT-only guard + feature gate + ADR-010。
-> 按代码实证回填；6.4（guard 专项测试）/ 7.3（零编译开销验证）/ 8.3（安全文档）为真缺口。
-> 验证：`cargo test --lib` 全绿（swanflow-ai 42/42）。
+> 按代码实证回填；**6.4（guard 专项测试）/ 8.3（安全文档）已于同日落地**，仅 7.3（零编译开销验证）为真缺口。
+> 验证：`cargo test --lib` 全绿（swanflow-ai 42/42 + swanflow guard_sql_tests 11/11）。
 
 ## 1. Infrastructure: swanflow-ai Crate Scaffolding
 
@@ -58,8 +58,12 @@
 - [x] 6.2 禁止列表：INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/TRUNCATE/REPLACE/MERGE
   - 实证：server.rs 写操作拒绝
 - [x] 6.3 错误码 `-32602 Invalid params` + 描述性消息
-- [ ] 6.4 测试：SELECT 通过 / INSERT 被拒 / DELETE 被拒
-  - **真缺口**：guard 逻辑已实现，但缺专项单元/集成测试覆盖这三条断言。
+- [x] 6.4 测试：SELECT 通过 / INSERT 被拒 / DELETE 被拒
+  - **已落地 (2026-09-11)**：`mcp/server.rs` 新增 `guard_sql_tests`（11 用例全绿）：
+    SELECT / WHERE / JOIN / CTE / 前导空白 SELECT 通过；INSERT / DELETE / DROP /
+    UPDATE（含前导空白、多语句 `SELECT 1; DELETE`、换行分隔写）被拒。
+    并记录已知保守偏向：`SELECT updated_at` 因含 `UPDATE` 子串被过拦（安全失败模式，
+    测试 `note_identifier_substring_is_overblocked_safe` 锁契约）。
 
 ## 7. Integration & Feature Gate
 
@@ -78,8 +82,12 @@
   - 实证：docs/adr/ADR-010-ai-orchestration-enhancement.md
 - [x] 8.2 README 更新：AI 增强功能说明
   - 实证：README 能力表 `AI 预算路由 ModelRouter 5维评分` + swanflow-ai crate 说明
-- [ ] 8.3 安全门文档：`docs/security/ai-safety-gates.md`
-  - **真缺口**：docs/ 下无 security/ 子目录，安全门文档未落。
+- [x] 8.3 安全门文档：`docs/security/ai-safety-gates.md`
+  - **已落地 (2026-09-11)**：新建 `docs/security/ai-safety-gates.md`，覆盖 6 道结构性安全门
+    （MCP SELECT-only guard / NodeCapability 最小权限 / Python 默认沙箱 / LuaJIT 信任沙箱+审批 /
+    PII 检测+脱敏 / 已知缺口清单），每道门附真实代码位置 + 测试引用；§6 明示尚未覆盖项
+    （HOTL、x-semantic-validate、run_workflow sink 审计）。
 
 ## 收尾
-- 待做（可选，未阻塞）：6.4 guard 专项测试、7.3 零编译开销验证、8.3 安全门文档
+- 待做（可选，未阻塞）：7.3 零编译开销验证。
+- ~~6.4 guard 专项测试~~ / ~~8.3 安全门文档~~ 已于 2026-09-11 落地。

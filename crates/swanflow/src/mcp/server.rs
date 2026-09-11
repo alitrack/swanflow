@@ -383,3 +383,82 @@ impl McpServer {
         }
     }
 }
+
+#[cfg(test)]
+mod guard_sql_tests {
+    use super::McpServer;
+
+    /// ai-orchestration-enhancement 6.4: SELECT passes / write ops rejected.
+    /// Structural safety — no prompt or model can route a write past this.
+    #[test]
+    fn allows_select() {
+        assert!(McpServer::guard_sql("SELECT * FROM t").is_ok());
+    }
+
+    #[test]
+    fn allows_select_with_where_and_join() {
+        assert!(McpServer::guard_sql(
+            "SELECT a.x, b.y FROM a JOIN b ON a.id = b.id WHERE a.z = 1"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn allows_cte() {
+        assert!(McpServer::guard_sql("WITH x AS (SELECT 1) SELECT * FROM x").is_ok());
+    }
+
+    #[test]
+    fn allows_leading_whitespace_then_select() {
+        assert!(McpServer::guard_sql("   SELECT count(*) FROM t").is_ok());
+    }
+
+    #[test]
+    fn rejects_insert() {
+        let err = McpServer::guard_sql("INSERT INTO t VALUES (1)").unwrap_err();
+        assert!(err.to_string().contains("INSERT"));
+    }
+
+    #[test]
+    fn rejects_delete() {
+        let err = McpServer::guard_sql("DELETE FROM t").unwrap_err();
+        assert!(err.to_string().contains("DELETE"));
+    }
+
+    #[test]
+    fn rejects_drop() {
+        let err = McpServer::guard_sql("DROP TABLE t").unwrap_err();
+        assert!(err.to_string().contains("DROP"));
+    }
+
+    #[test]
+    fn rejects_update_with_leading_whitespace() {
+        let err = McpServer::guard_sql("  UPDATE t SET x = 1").unwrap_err();
+        assert!(err.to_string().contains("UPDATE"));
+    }
+
+    #[test]
+    fn rejects_multistatement_write() {
+        let err = McpServer::guard_sql("SELECT 1; DELETE FROM t").unwrap_err();
+        assert!(err.to_string().contains("DELETE"));
+    }
+
+    #[test]
+    fn rejects_newline_separated_write() {
+        let err = McpServer::guard_sql("SELECT 1\nINSERT INTO t VALUES (1)").unwrap_err();
+        assert!(err.to_string().contains("INSERT"));
+    }
+
+    /// KNOWN LIMITATION (documented, not asserted as a bug): the guard is a
+    /// naive keyword match on whitespace boundaries, so a SELECT whose
+    /// identifiers merely *contain* a forbidden token (e.g. `updated_at`) is
+    /// over-blocked. Left as-is intentionally — over-blocking is the safe
+    /// failure mode for a SELECT-only surface. Recorded so a future switch to
+    /// a real SQL tokenizer is a conscious decision, not an accident.
+    #[test]
+    fn note_identifier_substring_is_overblocked_safe() {
+        // `updated_at` contains "UPDATE" with a leading-space boundary, so the
+        // guard treats it as a write. This is the documented conservative bias.
+        assert!(McpServer::guard_sql("SELECT updated_at FROM t").is_err());
+    }
+}

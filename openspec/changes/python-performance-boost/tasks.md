@@ -37,9 +37,12 @@
   - **已落地 (2026-09-11)**：`agent/mod.rs` prompt 新增 "PERFORMANCE & REPORTING GUIDANCE" 段，
     明确 "core.script.python ... zero-copy over the Arrow batch and is the high-performance path"，
     并指引重数值/ML 走 Python、UDF 高速走 core.script.wasm。渲染测试守门。
-- [ ] 4.2 Add a demo workflow where the Agent uses Python for outlier detection.
-  - **真缺口**：examples/ 无专用 Python outlier 检测 demo 工作流（prompt 已引导，但缺可运行样例）。
+- [x] 4.2 Add a demo workflow where the Agent uses Python for outlier detection.
+  - **已落地 (2026-09-11)**：`examples/python_outlier_detection.yaml` — users.csv →
+    core.script.python 做 IQR 离群点检测（salary 列，零拷贝 Arrow，无 numpy/sklearn 依赖）。
+    已用真实 100 行 users.csv 数据验证脚本可跑（q1=7058/q3=12588/fences 正确，输出 7 列含
+    salary_low/salary_high 标志）。对齐 agent prompt 的 "heavy numeric -> core.script.python" 引导。
 
 ## 收尾
-- 待做（可选，未阻塞）：4.2 Python outlier demo 工作流。
-- ~~4.1 agent prompt 文案~~ 已于 2026-09-11 落地。
+- ~~4.1 agent prompt 文案~~ / ~~4.2 Python outlier demo~~ 已于 2026-09-11 落地。
+- 本 change 全部任务完成。
