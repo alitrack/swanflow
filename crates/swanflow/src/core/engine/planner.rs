@@ -25,6 +25,7 @@ use crate::core::observer::{
 use crate::nodes::missing::{MissingNodeExec, MissingNodeLogical};
 use crate::nodes::script::python::{PythonExec, PythonLogical};
 use crate::nodes::sql::SqlProxyLogical;
+use crate::nodes::transform::PivotProxyLogical;
 use crate::nodes::NodeEvent;
 
 #[derive(Clone)]
@@ -270,6 +271,59 @@ impl ExtensionPlanner for SwanFlowPlanner {
             let logical_schema = proxy.schema.clone();
             let physical_plan = self.align_schemas(physical_plan, logical_schema.as_ref())?;
             return Ok(Some(physical_plan));
+        }
+        if let Some(pivot) = node.as_any().downcast_ref::<PivotProxyLogical>() {
+            // The pivot's result was COMPUTED at plan time (data-dependent
+            // schema: one output column per distinct column-value). We turn
+            // those pre-computed rows into a self-contained MemTable scan in a
+            // FRESH context — no runtime SQL, and crucially no dependency on
+            // the shared mutable `input_0` table state at run time (re-running
+            // the pivot SQL over the shared ctx at execution time was flaky:
+            // an earlier node in the same stage had re-registered input_0).
+            let arrow_schema = datafusion::arrow::datatypes::Schema::new(
+                pivot
+                    .schema
+                    .fields()
+                    .iter()
+                    .map(|f| {
+                        datafusion::arrow::datatypes::Field::new(
+                            f.name(),
+                            f.data_type().clone(),
+                            f.is_nullable(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let mem = datafusion::datasource::MemTable::try_new(
+                Arc::new(arrow_schema.clone()),
+                vec![pivot.result.clone()],
+            )
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Plan(format!(
+                    "Failed to build pivot MemTable: {}",
+                    e
+                ))
+            })?;
+            let fresh = datafusion::prelude::SessionContext::new();
+            fresh.register_table("pivot_result", Arc::new(mem)).map_err(|e| {
+                datafusion::error::DataFusionError::Plan(format!(
+                    "Failed to register pivot_result: {}",
+                    e
+                ))
+            })?;
+            let df = fresh.sql("SELECT * FROM pivot_result").await?;
+            let plan = df.into_unoptimized_plan();
+            return Ok(Some(
+                _planner
+                    .create_physical_plan(&plan, &fresh.state())
+                    .await
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Plan(format!(
+                            "Failed to plan pivot MemTable scan: {}",
+                            e
+                        ))
+                    })?,
+            ));
         }
         if let Some(python) = node.as_any().downcast_ref::<PythonLogical>() {
             return Ok(Some(Arc::new(PythonExec::new(

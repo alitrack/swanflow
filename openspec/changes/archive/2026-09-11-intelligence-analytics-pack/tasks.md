@@ -16,10 +16,16 @@
 
 - [x] 3.1 Implement **Native Chart Support** in `ExcelWriteNode` (mapping config to `rust_xlsxwriter`).
   - 实证：`ExcelReportSink` 的 `charts` 配置被消费 → `insert_chart`（excel.rs:1404 区域）。
-- [ ] 3.2 Implement **Native Pivot Table** support (Definition injection into `.xlsx`).
+- [x] 3.2 Implement **Native Pivot Table** support (Definition injection into `.xlsx`).
   - **记账修正 (2026-09-11)**：原标 `[x]` 为**失真**——写入层（core/datasource/excel.rs +
     nodes/io/excel.rs）grep 无任何 pivot/pivotTable 代码，xlsx 原生可拖拽 pivot 对象未实现。
     实际落地的是分析层透视：`core.transform.pivot`（PivotNode，输出普通表，可接 ExcelWriter 落盘）。
+  - **生态限制裁决 (2026-09-11)**：xlsx 原生 pivot 判定为**不做**（用户确认降级）。
+    `rust_xlsxwriter` 最新版 0.99.0 源码验证无 pivot 写 API（0.93 锁定版同样无；
+    同作者 Python xlsxwriter 亦不支持写 pivot）；手写 OOXML pivot parts 因本机
+    无 Excel、无法验证"打开能拖拽"而放弃（Excel 对 pivotCache 校验极严，
+    未验证的产物可能直接报文件损坏）。交付形态 = 分析层透视链路。
+    详见 pro-excel-dashboards 2.1/2.2 的裁决记录。
 - [x] 3.3 Create an **Excel Styling DSL** for conditional formatting and headers.
   - **已落地 (2026-09-11)**：`core.io.excel_write` 暴露 `styles`（按列静态样式）+
     `conditional_formatting`（cell 规则，8 种比较操作符 + 命名/hex 颜色）DSL，
@@ -28,15 +34,15 @@
 ## 4. Analyst Agent (ZeroClaw Migration)
 
 - [x] 4.1 Create `src/agent/loop_.rs` by adapting ZeroClaw's Reasoning Loop.
-- [ ] 4.2 Define **SwanFlow Tools** for the Agent: `ListNodes`, `DraftWorkflow`, `ValidateSchema`.
-  - **记账修正 (2026-09-11)**：这三项**已以优于"按需工具调用的形式存在**，非真缺口：
+- [x] 4.2 Define **SwanFlow Tools** for the Agent: `ListNodes`, `DraftWorkflow`, `ValidateSchema`.
+  - **设计裁决 (2026-09-11)**：三项**已以优于"按需工具调用"的形式存在**，
+    不重复实现（再建属降级）：
     - `ListNodes` → `agent/mod.rs` `build_agent_system_prompt`(207-211)每次把**完整节点目录**
       注入 system prompt（`registry.list_specs()`，零往返、永远最新）——比按需调用 `ListNodes`
       工具更省 token、更可靠。
     - `DraftWorkflow` → 即 `generate_workflow_yaml` 工具（system prompt 工具 #1）。
     - `ValidateSchema` → `infer_metadata` 工具（#5）+ `run_analysis` 的 Plan→Verify→Fix 闭环
       （每轮自动 `engine.infer_metadata` 校验，错误回灌 LLM 重试）。
-    再建重复工具属降级，故保留 `[ ]` 并标注，不实现。
 - [x] 4.3 Implement the **HOTL (Human-on-the-Loop)** CLI interface for workflow approval.
   - **已落地 (2026-09-11)**：`core` 层 `hotl.rs`（`render_summary` / `parse_approval` /
     `ApprovalGate`，纯函数可单测）+ CLI `swanflow agent approve <file> [--yes|--dry-run|--explain]`。

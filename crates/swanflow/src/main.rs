@@ -299,8 +299,14 @@ async fn main() -> anyhow::Result<()> {
 
             println!("📊 Execution Started...");
             while let Some(event) = rx.recv().await {
-                if let NodeEvent::StateChanged { node_id, state } = event {
-                    println!("  Node[{}] -> {:?}", node_id, state);
+                match event {
+                    NodeEvent::StateChanged { node_id, state } => {
+                        println!("  Node[{}] -> {:?}", node_id, state);
+                    }
+                    NodeEvent::Error { message, .. } => {
+                        eprintln!("  ❌ Error: {}", message);
+                    }
+                    _ => {}
                 }
             }
             println!("✅ Execution Finished.");

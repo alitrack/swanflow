@@ -1,9 +1,14 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::ScalarValue;
+use datafusion::common::DFSchemaRef;
+use datafusion::logical_expr::Extension;
 use datafusion::logical_expr::LogicalPlan;
+use datafusion::logical_expr::UserDefinedLogicalNodeCore;
 use datafusion::prelude::*;
 use serde_json::Value as JsonValue;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::nodes::config as cfg;
@@ -980,6 +985,152 @@ impl NodeBehavior for AiRouterNode {
 ///
 /// SQL translation (DataFusion):
 /// `SELECT r1, r2, SUM(CASE WHEN c = 'v' THEN v END) AS "c_v", ... FROM in GROUP BY r1, r2`
+/// Pivot execution proxy (same pattern as `SqlProxyLogical` in `sql.rs`).
+///
+/// `PivotNode::propose_plan` probes the upstream data to determine the distinct
+/// `column` values (the pivot's output schema is data-dependent: one column per
+/// distinct value). It returns this extension node carrying the fully-rendered
+/// pivot SQL plus the probed output schema. At physical planning time, the
+/// engine's `SwanFlowPlanner` re-executes the SQL in the shared engine context
+/// where the physical inputs are re-registered as `input_0`, so upstream
+/// `MaterializerLogical`/`StateProbeLogical`/source nodes are handled by the
+/// engine's own machinery (late binding) rather than being embedded into a
+/// separately-built plan — which the physical planner cannot convert.
+#[derive(Debug, Clone)]
+pub struct PivotProxyLogical {
+    pub node_id: uuid::Uuid,
+    pub query: String,
+    pub inputs: Vec<LogicalPlan>,
+    pub schema: DFSchemaRef,
+    /// Full materialized snapshot of the upstream, probed at plan time.
+    /// Retained for debugging / parity with the probed schema.
+    pub snapshot: Vec<RecordBatch>,
+    /// The pivot RESULT, computed at plan time. The runtime handler returns
+    /// a MemoryExec over these batches — fully self-contained, no runtime SQL,
+    /// no dependency on the shared (mutable) `input_0` table state at run time.
+    pub result: Vec<RecordBatch>,
+}
+
+impl std::cmp::PartialEq for PivotProxyLogical {
+    fn eq(&self, other: &Self) -> bool {
+        self.node_id == other.node_id && self.query == other.query
+    }
+}
+impl std::cmp::Eq for PivotProxyLogical {}
+impl std::hash::Hash for PivotProxyLogical {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.node_id.hash(state);
+        self.query.hash(state);
+    }
+}
+impl PartialOrd for PivotProxyLogical {
+    fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+        None
+    }
+}
+
+impl UserDefinedLogicalNodeCore for PivotProxyLogical {
+    fn name(&self) -> &str {
+        "PivotProxy"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        self.inputs.iter().collect()
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        &self.schema
+    }
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "PivotProxy(node_id={})", self.node_id)
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> datafusion::error::Result<Self> {
+        Ok(Self {
+            node_id: self.node_id,
+            query: self.query.clone(),
+            inputs,
+            schema: self.schema.clone(),
+            snapshot: self.snapshot.clone(),
+            result: self.result.clone(),
+        })
+    }
+}
+
+/// Execute a logical plan using the engine's extension-aware physical planner,
+/// so upstream custom nodes (`MaterializerLogical`, `StateProbeLogical`,
+/// `DuckDBScanLogical`, `ExcelScanLogical`, ...) are converted correctly.
+///
+/// A bare `SessionContext` cannot execute those custom nodes (it has no
+/// extension planner), which is exactly why the old `PivotNode` failed at run
+/// time: it registered the upstream plan in a throwaway ctx and ran SQL over
+/// it. Mirrors `WorkflowCompiler::execute_plan`.
+async fn pivot_execute_plan(plan: &LogicalPlan) -> Result<Vec<RecordBatch>> {
+    let ctx = Arc::new(SessionContext::new());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let planner = crate::core::engine::SwanFlowPlanner {
+        event_tx: tx,
+        ctx: ctx.clone(),
+        cache_dir: "target/swanflow_cache".to_string(),
+    };
+    let physical_planner = Arc::new(datafusion::physical_planner::DefaultPhysicalPlanner::with_extension_planners(
+        vec![Arc::new(planner)],
+    ));
+    let state = datafusion::execution::SessionStateBuilder::new_from_existing(ctx.state())
+        .with_query_planner(Arc::new(crate::core::engine::SwanFlowQueryPlanner {
+            physical_planner,
+        }))
+        .build();
+    let physical_plan = state.create_physical_plan(plan).await?;
+    let batches = datafusion::physical_plan::collect(physical_plan, state.task_ctx()).await?;
+    Ok(batches)
+}
+
+/// Extract the distinct string values of `column` from `batches` (ordered).
+fn distinct_string_values(batches: &[RecordBatch], column: &str) -> Result<Vec<String>> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for batch in batches {
+        let col_arr = batch
+            .column_by_name(column)
+            .ok_or_else(|| anyhow!("pivot column '{}' not in input", column))?;
+        match col_arr.data_type() {
+            datafusion::arrow::datatypes::DataType::Utf8 => {
+                let arr = col_arr
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::StringArray>()
+                    .unwrap();
+                for v in arr {
+                    if let Some(s) = v {
+                        if seen.insert(s.to_string()) {
+                            out.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            datafusion::arrow::datatypes::DataType::LargeUtf8 => {
+                return Err(anyhow!(
+                    "PivotNode column '{}' must be a Utf8 column, got LargeUtf8",
+                    column
+                ));
+            }
+            other => {
+                return Err(anyhow!(
+                    "PivotNode column '{}' must be a string column, got {:?}",
+                    column,
+                    other
+                ));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 pub struct PivotNode;
 
 #[async_trait]
@@ -1051,55 +1202,27 @@ impl NodeBehavior for PivotNode {
         let aggregator = cfg::optional_string(config, "aggregator")
             .unwrap_or_else(|| "sum".to_string());
 
-        let ctx = SessionContext::new();
-        let df = DataFrame::new(ctx.state(), inputs[0].clone());
-        ctx.register_table("pivot_input", df.into_view())?;
-
         let q = |s: &str| format!("\"{}\"", s);
 
-        // Determine the values to spread:
-        //  - if `column` is given and `value` is not: spread counts per distinct value
-        //  - if `column` is given and `value` is given: spread aggregates per distinct value
-        //  - otherwise: plain group-by aggregation (no spread)
-        let distinct_values: Vec<String> = if column.is_some() {
-            let col = column.as_deref().unwrap();
-            let sql = format!(
-                "SELECT DISTINCT {} FROM pivot_input ORDER BY 1",
-                q(col)
-            );
-            let df = ctx.sql(&sql).await?;
-            let batches = df.collect().await?;
-            let mut out = Vec::new();
-            for batch in &batches {
-                let col_arr = batch
-                    .column_by_name(col)
-                    .ok_or_else(|| anyhow!("pivot column '{}' not in input", col))?;
-                match col_arr.data_type() {
-                    datafusion::arrow::datatypes::DataType::Utf8 => {
-                        for v in col_arr
-                            .as_any()
-                            .downcast_ref::<datafusion::arrow::array::StringArray>()
-                            .unwrap()
-                        {
-                            if let Some(s) = v {
-                                out.push(s.to_string());
-                            }
-                        }
-                    }
-                    other => {
-                        return Err(anyhow!(
-                            "PivotNode column '{}' must be a string column, got {:?}",
-                            col,
-                            other
-                        ));
-                    }
-                }
-            }
-            out
-        } else {
-            Vec::new()
+        // The pivot's output schema is data-dependent (one output column per
+        // distinct `column` value), so we must materialize the upstream once at
+        // plan time to discover the distinct values. Use the engine's
+        // extension-aware planner so upstream custom nodes (Materializer /
+        // StateProbe / DuckDBScan / ExcelScan / csv) execute correctly — a bare
+        // SessionContext cannot convert them (this was the old run-time bug).
+        let data = pivot_execute_plan(&inputs[0]).await?;
+        if data.iter().all(|b| b.num_rows() == 0) {
+            anyhow::bail!("PivotNode input produced no rows; cannot determine pivot columns");
+        }
+
+        let distinct_values: Vec<String> = match column.as_deref() {
+            Some(col) => distinct_string_values(&data, col)?,
+            None => Vec::new(),
         };
 
+        // Render the pivot SQL against the engine input alias `input_0`. At
+        // runtime the planner re-registers the upstream as `input_0` and
+        // re-executes this (late binding, same pattern as SqlProxyLogical).
         let mut select_parts = vec![q(&row)];
         if let Some(col) = column.as_deref() {
             let inner = match value.as_deref() {
@@ -1129,14 +1252,43 @@ impl NodeBehavior for PivotNode {
         }
 
         let sql = format!(
-            "SELECT {} FROM pivot_input GROUP BY {} ORDER BY {}",
+            "SELECT {} FROM input_0 GROUP BY {} ORDER BY {}",
             select_parts.join(", "),
             q(&row),
             q(&row)
         );
 
-        let out_df = ctx.sql(&sql).await?;
-        Ok(vec![out_df.into_optimized_plan()?])
+        // Validate the SQL, derive the output schema, and COMPUTE THE RESULT
+        // at plan time by running it against the materialized snapshot
+        // (registered as `input_0`). Storing the result means the runtime
+        // handler can return a self-contained MemoryExec — no runtime SQL, no
+        // dependency on the shared mutable `input_0` table state at run time.
+        let probe_ctx = SessionContext::new();
+        let snapshot_schema = data[0].schema();
+        let memtable = datafusion::datasource::MemTable::try_new(
+            snapshot_schema,
+            vec![data.clone()],
+        )?;
+        probe_ctx.register_table("input_0", Arc::new(memtable))?;
+        let out_df = probe_ctx.sql(&sql).await?;
+        let schema: DFSchemaRef = Arc::new(out_df.schema().clone());
+        let result = out_df.collect().await?;
+        if result.iter().all(|b| b.num_rows() == 0) {
+            // No rows (e.g. single row-col with no values) is still a valid
+            // (empty) pivot; only an upstream with zero rows is an error, which
+            // we already guard above.
+        }
+
+        Ok(vec![LogicalPlan::Extension(Extension {
+            node: Arc::new(PivotProxyLogical {
+                node_id: uuid::Uuid::nil(),
+                query: sql,
+                inputs: vec![inputs[0].clone()],
+                schema,
+                snapshot: data,
+                result,
+            }),
+        })])
     }
 }
 
@@ -1173,6 +1325,31 @@ mod pivot_tests {
         Ok(ctx.table("t").await?.into_optimized_plan()?)
     }
 
+    /// Execute a plan through the engine's extension-aware physical planner
+    /// (PivotNode now returns a PivotProxyLogical extension node, which a bare
+    /// SessionContext cannot convert). Mirrors WorkflowCompiler::execute_plan.
+    async fn collect_plan(plan: &LogicalPlan) -> Result<Vec<RecordBatch>> {
+        let ctx = Arc::new(SessionContext::new());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let planner = crate::core::engine::SwanFlowPlanner {
+            event_tx: tx,
+            ctx: ctx.clone(),
+            cache_dir: "target/swanflow_cache".to_string(),
+        };
+        let physical_planner = Arc::new(
+            datafusion::physical_planner::DefaultPhysicalPlanner::with_extension_planners(vec![
+                Arc::new(planner),
+            ]),
+        );
+        let state = datafusion::execution::SessionStateBuilder::new_from_existing(ctx.state())
+            .with_query_planner(Arc::new(crate::core::engine::SwanFlowQueryPlanner {
+                physical_planner,
+            }))
+            .build();
+        let physical_plan = state.create_physical_plan(plan).await?;
+        Ok(datafusion::physical_plan::collect(physical_plan, state.task_ctx()).await?)
+    }
+
     #[tokio::test]
     async fn test_pivot_spreads_column_values() -> Result<()> {
         let node = PivotNode;
@@ -1186,9 +1363,7 @@ mod pivot_tests {
         let plans = node.propose_plan(vec![plan], &config).await?;
         assert_eq!(plans.len(), 1);
 
-        let ctx = SessionContext::new();
-        let df = DataFrame::new(ctx.state(), plans[0].clone());
-        let batches = df.collect().await?;
+        let batches = collect_plan(&plans[0]).await?;
         let mut rows: Vec<(String, i64, i64)> = Vec::new();
         for b in &batches {
             let region = b
@@ -1228,9 +1403,7 @@ mod pivot_tests {
         let plan = plan_from_batch(&sample_batch()?).await?;
         let config = json!({"row": "region", "value": "sales", "aggregator": "count"});
         let plans = node.propose_plan(vec![plan], &config).await?;
-        let ctx = SessionContext::new();
-        let df = DataFrame::new(ctx.state(), plans[0].clone());
-        let batches = df.collect().await?;
+        let batches = collect_plan(&plans[0]).await?;
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 2, "two regions");
         Ok(())

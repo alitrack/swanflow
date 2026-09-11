@@ -15,14 +15,27 @@
 
 ## 2. Advanced Visuals and Pivots
 
-- [ ] 2.1 Implement `PivotTableSpec` in node configuration（rows/columns/aggregate）.
-  - **真缺口**：excel.rs 无 PivotTableSpec 结构（xlsx 原生 pivot 配置）。
+- [x] 2.1 Implement `PivotTableSpec` in node configuration（rows/columns/aggregate）.
   - **替代已落地 (2026-09-11)**：新增 DAG 级 `core.transform.pivot` 节点（transform.rs PivotNode），
     row/column/value/aggregator 配置 → SQL CASE-WHEN 透视，4/4 单测绿。
     这是分析层透视（输出仍是普通表），非 xlsx 原生可交互 pivot 对象。
-- [ ] 2.2 Enhance `ExcelWritingStream` to generate native Excel Pivot Tables.
-  - **真缺口**：未实现原生 pivot 生成（`core.transform.pivot` 已能算出透视结果表，
-    可直接 ExcelWriteNode 落盘，但非"打开 xlsx 后可拖拽"的原生 pivot 控件）。
+  - **生态限制裁决 (2026-09-11)**：xlsx 原生 pivot 控件判定为**不做**。
+    依据：`rust_xlsxwriter` 0.93（当前锁定）无 pivot API；拉取**最新版 0.99.0
+    源码验证**（crates.io API + 源码 grep）`pivot` 仅出现在 sheet protection
+    选项，全库无 pivot table 写 API（同作者 Python xlsxwriter 亦从不支持）。
+    唯一替代 = 手写 OOXML pivot parts（pivotCacheDefinition/Records/
+    pivotTableDefinition + rels + content-types），而本机无 Excel，只能验
+    ZIP/XML 结构，无法验证 Excel 打开行为（Excel 对 pivotCache 校验极严，
+    字段偏差即报"修复文件"）——不满足"宣称能力前先验证执行层真实"标准，放弃。
+  - **交付形态**：分析层透视链路 `core.transform.pivot` → 普通表 →
+    `core.io.excel_write`/`excel_report` 落盘（可加条件格式/图表增强呈现）。
+
+- [x] 2.2 Enhance `ExcelWritingStream` to generate native Excel Pivot Tables.
+  - **生态限制裁决 (2026-09-11)**：同 2.1——rust_xlsxwriter 至 0.99 无
+    pivot API，手写 OOXML 路径因无法验证 Excel 打开行为而放弃（用户
+    2026-09-11 裁决：降级为分析层 pivot，标注生态限制）。
+  - `ExcelWritingStream` 维持现状（数据 + 条件格式 + 图表 + 多 sheet），
+    透视数据经 `core.transform.pivot` 产出后由普通 sheet 写入。
 - [x] 2.3 Implement "Style Registry" support：map JSON style definitions to `rust_xlsxwriter::Format`.
   - **已落地 (2026-09-11)**：`core/datasource/excel.rs` 两条样式通道，均在 `core.io.excel_write`
     配置暴露（原来硬编码空）：
@@ -62,5 +75,6 @@
   - 实证：TUTORIALS.md:43 + tutorials/09_excel_reports.yaml
 
 ## 收尾
-- 待做（真缺口，未阻塞当前功能）：2.1 PivotTableSpec、2.2 原生 pivot、2.3 样式注册表、4.1 agent 报告推理
-- 注：Tutorial 09 标题含 "pivots/branding" 但 2.x 实现尚未跟上——文档超前于代码，建议降级 tutorial 描述或补齐 pivot。
+- 注：Tutorial 09 标题含 "pivots/branding"，对应交付为分析层透视
+  （`core.transform.pivot` → 表 → Excel），非 xlsx 原生 pivot 控件
+  （生态限制裁决见 2.1/2.2，2026-09-11）。
