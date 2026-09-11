@@ -52,7 +52,10 @@
 
 - [x] 相关模块全测试绿（luajit 7 个 + duckdb_backend 4 个 + agent 1 个）
 - [x] openspec 文档（proposal/design/tasks/specs）
-- [ ] 用户确认后推送合并（分支已建，未 push）
+- [x] 用户确认后推送合并（分支已建，未 push）
+  - 实证 (2026-09-11)：`0c7b13b`（docs 三件套）+ `56c21db`（shell node + libs INDEX）
+    均已在 origin/main 祖先链上，本地/远程无残留分支——推送合并事实已完成，
+    原"分支"早已被并入 main。
 
 ## 遗留/待定
 

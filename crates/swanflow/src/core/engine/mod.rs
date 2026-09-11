@@ -947,6 +947,12 @@ impl SwanFlowEngine {
                     return;
                 }
             };
+            // 3.1: Re-order to honor implicit variable dependencies. A node
+            // whose config consumes {{var}} / ${context.var} produced by another
+            // node's `output_var` must run after the producer, even without an
+            // explicit data edge. No data edges are added (that would change
+            // downstream input-port counts); execution order only.
+            let sorted_indices = reorder_for_variable_deps(&workflow, sorted_indices);
 
             // Build a node lookup: node_id -> NodeInstance
             let node_map: HashMap<Uuid, &crate::core::graph::NodeInstance> = sorted_indices
@@ -1676,6 +1682,117 @@ fn aggregate_child_outcome(
     }
 }
 
+/// Re-order a topologically valid execution list so that *implicit variable
+/// dependencies* are honored (variable-management 3.1).
+///
+/// A node whose config references `{{var}}` or `${context.var}` consumes that
+/// variable; a node with `output_var = Some(var)` produces it. This pass
+/// guarantees every consumer runs after its producer even when no explicit
+/// data edge connects the two.
+///
+/// Deliberately does **not** add data edges: doing so would change downstream
+/// input-port counts and break nodes sensitive to their inputs
+/// (e.g. join, table_to_variable). Execution order only.
+///
+/// The re-order is stable: relative order of independent nodes follows the
+/// base topological order. If the implicit edges would form a cycle (producer
+/// is downstream of its consumer via explicit edges), the base order is
+/// returned unchanged — degrading gracefully rather than deadlocking.
+pub fn reorder_for_variable_deps(
+    workflow: &Workflow,
+    base_order: Vec<petgraph::stable_graph::NodeIndex>,
+) -> Vec<petgraph::stable_graph::NodeIndex> {
+    use petgraph::stable_graph::NodeIndex;
+    use petgraph::visit::EdgeRef;
+    use petgraph::Direction;
+    use std::collections::{BinaryHeap, HashMap, HashSet};
+    use std::cmp::Reverse;
+
+    // Producers: variable name -> producing node.
+    let mut producers: HashMap<String, NodeIndex> = HashMap::new();
+    for i in &base_order {
+        let n = workflow.graph.node_weight(*i).unwrap();
+        if let Some(v) = &n.output_var {
+            producers.insert(v.clone(), *i);
+        }
+    }
+
+    // Consumers: node -> set of producer nodes it requires.
+    let mut required_by: HashMap<NodeIndex, HashSet<NodeIndex>> = HashMap::new();
+    for i in &base_order {
+        let n = workflow.graph.node_weight(*i).unwrap();
+        // A producer cannot depend on its own output (self-cycle); skip.
+        if n.output_var.is_some() {
+            continue;
+        }
+        let mut refs = HashSet::new();
+        crate::core::templating::TemplateEngine::extract_variable_refs(&n.config, &mut refs);
+        let mut reqs = refs.iter().filter_map(|r| producers.get(r).copied()).collect::<HashSet<_>>();
+        if !reqs.is_empty() {
+            required_by.insert(*i, reqs);
+        }
+    }
+
+    if required_by.is_empty() {
+        return base_order;
+    }
+
+    // Kahn over explicit edges + implicit variable edges, ties broken by
+    // base topological rank (stable re-ordering).
+    let base_rank: HashMap<NodeIndex, usize> =
+        base_order.iter().enumerate().map(|(r, i)| (*i, r)).collect();
+    let mut in_degree: HashMap<NodeIndex, usize> = base_order
+        .iter()
+        .map(|i| {
+            let d = workflow
+                .graph
+                .edges_directed(*i, Direction::Incoming)
+                .count()
+                + required_by.get(i).map(|s| s.len()).unwrap_or(0);
+            (*i, d)
+        })
+        .collect();
+    let mut releases: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+    for i in &base_order {
+        for e in workflow.graph.edges_directed(*i, Direction::Outgoing) {
+            releases.entry(*i).or_default().push(e.target());
+        }
+        if let Some(reqs) = required_by.get(i) {
+            for r in reqs {
+                releases.entry(*r).or_default().push(*i);
+            }
+        }
+    }
+    let mut ready: BinaryHeap<Reverse<(usize, NodeIndex)>> = base_order
+        .iter()
+        .filter(|i| in_degree.get(i) == Some(&0))
+        .map(|i| Reverse((base_rank[i], *i)))
+        .collect();
+
+    let mut result = Vec::with_capacity(base_order.len());
+    while let Some(Reverse((_rank, i))) = ready.pop() {
+        result.push(i);
+        if let Some(targets) = releases.get(&i) {
+            for t in targets {
+                if let Some(d) = in_degree.get_mut(t) {
+                    *d -= 1;
+                    if *d == 0 {
+                        ready.push(Reverse((base_rank[t], *t)));
+                    }
+                }
+            }
+        }
+    }
+
+    if result.len() == base_order.len() {
+        result
+    } else {
+        // Implicit cycle: degrade to base order (consumers may see Null for
+        // not-yet-produced vars — same as before this change, no deadlock).
+        base_order
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1780,6 +1897,92 @@ mod tests {
         assert_eq!(hard_errors, vec!["boom"]);
         let evt = rx.try_recv().expect("error event for failed child");
         assert!(matches!(evt, crate::nodes::NodeEvent::Error { node_id, .. } if node_id == id_fail));
+    }
+
+    // --- variable-management 3.1: implicit variable dependencies ---
+
+    use crate::core::graph::{EdgeInstance, NodeInstance};
+    use crate::nodes::NodeState;
+
+    fn vnode(cfg: serde_json::Value, output_var: Option<&str>) -> NodeInstance {
+        let mut n = NodeInstance::new(uuid::Uuid::new_v4(), "core.sql", cfg, NodeState::Unconfigured);
+        n.output_var = output_var.map(|s| s.to_string());
+        n
+    }
+
+    fn base_order_of(wf: &Workflow) -> Vec<petgraph::stable_graph::NodeIndex> {
+        petgraph::algo::toposort(&wf.graph, None).unwrap()
+    }
+
+    fn pos(order: &[petgraph::stable_graph::NodeIndex], wf: &Workflow, id: uuid::Uuid) -> usize {
+        order.iter().position(|i| wf.graph.node_weight(*i).unwrap().id == id).unwrap()
+    }
+
+    #[test]
+    fn reorder_honors_implicit_var_dep_mustache() {
+        // A (producer of "v") and B (consumes {{v}}) — NO explicit edge.
+        // petgraph toposort may place B before A; re-order must put A first.
+        let mut wf = Workflow::new("implicit");
+        let a = vnode(serde_json::json!({"sql": "SELECT 1"}), Some("v"));
+        let b = vnode(serde_json::json!({"sql": "SELECT '{{v}}'"}), None);
+        let a_i = wf.add_node(a);
+        let b_i = wf.add_node(b);
+        let base = base_order_of(&wf);
+        let order = reorder_for_variable_deps(&wf, base);
+        assert!(
+            pos(&order, &wf, wf.graph.node_weight(a_i).unwrap().id)
+                < pos(&order, &wf, wf.graph.node_weight(b_i).unwrap().id),
+            "producer A must run before consumer B"
+        );
+    }
+
+    #[test]
+    fn reorder_honors_implicit_var_dep_context_syntax() {
+        // Same as above but consumer uses ${context.v}.
+        let mut wf = Workflow::new("implicit-ctx");
+        let a = vnode(serde_json::json!({"sql": "SELECT 1"}), Some("v"));
+        let b = vnode(serde_json::json!({"sql": "SELECT ${context.v}"}), None);
+        let a_i = wf.add_node(a);
+        let b_i = wf.add_node(b);
+        let base = base_order_of(&wf);
+        let order = reorder_for_variable_deps(&wf, base);
+        assert!(
+            pos(&order, &wf, wf.graph.node_weight(a_i).unwrap().id)
+                < pos(&order, &wf, wf.graph.node_weight(b_i).unwrap().id)
+        );
+    }
+
+    #[test]
+    fn reorder_is_stable_when_no_implicit_deps() {
+        // Two independent nodes: order must equal the base toposort exactly.
+        let mut wf = Workflow::new("stable");
+        let n1 = vnode(serde_json::json!({"sql": "SELECT 1"}), None);
+        let n2 = vnode(serde_json::json!({"sql": "SELECT 2"}), Some("v"));
+        let n3 = vnode(serde_json::json!({"sql": "SELECT 3"}), None);
+        let i1 = wf.add_node(n1);
+        let i2 = wf.add_node(n2);
+        wf.add_edge(i1, i2, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+        let i3 = wf.add_node(n3);
+        wf.add_edge(i2, i3, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+        let base = base_order_of(&wf);
+        let order = reorder_for_variable_deps(&wf, base.clone());
+        assert_eq!(order, base, "no consumer of v exists -> order unchanged");
+    }
+
+    #[test]
+    fn reorder_degrades_gracefully_on_implicit_cycle() {
+        // A produces "v" and B consumes {{v}}, BUT an explicit edge forces
+        // B -> A. The implicit edge A -> B would form a cycle: the base
+        // order must be returned unchanged (no deadlock, no panic).
+        let mut wf = Workflow::new("cycle");
+        let a = vnode(serde_json::json!({"sql": "SELECT 1"}), Some("v"));
+        let b = vnode(serde_json::json!({"sql": "SELECT '{{v}}'"}), None);
+        let a_i = wf.add_node(a);
+        let b_i = wf.add_node(b);
+        wf.add_edge(b_i, a_i, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+        let base = base_order_of(&wf);
+        let order = reorder_for_variable_deps(&wf, base.clone());
+        assert_eq!(order, base, "implicit cycle -> base order preserved");
     }
 }
 

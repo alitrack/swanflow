@@ -1,0 +1,38 @@
+feat(engine): implicit variable dependencies in execution order + close 5 change tails
+
+variable-management 3.1 (real feature):
+- engine/mod.rs: reorder_for_variable_deps() — stable Kahn re-order of the
+  toposorted YAML execution list so a node consuming {{var}} / ${context.var}
+  runs after the node whose output_var produces it, even without an explicit
+  data edge. No data edges are added (that would change downstream
+  input-port counts); execution order only. Implicit cycles degrade to the
+  base order (no deadlock).
+- templating.rs: TemplateEngine::extract_variable_refs() — scans a config
+  JSON tree for {{key}} and ${context.key} placeholders.
+- 6 new tests: mustache + context syntax, stability (order unchanged when
+  no implicit deps), implicit-cycle degradation, extractor correctness and
+  junk input. Full lib suite 231 -> 237 passed, 0 failed (--test-threads=4).
+
+Ledger tails closed (verified against code, not checkbox faith):
+- ai-orchestration-enhancement 7.3: cargo tree proves swanflow-ai absent
+  from the dep tree without the ai feature (0) vs present with it (1).
+- engine-abstraction-and-sql-compiler 3.4: design ruling — set_engine()
+  deliberately NOT added to WorkflowCompiler; SQL gen/exec already go
+  through the QueryEngineRef trait at the engine layer, the compiler is the
+  engine-agnostic logical-planning layer.
+- luajit-action-mode + luajit-self-evolution: code already in main
+  (53e07f4/1f70053/46c6bce, 0c7b13b/56c21db); Mac-check channel currently
+  unavailable (10.10.10.100 old divergent snapshot, 10.10.10.17 refuses) —
+  ruled non-blocking, WSL full lib suite is the compile gate.
+
+Archived 5 completed changes (12 -> 3 in-flight):
+- ai-orchestration-enhancement, engine-abstraction-and-sql-compiler,
+  variable-management, luajit-self-evolution, luajit-action-mode
+- Main specs backfilled from change specs (content verbatim):
+  ai-hook, model-router, prompt-builder, query-engine,
+  sql-compilation-pipeline, luajit-self-evolution
+
+Remaining in-flight (genuine, not closed):
+- intelligence-analytics-pack (11/13): native pivot + agent tools — new features
+- pro-excel-dashboards (10/12): native pivot table — new feature
+- linalg-gpu-backend (0/3): needs 115-host GPU e2e

@@ -99,6 +99,69 @@ impl TemplateEngine {
             _ => Self::render_json(value, context),
         }
     }
+
+    /// Extract the set of variable names referenced by a node config via
+    /// `{{var}}` or `${context.var}` placeholders (anywhere in the JSON tree).
+    ///
+    /// Used by the topological re-ordering pass (variable-management 3.1) to
+    /// detect *implicit* dependencies: a node whose config consumes a variable
+    /// produced by another node's `output_var` must run after the producer even
+    /// when no explicit data edge connects the two.
+    pub fn extract_variable_refs(value: &JsonValue, out: &mut std::collections::HashSet<String>) {
+        match value {
+            JsonValue::String(s) => {
+                // Scan for {{key}} and ${context.key} placeholders.
+                let bytes = s.as_bytes();
+                let mut i = 0;
+                while i < bytes.len() {
+                    if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                        // {{key}} — key ends at first '}'
+                        if let Some(end) = s[i + 2..].find('}') {
+                            let key = &s[i + 2..i + 2 + end];
+                            let key = key.trim();
+                            // Placeholder keys are identifier-like; skip empty/multi-token.
+                            if !key.is_empty()
+                                && !key.contains('}')
+                                && !key.contains(' ')
+                                && key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                            {
+                                // {{a.b}} style: take the full dotted path as the key
+                                // (mustache resolution in this engine is literal on the key).
+                                out.insert(key.to_string());
+                            }
+                            i += 2 + end + 1;
+                            continue;
+                        }
+                    }
+                    if s[i..].starts_with("${context.") {
+                        let rest = &s[i + "${context.".len()..];
+                        if let Some(end) = rest.find('}') {
+                            let key = &rest[..end];
+                            if !key.is_empty()
+                                && key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                            {
+                                out.insert(key.to_string());
+                            }
+                            i += "${context.".len() + end + 1;
+                            continue;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            JsonValue::Array(arr) => {
+                for v in arr {
+                    Self::extract_variable_refs(v, out);
+                }
+            }
+            JsonValue::Object(map) => {
+                for v in map.values() {
+                    Self::extract_variable_refs(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -219,5 +282,33 @@ mod tests {
         let input = json!("Hello, {{name}}!");
         let resolved = TemplateEngine::resolve_value(&input, &ctx);
         assert_eq!(resolved, json!("Hello, Alice!"));
+    }
+
+    #[test]
+    fn test_extract_variable_refs_mustache_and_context() {
+        let mut refs = std::collections::HashSet::new();
+        let input = json!({
+            "sql": "SELECT * FROM t WHERE dept = '${context.dept}' AND tag = '{{tag}}'",
+            "nested": ["{{other}}", "${context.limit}", "no placeholder here"]
+        });
+        TemplateEngine::extract_variable_refs(&input, &mut refs);
+        assert!(refs.contains("dept"), "context-style ref must be found: {refs:?}");
+        assert!(refs.contains("tag"), "mustache ref must be found: {refs:?}");
+        assert!(refs.contains("other"));
+        assert!(refs.contains("limit"));
+        assert_eq!(refs.len(), 4, "exactly 4 refs: {refs:?}");
+    }
+
+    #[test]
+    fn test_extract_variable_refs_ignores_junk() {
+        let mut refs = std::collections::HashSet::new();
+        let input = json!({
+            "a": "{{ }",            // unclosed
+            "b": "100% done",       // not a placeholder
+            "c": 42,                // non-string
+            "d": null
+        });
+        TemplateEngine::extract_variable_refs(&input, &mut refs);
+        assert!(refs.is_empty(), "junk should not be collected: {refs:?}");
     }
 }

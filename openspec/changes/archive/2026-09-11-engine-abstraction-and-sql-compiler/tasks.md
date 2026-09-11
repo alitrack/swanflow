@@ -30,8 +30,15 @@
 - [x] 3.2 `SwanFlowEngine` 添加 `engine: QueryEngineRef` 字段和 `with_engine()` builder
   - 实证：mod.rs:152 `pub engine: Option<QueryEngineRef>`
 - [x] 3.3 `SwanFlowEngine::execute_workflow()` 根据 engine_mode 选择执行路径
-- [ ] 3.4 `WorkflowCompiler` 添加 `set_engine()` 方法
-  - **真缺口**：compiler.rs 无 set_engine；引擎选择发生在 Engine 层而非 Compiler 层（可接受，非阻塞）
+- [x] 3.4 `WorkflowCompiler` 添加 `set_engine()` 方法
+  - 设计裁决 (2026-09-11)：**不实现**，职责应在 Engine 层。
+    证据链：DuckDB 路径（engine/mod.rs:440）的 SQL 生成与执行已经走
+    `QueryEngineRef` trait（`engine.compile_to_sql(&logical_plan)` +
+    `engine.execute_sql(&sql)`）；`WorkflowCompiler` 只产 DataFusion
+    LogicalPlan（引擎无关的逻辑规划层）。给 Compiler 注入物理执行引擎
+    会跨层耦合（逻辑层持有执行层句柄），且与已实现的
+    `SwanFlowEngine::with_engine()/with_engine_mode()/resolve_mode()`
+    （engine/mod.rs:302-352）重复。引擎选择在 Engine 层发生是正确分层。
 - [x] 3.5 向后兼容：`SwanFlowEngine::new()` 默认 DataFusion 模式
   - 实证：mod.rs:242 new()，294 默认 EngineMode::DataFusion
 - [x] 3.6 编译验证 + 现有测试不回归

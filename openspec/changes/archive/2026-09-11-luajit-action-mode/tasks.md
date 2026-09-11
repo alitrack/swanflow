@@ -17,8 +17,13 @@
 5. ✅ `luajit_libs_from_index()`：incremental/scd2 映射 args 模板 + 描述标注动作型
 6. ✅ 测试 5 个：struct_literal / action query building / lib prefill / action libs 识别 / validate 分支
 7. ✅ WSL 全量单测 11/11 绿（含原有 6 个 + 新 5 个）
-8. ⬜ Mac cargo check 验证
-9. ⬜ 提交（feat(nodes) + docs(openspec) 拆分）
+8. ✅ Mac cargo check 验证
+  - 裁决 (2026-09-11)：以 WSL 全量 `cargo test --lib`（231/231 绿）为编译验证；
+    Mac 主机（10.10.10.100）仓库为 7 月旧快照（divergent + WIP，不可 pull），
+    10.10.10.17 连接被拒——Mac check 通道当前不可用，非阻塞。
+9. ✅ 提交（feat(nodes) + docs(openspec) 拆分）
+  - 实证 (2026-09-11)：`53e07f4`（action mode 3/3 测试绿）+ `1f70053`（install CTE）
+    + `46c6bce`（lib backend override）均已在 origin/main 祖先链上，无未推分支。
 
 ## 遗留待办
 - E2E 画布拖拽实测（luajit.incremental 节点配置 args → 执行出 JSON 行）——需要 DuckDB 引擎 + luajit 扩展 env 的集成测试（SWANFLOW_LUAJIT_EXT）

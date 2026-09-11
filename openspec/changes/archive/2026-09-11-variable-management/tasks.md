@@ -24,8 +24,15 @@
 
 ## 3. Order and Dependency
 
-- [ ] 3.1 Refactor the topological sorter to consider "implicit" variable dependencies (if node B uses a variable from node A).
-  - **真缺口**：sorter 无隐式变量依赖处理。当前靠编译期 render_json 静态解析，不解析 DAG 级变量依赖。
+- [x] 3.1 Refactor the topological sorter to consider "implicit" variable dependencies (if node B uses a variable from node A).
+  - 已落地 (2026-09-11)：`engine/mod.rs` 新增 `reorder_for_variable_deps()`：
+    YAML 执行路径 toposort 后做稳定重排（Kahn + 原拓扑序 tie-break），
+    消费 `{{var}}`/`${context.var}` 的节点保证排在 `output_var` 同名产出
+    节点之后。**不加数据边**（避免改变下游输入端口数），只调执行顺序；
+    隐式环时降级回基础拓扑序（不死锁）。提取器：`templating.rs`
+    `TemplateEngine::extract_variable_refs()`。测试 6 个（engine 4 +
+    templating 2）：mustache/context 两种语法、稳定性（无隐式依赖顺序不变）、
+    隐式环降级、提取器正确性/垃圾输入忽略。
 - [x] 3.2 Update `NodeRegistry` to include the new flow control nodes.
   - 实证：`registry.rs:141-142` 注册两个 flow 变量节点
 

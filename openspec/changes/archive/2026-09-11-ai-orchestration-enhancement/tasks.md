@@ -71,8 +71,9 @@
   - 实证：engine/mod.rs:150 `pub hook: Option<Arc<dyn IntelligenceHook>>`
 - [x] 7.2 feature gate: `swanflow = { features = ["ai"] }` → 激活
   - 实证：swanflow Cargo.toml:76 `ai = ["swanflow-ai"]`
-- [ ] 7.3 不启用 feature 时零编译开销验证
-  - **真缺口**：feature gate 已配置，但缺"未启用 ai 时不编译 swanflow-ai"的显式验证。
+- [x] 7.3 不启用 feature 时零编译开销验证
+  - 实证 (2026-09-11)：WSL `cargo tree -p swanflow -e normal`（默认 features）中
+    `swanflow-ai` 出现 0 次；`--features ai` 出现 1 次。无 ai 时依赖不编译。
 - [x] 7.4 `cargo build --workspace` + `cargo test --workspace` 全绿
   - 实证：WSL 全量 + Mac check 绿
 
