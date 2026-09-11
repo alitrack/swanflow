@@ -1,0 +1,28 @@
+name: "5.1b Analyze via SQL -> Export to Formatted Excel with Charts"
+id: "b0000000-0000-0000-0000-000000000002"
+graph:
+  nodes:
+    - id: "b0000000-0000-0000-0000-000000000201"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: "demo_sales.duckdb"
+        query: "SELECT category, count(*) AS product_count, round(avg(price), 2) AS avg_price FROM products GROUP BY category ORDER BY avg_price DESC"
+      state: "Configured"
+      sub_workflow: null
+    - id: "b0000000-0000-0000-0000-000000000203"
+      type_id: "core.io.excel_report"
+      config:
+        path: "demo_sales_report.xlsx"
+        title: "Sales Analysis by Category"
+        charts:
+          - type: "column"
+            title: "Average Product Price by Category"
+            data_range: "Data!$C$2:$C$5"
+            label_range: "Data!$A$2:$A$5"
+            offset: { row: 9, col: 5 }
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

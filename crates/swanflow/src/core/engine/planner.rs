@@ -14,9 +14,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use crate::core::datasource::{
-    DuckDBScanExec, DuckDBScanLogical, ExcelReportExec, ExcelReportSinkLogical, ExcelScanExec,
-    ExcelScanLogical, ExcelSinkExec, ExcelSinkLogical, ExcelTemplateExec, ExcelTemplateSinkLogical,
-    SqlxScanExec, SqlxScanLogical,
+    DuckDBScanExec, DuckDBScanLogical, DuckDBWriteSinkExec, DuckDBWriteSinkLogical,
+    ExcelReportExec, ExcelReportSinkLogical, ExcelScanExec, ExcelScanLogical, ExcelSinkExec,
+    ExcelSinkLogical, ExcelTemplateExec, ExcelTemplateSinkLogical, SqlxScanExec, SqlxScanLogical,
 };
 use crate::core::engine::sync_metadata_to_context;
 use crate::core::observer::{
@@ -211,6 +211,17 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 report_sink.path.clone(),
                 report_sink.charts.clone(),
                 physical_inputs.to_vec(),
+            ))));
+        }
+        if let Some(duckdb_write) = node.as_any().downcast_ref::<DuckDBWriteSinkLogical>() {
+            return Ok(Some(Arc::new(DuckDBWriteSinkExec::new(
+                duckdb_write.db_path.clone(),
+                duckdb_write.table.clone(),
+                physical_inputs.to_vec(),
+                physical_inputs
+                    .first()
+                    .map(|p| p.schema())
+                    .unwrap_or_else(|| Arc::new(datafusion::arrow::datatypes::Schema::empty())),
             ))));
         }
         if let Some(proxy) = node.as_any().downcast_ref::<SqlProxyLogical>() {

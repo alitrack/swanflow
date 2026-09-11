@@ -9,8 +9,10 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use calamine::{open_workbook, Data, Reader, Xlsx};
 use datafusion::arrow::array::{
-    Array, ArrayRef, Float64Array, Int64Array, StringArray, StringBuilder,
+    Array, ArrayRef, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
+    StringBuilder, UInt32Array, UInt64Array,
 };
+use arrow::array::StringViewArray;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchemaRef, ScalarValue};
@@ -1418,30 +1420,89 @@ impl ExcelReportWritingStream {
             for row_idx in 0..batch.num_rows() {
                 for col_idx in 0..batch.num_columns() {
                     let array = batch.column(col_idx);
-                    if !array.is_null(row_idx) {
-                        match array.data_type() {
-                            DataType::Int64 => {
-                                let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
-                                worksheet
-                                    .write(
-                                        row_offset as u32,
-                                        col_idx as u16,
-                                        a.value(row_idx) as f64,
-                                    )
-                                    .ok();
-                            }
-                            DataType::Float64 => {
-                                let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
-                                worksheet
-                                    .write(row_offset as u32, col_idx as u16, a.value(row_idx))
-                                    .ok();
-                            }
-                            _ => {
-                                let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                                worksheet
-                                    .write(row_offset as u32, col_idx as u16, a.value(row_idx))
-                                    .ok();
-                            }
+                    if array.is_null(row_idx) {
+                        continue;
+                    }
+                    // Write the cell value based on its Arrow type. The
+                    // catch-all never unwraps a typed downcast — unknown
+                    // types fall back to a best-effort string so a report
+                    // never panics on an unexpected schema. DuckDB VARCHAR
+                    // arrives as arrow 57's `Utf8View`, so that is handled
+                    // explicitly (its data is intact, not null).
+                    match array.data_type() {
+                        DataType::Int64 => {
+                            let a = array
+                                .as_any()
+                                .downcast_ref::<Int64Array>()
+                                .unwrap();
+                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64);
+                        }
+                        DataType::Int32 => {
+                            let a = array
+                                .as_any()
+                                .downcast_ref::<Int32Array>()
+                                .unwrap();
+                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64);
+                        }
+                        DataType::UInt32 => {
+                            let a = array
+                                .as_any()
+                                .downcast_ref::<UInt32Array>()
+                                .unwrap();
+                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64);
+                        }
+                        DataType::UInt64 => {
+                            let a = array
+                                .as_any()
+                                .downcast_ref::<UInt64Array>()
+                                .unwrap();
+                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64);
+                        }
+                        DataType::Float64 => {
+                            let a = array
+                                .as_any()
+                                .downcast_ref::<Float64Array>()
+                                .unwrap();
+                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx));
+                        }
+                        DataType::Float32 => {
+                            let a = array
+                                .as_any()
+                                .downcast_ref::<Float32Array>()
+                                .unwrap();
+                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64);
+                        }
+                        DataType::Boolean => {
+                            let a = array
+                                .as_any()
+                                .downcast_ref::<arrow::array::BooleanArray>()
+                                .unwrap();
+                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx));
+                        }
+                        DataType::Utf8 | DataType::LargeUtf8 => {
+                            let a = array
+                                .as_any()
+                                .downcast_ref::<StringArray>()
+                                .unwrap();
+                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx));
+                        }
+                        DataType::Utf8View => {
+                            let a = array
+                                .as_any()
+                                .downcast_ref::<StringViewArray>()
+                                .unwrap();
+                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx));
+                        }
+                        _ => {
+                            // Best-effort string: typed StringArray first,
+                            // else fall back to an empty cell rather than
+                            // panicking on a downcast failure.
+                            let s = array
+                                .as_any()
+                                .downcast_ref::<StringArray>()
+                                .map(|a| a.value(row_idx).to_string())
+                                .unwrap_or_default();
+                            let _ = worksheet.write(row_offset as u32, col_idx as u16, s);
                         }
                     }
                 }

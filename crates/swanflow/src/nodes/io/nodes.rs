@@ -135,21 +135,28 @@ impl NodeBehavior for DuckDBReadNode {
         let path = cfg::optional_string(config, "path").unwrap_or_else(|| ":memory:".to_string());
         let query = cfg::required_string(config, "query")?;
 
-        // Use query_arrow to get the schema reliably without holding Connection across await
+        // Infer the REAL schema by running the query once (temp-parquet bridge).
+        // Previously this returned an EmptyRelation (0 rows) — the data was
+        // never actually emitted, only the schema. Now we return a real
+        // DuckDBScan that re-runs the query at execution time and streams the
+        // rows downstream.
         let batches = DuckDBHelper::query_arrow(&path, &query, &[], &None).await?;
         if batches.is_empty() {
             return Err(anyhow!("Query returned no data for schema inference"));
         }
-
         let schema = batches[0].schema();
         let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
+        eprintln!("[duckdb_read] {} -> {} rows x {} cols", query, batches.iter().map(|b| b.num_rows()).sum::<usize>(), schema.fields().len());
 
-        Ok(vec![LogicalPlan::EmptyRelation(
-            datafusion::logical_expr::EmptyRelation {
-                produce_one_row: false,
+        Ok(vec![LogicalPlan::Extension(Extension {
+            node: Arc::new(crate::core::datasource::DuckDBScanLogical {
+                connection_path: path,
+                extensions: vec![],
+                attach_sql: None,
+                query,
                 schema: Arc::new(df_schema),
-            },
-        )])
+            }),
+        })])
     }
 }
 impl TypedNodeBehavior for DuckDBReadNode {
@@ -166,7 +173,8 @@ impl NodeBehavior for DuckDBWriteNode {
         NodeSpec {
             type_id: "core.io.duckdb_write".to_string(),
             display_name: "DuckDB Writer".to_string(),
-            description: "Write data to a DuckDB table".to_string(),
+            description: "Persist upstream rows into a table in a DuckDB database file (CREATE OR REPLACE, idempotent)."
+                .to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".into(),
@@ -176,8 +184,10 @@ impl NodeBehavior for DuckDBWriteNode {
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "default": "data.db" },
-                    "table": { "type": "string" }
+                    "path": { "type": "string", "default": "data.db",
+                               "description": "DuckDB database file (created if missing). Use ':memory:' to discard after the run." },
+                    "table": { "type": "string",
+                               "description": "Target table name; replaced on each run." }
                 },
                 "required": ["table"]
             }),
@@ -192,9 +202,19 @@ impl NodeBehavior for DuckDBWriteNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        Ok(inputs)
+        let table = cfg::required_string(config, "table")?;
+        let path =
+            cfg::optional_string(config, "path").unwrap_or_else(|| "data.db".to_string());
+        let sink = LogicalPlan::Extension(Extension {
+            node: Arc::new(crate::core::datasource::DuckDBWriteSinkLogical {
+                db_path: path,
+                table,
+                inputs,
+            }),
+        });
+        Ok(vec![sink])
     }
 }
 impl TypedNodeBehavior for DuckDBWriteNode {
@@ -223,7 +243,9 @@ impl NodeBehavior for HttpFetchNode {
                 "properties": {
                     "url": { "type": "string" },
                     "method": { "type": "string", "default": "GET" },
-                    "timeout_secs": { "type": "number", "default": 30 }
+                    "timeout_secs": { "type": "number", "default": 30 },
+                    "query": { "type": "string",
+                        "description": "Override the DuckDB query that extracts rows from the fetched JSON. When omitted, defaults to SELECT * FROM read_json_auto('<url>'). Use it for nested payloads, e.g. SELECT p.* FROM read_json_auto('<url>') CROSS JOIN UNNEST(products) AS p." }
                 },
                 "required": ["url"]
             }),
@@ -244,13 +266,43 @@ impl NodeBehavior for HttpFetchNode {
         let _method = cfg::optional_string(config, "method").unwrap_or_else(|| "GET".to_string());
         let _timeout_secs = cfg::optional_number(config, "timeout_secs").unwrap_or(30.0);
 
+        // httpfs is a core extension in DuckDB — already built into the binary,
+        // no INSTALL/LOAD needed. `SET force_download=true` handles APIs that
+        // report incorrect Content-Length (gzip streaming). We run the fetch
+        // once to infer the REAL schema — without this the scan plan carries
+        // an empty schema and downstream sinks see zero columns.
+        // `query` overrides the extraction (needed for nested payloads,
+        // e.g. `SELECT p.* FROM read_json_auto('<url>') CROSS JOIN UNNEST(products) AS p`);
+        // the default is the bare auto-parse.
+        let url_esc = url.replace('\'', "''");
+        let query = match cfg::optional_string(config, "query") {
+            Some(q) if !q.trim().is_empty() => q,
+            _ => format!("SELECT * FROM read_json_auto('{}')", url_esc),
+        };
+        let force = Some("SET force_download=true;".to_string());
+        let batches = match DuckDBHelper::query_arrow(":memory:", &query, &[], &force).await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[http_fetch] schema-infer FAILED for {url}: {e:#}");
+                return Err(e);
+            }
+        };
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        let cols = batches.first().map(|b| b.num_columns()).unwrap_or(0);
+        eprintln!("[http_fetch] {url} -> {rows} rows x {cols} cols (schema inferred)");
+        if batches.is_empty() || cols == 0 {
+            return Err(anyhow!("http_fetch: query returned no rows/columns for {url}"));
+        }
+        let arrow_schema = batches[0].schema();
+        let df_schema = DFSchema::try_from(arrow_schema)?;
+
         Ok(vec![LogicalPlan::Extension(Extension {
             node: Arc::new(crate::core::datasource::DuckDBScanLogical {
                 connection_path: ":memory:".to_string(),
-                extensions: vec!["httpfs".to_string()],
-                attach_sql: None,
-                query: format!("SELECT * FROM read_json_auto('{}')", url),
-                schema: Arc::new(DFSchema::empty()),
+                extensions: vec![],
+                attach_sql: Some("SET force_download=true;".to_string()),
+                query,
+                schema: Arc::new(df_schema),
             }),
         })])
     }

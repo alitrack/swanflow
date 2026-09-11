@@ -19,3 +19,4 @@ libduckdb*
 setup_duckdb.sh
 target/swanflow_cache/
 test_data.csv
+*.duckdb

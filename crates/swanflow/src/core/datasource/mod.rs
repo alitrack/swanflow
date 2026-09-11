@@ -17,7 +17,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DFSchemaRef, ScalarValue};
+use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::Result;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
@@ -659,3 +659,403 @@ impl S3Manager {
 
 pub mod excel;
 pub use excel::*;
+
+// ---------------------------------------------------------------------------
+// DuckDB Write Sink — persists Arrow batches into a durable DuckDB table.
+//
+// Bridge strategy (mirrors DuckDBScanExec's read direction): batches are
+// spilled to a temp parquet file, then `CREATE OR REPLACE TABLE ... AS SELECT
+// * FROM read_parquet(...)` lands them in the target database. This keeps
+// zero-copy Arrow handling in the DataFusion direction and lets DuckDB do the
+// durable write with native type inference.
+// ---------------------------------------------------------------------------
+
+/// Logical node for writing upstream data into a DuckDB table.
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct DuckDBWriteSinkLogical {
+    pub db_path: String,
+    pub table: String,
+    pub inputs: Vec<LogicalPlan>,
+}
+
+impl PartialOrd for DuckDBWriteSinkLogical {
+    fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+        None
+    }
+}
+
+impl UserDefinedLogicalNodeCore for DuckDBWriteSinkLogical {
+    fn name(&self) -> &str {
+        "DuckDBWriteSink"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        self.inputs.iter().collect()
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        self.inputs.first().map(|p| p.schema()).unwrap_or_else(|| {
+            static EMPTY: std::sync::OnceLock<DFSchemaRef> = std::sync::OnceLock::new();
+            EMPTY.get_or_init(|| Arc::new(DFSchema::empty()))
+        })
+    }
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "DuckDBWriteSink(db={}, table={})", self.db_path, self.table)
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> Result<Self> {
+        Ok(Self {
+            db_path: self.db_path.clone(),
+            table: self.table.clone(),
+            inputs,
+        })
+    }
+}
+
+/// Physical execution plan: drain all input batches, spill to parquet, and
+/// load them into `table` inside `db_path`. (Bridge = temp parquet, same as
+/// `DuckDBScanExec` reads.)
+#[derive(Debug)]
+pub struct DuckDBWriteSinkExec {
+    pub db_path: String,
+    pub table: String,
+    pub inputs: Vec<Arc<dyn ExecutionPlan>>,
+    pub out_schema: SchemaRef,
+    cache: PlanProperties,
+}
+
+impl DuckDBWriteSinkExec {
+    pub fn new(
+        db_path: String,
+        table: String,
+        inputs: Vec<Arc<dyn ExecutionPlan>>,
+        out_schema: SchemaRef,
+    ) -> Self {
+        let cache = PlanProperties::new(
+            EquivalenceProperties::new(out_schema.clone()),
+            datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+        Self {
+            db_path,
+            table,
+            inputs,
+            out_schema,
+            cache,
+        }
+    }
+
+    /// Core write routine: record batches -> temp parquet file -> DuckDB
+    /// table via `read_parquet(...)`. Mirrors `DuckDBScanExec`'s read
+    /// direction (also a temp-parquet bridge), which is proven to work with
+    /// the bundled libduckdb; `read_arrow` is an extension function and not
+    /// guaranteed present. Exposed `pub` so unit tests verify the durable
+    /// write without a full execution plan.
+    pub fn write_batches(db_path: &str, table: &str, batches: &[RecordBatch]) -> Result<usize> {
+        use parquet::arrow::ArrowWriter;
+
+        if batches.is_empty() {
+            return Ok(0);
+        }
+        let schema = batches[0].schema();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        // 1. Spill batches to a temp parquet file (independent `parquet`
+        //    crate, same as the materialization cache path).
+        let tmp_dir = std::env::temp_dir();
+        let tmp_file = tmp_dir.join(format!(
+            "swanflow_duckdb_write_{}.parquet",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let file = std::fs::File::create(&tmp_file)
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            let mut writer = ArrowWriter::try_new(file, schema.clone(), None)
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            for b in batches {
+                writer
+                    .write(b)
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            }
+            writer
+                .close()
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        }
+        let tmp_path = tmp_file.to_str().unwrap_or("").to_string();
+
+        // 2. Durable write via DuckDB. `CREATE OR REPLACE` makes re-runs
+        //    idempotent; a subsequent run replaces the previous table.
+        let conn = duckdb::Connection::open_with_flags(db_path, duckdb::Config::default())
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+
+        let safe_table = table.replace('"', "\"\"");
+        let sql = format!(
+            "CREATE OR REPLACE TABLE \"{}\" AS SELECT * FROM read_parquet('{}')",
+            safe_table, tmp_path.replace('\'', "''")
+        );
+        let res = conn
+            .execute(&sql, [])
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_file);
+                datafusion::error::DataFusionError::External(Box::new(e))
+            })
+            .map(|_| total_rows);
+        let _ = std::fs::remove_file(&tmp_file);
+        res
+    }
+}
+
+impl DisplayAs for DuckDBWriteSinkExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "DuckDBWriteSinkExec(db={}, table={})", self.db_path, self.table)
+    }
+}
+
+impl ExecutionPlan for DuckDBWriteSinkExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "DuckDBWriteSinkExec"
+    }
+    fn schema(&self) -> SchemaRef {
+        self.out_schema.clone()
+    }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        self.inputs.iter().collect()
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(Self::new(
+            self.db_path.clone(),
+            self.table.clone(),
+            children,
+            self.out_schema.clone(),
+        )))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let mut streams = Vec::new();
+        for input in &self.inputs {
+            streams.push(input.execute(partition, context.clone())?);
+        }
+        let input_count = streams.len();
+        Ok(Box::pin(DuckDBWriteSinkStream {
+            db_path: self.db_path.clone(),
+            table: self.table.clone(),
+            inputs: streams,
+            schema: self.out_schema.clone(),
+            pending: Vec::new(),
+            finished_mask: vec![false; input_count],
+            written: false,
+        }))
+    }
+}
+
+struct DuckDBWriteSinkStream {
+    db_path: String,
+    table: String,
+    inputs: Vec<SendableRecordBatchStream>,
+    schema: SchemaRef,
+    pending: Vec<RecordBatch>,
+    finished_mask: Vec<bool>,
+    written: bool,
+}
+
+impl RecordBatchStream for DuckDBWriteSinkStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl Stream for DuckDBWriteSinkStream {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let n = self.inputs.len();
+        let mut any_pending = false;
+
+        for i in 0..n {
+            if self.finished_mask[i] {
+                continue;
+            }
+            match self.inputs[i].poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    self.pending.push(batch.clone());
+                    return Poll::Ready(Some(Ok(batch)));
+                }
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                Poll::Ready(None) => self.finished_mask[i] = true,
+                Poll::Pending => any_pending = true,
+            }
+        }
+
+        if any_pending {
+            Poll::Pending
+        } else if self.finished_mask.iter().all(|&f| f) {
+            if !self.written {
+                self.written = true;
+                // Clone the immutable fields first, then take the mutable
+                // buffer — avoids borrowing `self` immutably and mutably in
+                // one expression.
+                let db_path = self.db_path.clone();
+                let table = self.table.clone();
+                let batches = std::mem::take(&mut self.pending);
+                Self::flush(&db_path, &table, batches)?;
+            }
+            Poll::Ready(None)
+        } else {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+impl DuckDBWriteSinkStream {
+    fn flush(db_path: &str, table: &str, batches: Vec<RecordBatch>) -> Result<()> {
+        let rows = DuckDBWriteSinkExec::write_batches(db_path, table, &batches)?;
+        println!(
+            "DuckDBWriteSink: persisted {} rows into {}::{}",
+            rows, db_path, table
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod duckdb_write_sink_tests {
+    use super::*;
+    use datafusion::arrow::array::{Float64Array, Int64Array, StringArray};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+
+    fn sample_batches() -> Vec<RecordBatch> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("age", DataType::Int64, true),
+            Field::new("score", DataType::Float64, true),
+        ]));
+        let b1 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["alice", "bob"])),
+                Arc::new(Int64Array::from(vec![31, 25])),
+                Arc::new(Float64Array::from(vec![91.5, 77.0])),
+            ],
+        )
+        .unwrap();
+        let b2 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["carol"])),
+                Arc::new(Int64Array::from(vec![42])),
+                Arc::new(Float64Array::from(vec![88.25])),
+            ],
+        )
+        .unwrap();
+        vec![b1, b2]
+    }
+
+    #[test]
+    fn write_batches_persists_to_duckdb_and_reads_back() {
+        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let batches = sample_batches();
+
+        let rows = DuckDBWriteSinkExec::write_batches(&db_str, "people", &batches).unwrap();
+        assert_eq!(rows, 3);
+
+        // Durable: a FRESH connection must see the data.
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let (n, total_age, min_name): (i64, i64, String) = conn
+            .query_row(
+                "SELECT count(*), sum(age), min(name) FROM people",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(total_age, 98); // 31+25+42
+        assert_eq!(min_name, "alice");
+
+        // Floats survived the round-trip.
+        let score: f64 = conn
+            .query_row("SELECT score FROM people WHERE name='carol'", [], |r| r.get(0))
+            .unwrap();
+        assert!((score - 88.25).abs() < 1e-9);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn write_batches_is_idempotent_replace() {
+        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let batches = sample_batches();
+
+        DuckDBWriteSinkExec::write_batches(&db_str, "people", &batches).unwrap();
+        // Second run with fewer rows must REPLACE, not append.
+        let one = vec![batches[0].slice(0, 1)];
+        DuckDBWriteSinkExec::write_batches(&db_str, "people", &one).unwrap();
+
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM people", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        std::fs::remove_file(&db).ok();
+    }
+
+    /// httpfs is a STATIC core extension in bundled DuckDB — no INSTALL/LOAD.
+    /// Diagnostic: probe the real bundled version against the live JSON API
+    /// (jsonplaceholder's Content-Length header is wrong, which trips
+    /// httpfs's length check), with and without force_download.
+    #[test]
+    fn httpfs_static_fetch_jsonplaceholder() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let ver: String = conn.query_row("SELECT version()", [], |r| r.get(0)).unwrap();
+        eprintln!("[diag] bundled duckdb = {ver}");
+
+        // Baseline: no force_download.
+        let base = conn.query_row(
+            "SELECT count(*) FROM read_json_auto('https://jsonplaceholder.typicode.com/users')",
+            [],
+            |r| r.get::<_, i64>(0),
+        );
+        eprintln!("[diag] baseline read_json_auto: {base:?}");
+
+        // With force_download=true.
+        let c2 = duckdb::Connection::open_in_memory().unwrap();
+        c2.execute_batch("SET force_download=true;").expect("force_download is a valid GUC in this build");
+        let forced = c2.query_row(
+            "SELECT count(*) FROM read_json_auto('https://jsonplaceholder.typicode.com/users')",
+            [],
+            |r| r.get::<_, i64>(0),
+        );
+        eprintln!("[diag] force_download read_json_auto: {forced:?}");
+
+        // The decisive assertion: one of the two must yield 10 users.
+        let base_n = base.ok();
+        let forced_n = forced.ok();
+        assert!(
+            base_n == Some(10) || forced_n == Some(10),
+            "httpfs could not fetch jsonplaceholder users (baseline={base_n:?}, forced={forced_n:?})"
+        );
+    }
+}
