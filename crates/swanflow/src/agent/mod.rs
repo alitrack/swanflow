@@ -448,6 +448,26 @@ OUTPUT FORMAT — respond with a JSON object:
         if clean.is_empty() {
             anyhow::bail!("lib_name must contain at least one alphanumeric character");
         }
+        // Sanitize category the same way: it is LLM-controlled and is joined
+        // into the libs path. Path separators, `..` and absolute prefixes
+        // would escape the libs root (PathBuf::join replaces the base on an
+        // absolute component), so a stray `category` must never be able to
+        // redirect where a new .lua is written (and later executed).
+        let clean_cat: String = category
+            .unwrap_or("udf")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let clean_cat = clean_cat.trim_matches('_');
+        if clean_cat.is_empty() {
+            anyhow::bail!("category must contain at least one alphanumeric character");
+        }
         if source.trim().is_empty() {
             anyhow::bail!("source must not be empty");
         }
@@ -464,10 +484,23 @@ OUTPUT FORMAT — respond with a JSON object:
         };
 
         let cat = category.unwrap_or("udf");
-        let dir = root.join("libs").join(cat);
+        let dir = root.join("libs").join(&clean_cat);
+        // Defense in depth: even after sanitization, verify the resolved
+        // write location is strictly inside the libs root before writing a
+        // file that the luajit extension can later load and execute.
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create libs/{cat} dir"))?;
         let file_path = dir.join(format!("{clean}.lua"));
+        if let Ok(canon_file) = file_path.canonicalize() {
+            if let Ok(canon_root) = root.join("libs").canonicalize() {
+                if !canon_file.starts_with(&canon_root) {
+                    anyhow::bail!(
+                        "refusing to write lib outside libs root: {}",
+                        canon_file.display()
+                    );
+                }
+            }
+        }
         std::fs::write(&file_path, source)
             .with_context(|| format!("failed to write {}", file_path.display()))?;
 
@@ -475,7 +508,7 @@ OUTPUT FORMAT — respond with a JSON object:
         let index_path = root.join("INDEX");
         if index_path.exists() {
             let index = std::fs::read_to_string(&index_path)?;
-            let entry = format!("{clean}|libs/{cat}/{clean}.lua");
+            let entry = format!("{clean}|libs/{clean_cat}/{clean}.lua");
             if !index.lines().any(|l| l.trim().starts_with(&format!("{clean}|"))) {
                 let mut updated = index.trim_end().to_string();
                 updated.push('\n');
@@ -486,7 +519,10 @@ OUTPUT FORMAT — respond with a JSON object:
             }
         } else {
             // No INDEX yet (offline cache): write one.
-            std::fs::write(&index_path, format!("{clean}|libs/{cat}/{clean}.lua\n"))?;
+            std::fs::write(
+                &index_path,
+                format!("{clean}|libs/{clean_cat}/{clean}.lua\n"),
+            )?;
         }
 
         println!(

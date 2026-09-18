@@ -110,7 +110,13 @@ impl TemplateEngine {
     pub fn extract_variable_refs(value: &JsonValue, out: &mut std::collections::HashSet<String>) {
         match value {
             JsonValue::String(s) => {
-                // Scan for {{key}} and ${context.key} placeholders.
+                // Scan for {{key}}, %%key%% and ${context.key} placeholders.
+                // The %%...%% form must be recognized here as well: the
+                // runtime resolver (flow_vars::resolve_string) honors both
+                // {{var}} and %%var%%, so the implicit-dependency reorder
+                // (which relies on this function) must see the same token
+                // set or a KNIME-syntax dependency between non-adjacent
+                // nodes would be silently mis-ordered.
                 let bytes = s.as_bytes();
                 let mut i = 0;
                 while i < bytes.len() {
@@ -130,6 +136,22 @@ impl TemplateEngine {
                                 out.insert(key.to_string());
                             }
                             i += 2 + end + 1;
+                            continue;
+                        }
+                    }
+                    if bytes[i] == b'%' && i + 1 < bytes.len() && bytes[i + 1] == b'%' {
+                        // %%key%% or %%key:default%% — the variable name is the
+                        // token before ':' (mirrors flow_vars::resolve_variable).
+                        if let Some(end) = s[i + 2..].find("%%") {
+                            let inner = s[i + 2..i + 2 + end].trim();
+                            let var_name = inner.split(':').next().unwrap_or("").trim();
+                            if !var_name.is_empty()
+                                && !var_name.contains(' ')
+                                && var_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                            {
+                                out.insert(var_name.to_string());
+                            }
+                            i += 2 + end + 2;
                             continue;
                         }
                     }
@@ -297,6 +319,25 @@ mod tests {
         assert!(refs.contains("other"));
         assert!(refs.contains("limit"));
         assert_eq!(refs.len(), 4, "exactly 4 refs: {refs:?}");
+    }
+
+    #[test]
+    fn test_extract_variable_refs_percent_percent_form() {
+        // P1-3 regression: KNIME-style %%var%% / %%var:default%% refs must be
+        // seen by the implicit-dependency reorder (extract_variable_refs),
+        // matching what flow_vars::resolve_string resolves at run time.
+        let input = json!({
+            "path": "/data/%%dept%%/output.csv",
+            "timeout": "%%timeout_sec:3600%%"
+        });
+        let mut refs = std::collections::HashSet::new();
+        TemplateEngine::extract_variable_refs(&input, &mut refs);
+        assert!(refs.contains("dept"), "%%var%% ref must be found: {refs:?}");
+        assert!(
+            refs.contains("timeout_sec"),
+            "%%var:default%% ref must yield the var name before ':': {refs:?}"
+        );
+        assert!(!refs.contains("3600"), "default value is not a ref: {refs:?}");
     }
 
     #[test]

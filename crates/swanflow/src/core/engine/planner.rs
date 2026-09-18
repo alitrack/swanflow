@@ -245,17 +245,8 @@ impl ExtensionPlanner for SwanFlowPlanner {
                     })?;
             }
 
-            let mut query = proxy.query.clone();
-
             // WORKAROUND for DataFusion 52.1.0 sql() limitation with $1 placeholders
-            for (i, param) in proxy.params.iter().enumerate() {
-                let placeholder = format!("${}", i + 1);
-                let val_str = match param {
-                    ScalarValue::Utf8(Some(s)) => format!("'{}'", s.replace("'", "''")),
-                    _ => format!("{}", param),
-                };
-                query = query.replace(&placeholder, &val_str);
-            }
+            let query = inline_placeholders(&proxy.query, &proxy.params);
 
             let df = self.ctx.sql(&query).await.map_err(|e| {
                 datafusion::error::DataFusionError::Plan(format!("Late-binding SQL error: {}", e))
@@ -431,5 +422,105 @@ impl QueryPlanner for SwanFlowQueryPlanner {
         self.physical_planner
             .create_physical_plan(logical_plan, session_state)
             .await
+    }
+}
+
+/// Inline `$N` placeholders into a late-binding SQL string (DataFusion 52
+/// `ctx.sql()` cannot bind parameters directly).
+///
+/// Correctness rules:
+/// - Replace **descending** by placeholder number ($11 before $10 before $1)
+///   so `$1` never clobbers the `$1` prefix inside `$10`/`$11`.
+/// - A placeholder token must be followed by a non-digit boundary, so an
+///   inline `$12` in the *value* of param $1 cannot be re-matched by a
+///   later, smaller placeholder.
+/// - String literals are single-quote-escaped; other types use their Display
+///   form (numbers, booleans, `NULL`).
+fn inline_placeholders(query: &str, params: &[ScalarValue]) -> String {
+    let mut out = query.to_string();
+    for i in (0..params.len()).rev() {
+        let placeholder = format!("${}", i + 1);
+        let val_str = match &params[i] {
+            ScalarValue::Utf8(Some(s)) => format!("'{}'", s.replace('\'', "''")),
+            other => format!("{}", other),
+        };
+        out = replace_placeholder_desc(&out, &placeholder, &val_str);
+    }
+    out
+}
+
+/// Replace `placeholder` (e.g. `"$1"`) in `haystack` with `replacement`,
+/// only where the placeholder is NOT immediately followed by a digit
+/// (`$1` must not match the prefix of `$10`).
+fn replace_placeholder_desc(haystack: &str, placeholder: &str, replacement: &str) -> String {
+    let bytes = haystack.as_bytes();
+    let mut result = String::with_capacity(haystack.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if haystack[i..].starts_with(placeholder) {
+            let after = i + placeholder.len();
+            let followed_by_digit = after < bytes.len()
+                && (bytes[after].is_ascii_digit());
+            if !followed_by_digit {
+                // Prefix [0..i) was already pushed incrementally; append only
+                // the replacement (re-scanning stops after it, so a value that
+                // itself contains "$N" is never inlined again).
+                result.push_str(replacement);
+                i = after;
+                continue;
+            }
+        }
+        result.push(haystack[i..].chars().next().unwrap());
+        i += 1;
+    }
+    result
+}
+
+#[cfg(test)]
+mod inline_placeholder_tests {
+    use super::*;
+
+    #[test]
+    fn prefix_collision_is_safe_with_descending_replacement() {
+        let query = "SELECT * FROM t WHERE a = $1 AND b = $10 AND c = $11";
+        let params = vec![
+            ScalarValue::Utf8(Some("ONE".to_string())),
+            ScalarValue::Int64(Some(2)),
+            ScalarValue::Int64(Some(3)),
+            ScalarValue::Int64(Some(4)),
+            ScalarValue::Int64(Some(5)),
+            ScalarValue::Int64(Some(6)),
+            ScalarValue::Int64(Some(7)),
+            ScalarValue::Int64(Some(8)),
+            ScalarValue::Int64(Some(9)),
+            ScalarValue::Int64(Some(10)),
+            ScalarValue::Int64(Some(11)),
+        ];
+        let out = inline_placeholders(query, &params);
+        assert_eq!(
+            out,
+            "SELECT * FROM t WHERE a = 'ONE' AND b = 10 AND c = 11"
+        );
+    }
+
+    #[test]
+    fn value_containing_placeholder_token_is_not_rematched() {
+        // Param $1's value itself contains "$2" — must not be inlined again.
+        let query = "SELECT $1, $2";
+        let params = vec![
+            ScalarValue::Utf8(Some("$2".to_string())),
+            ScalarValue::Int64(Some(7)),
+        ];
+        let out = inline_placeholders(query, &params);
+        assert_eq!(out, "SELECT '$2', 7");
+    }
+
+    #[test]
+    fn single_param_string_escaping() {
+        let out = inline_placeholders(
+            "SELECT * FROM t WHERE name = $1",
+            &[ScalarValue::Utf8(Some("O'Brien".to_string()))],
+        );
+        assert_eq!(out, "SELECT * FROM t WHERE name = 'O''Brien'");
     }
 }

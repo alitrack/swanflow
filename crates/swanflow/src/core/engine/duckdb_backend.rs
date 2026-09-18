@@ -6,7 +6,7 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{Result, ScalarValue};
-use datafusion::logical_expr::LogicalPlan;
+use datafusion::logical_expr::{Expr, LogicalPlan};
 use duckdb::{Config, Connection};
 use std::fmt;
 use std::sync::Arc;
@@ -352,8 +352,26 @@ impl QueryEngine for DuckDBEngine {
             }
             LP::Limit(limit) => {
                 let input_sql = self.compile_to_sql(limit.input.as_ref())?;
-                // DataFusion 52 uses Expr for skip/fetch — pass through for DuckDB to optimize
-                Ok(format!("SELECT * FROM ({}) AS _sub", input_sql))
+                // P1-4: render LIMIT/OFFSET so row_limit (and any Limit plan)
+                // is honored on the DuckDB path. Previously the clause was
+                // silently dropped, returning the full table.
+                let mut sql = format!("SELECT * FROM ({}) AS _sub", input_sql);
+                // DuckDB canonical clause order: LIMIT {fetch} [OFFSET {skip}].
+                // OFFSET is emitted only for a positive skip (OFFSET 0 is a no-op,
+                // so suppress it to keep the SQL clean).
+                if let Some(fetch) = &limit.fetch {
+                    if let Some(n) = literal_int_value(fetch) {
+                        sql.push_str(&format!(" LIMIT {n}"));
+                    }
+                }
+                if let Some(skip) = &limit.skip {
+                    if let Some(n) = literal_int_value(skip) {
+                        if n != 0 {
+                            sql.push_str(&format!(" OFFSET {n}"));
+                        }
+                    }
+                }
+                Ok(sql)
             }
             LP::TableScan(scan) => {
                 Ok(format!("SELECT * FROM \"{}\"", scan.table_name))
@@ -720,10 +738,33 @@ fn scalar_to_sql_literal(col: &ArrayRef, row_idx: usize) -> Result<String> {
     })
 }
 
+/// Extract an integer value from a literal `Expr` (DataFusion 52 represents
+/// `Limit::skip/fetch` as `Option<Box<Expr>>`, built from integer literals by
+/// `LogicalPlanBuilder::limit`). Returns `None` for non-literal expressions
+/// (defensive: such a plan would then skip the clause rather than emit junk).
+fn literal_int_value(expr: &Expr) -> Option<i64> {
+    if let Expr::Literal(sv, _schema) = expr {
+        match sv {
+            ScalarValue::Int8(v) => v.map(|n| n as i64),
+            ScalarValue::Int16(v) => v.map(|n| n as i64),
+            ScalarValue::Int32(v) => v.map(|n| n as i64),
+            ScalarValue::Int64(v) => *v,
+            ScalarValue::UInt8(v) => v.map(|n| n as i64),
+            ScalarValue::UInt16(v) => v.map(|n| n as i64),
+            ScalarValue::UInt32(v) => v.map(|n| n as i64),
+            ScalarValue::UInt64(v) => v.map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use datafusion::arrow::array::{Int64Array, StringArray};
+    use datafusion::logical_expr::{LogicalPlanBuilder, LogicalTableSource};
     use tokio::runtime::Runtime;
 
     #[test]
@@ -773,6 +814,94 @@ mod tests {
                 .unwrap();
             assert_eq!(result.len(), 1);
             assert_eq!(result[0].num_rows(), 3);
+        });
+    }
+
+    #[test]
+    fn test_limit_clause_honored_on_duckdb_path() {
+        // P1-4 regression: compile_to_sql used to DROP the Limit clause
+        // (skip/fetch), so row_limit middleware silently returned the full
+        // table on the DuckDB path. This test asserts the *executed* row
+        // count, not just the plan string (the plan-level assertion in
+        // middleware.rs only checks the Debug repr and would pass either way).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let engine = DuckDBEngine::new_in_memory().unwrap();
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int64, false),
+                Field::new("name", DataType::Utf8, true),
+            ]));
+
+            let id_arr = Int64Array::from(vec![1, 2, 3, 4, 5]);
+            let name_arr = StringArray::from(vec![
+                "a", "b", "c", "d", "e",
+            ]);
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(id_arr), Arc::new(name_arr)],
+            )
+            .unwrap();
+
+            let table = RegisteredTable {
+                name: "users5".to_string(),
+                schema: schema.clone(),
+                source: TableSource::InMemory {
+                    batches: vec![batch],
+                },
+            };
+
+            engine.register_table(table).await.unwrap();
+
+            // Build the plan exactly the way row_limit middleware produces it
+            // at runtime: Limit(skip/fetch) directly over a TableScan — no
+            // projection layer on top (that is what the middleware appends,
+            // and what compile_to_sql's LP::Limit branch used to drop).
+            // DataFusion 52's LogicalTableSource is the TableSource variant
+            // that works with LogicalPlanBuilder::scan; compile_to_sql only
+            // needs the table name, which resolves against the engine's own
+            // in-memory table above.
+            let lts = Arc::new(LogicalTableSource::new(schema.clone()));
+            let plan = LogicalPlanBuilder::scan("users5", lts.clone(), None)
+                .unwrap()
+                .limit(0, Some(2))
+                .unwrap()
+                .build()
+                .unwrap();
+
+            let sql = engine.compile_to_sql(&plan);
+            assert!(sql.is_ok(), "compile_to_sql failed: {sql:?}");
+            let sql = sql.unwrap();
+            assert!(
+                sql.contains("LIMIT 2"),
+                "Limit clause must be rendered by compile_to_sql: {sql}"
+            );
+            assert!(
+                !sql.to_uppercase().contains("OFFSET"),
+                "skip=0 must not emit OFFSET: {sql}"
+            );
+
+            // Execution-level assertion: the compiled SQL must actually
+            // return 2 rows (not the full 5-row table).
+            let result = engine.execute_sql(&sql).await.unwrap();
+            let rows: usize = result.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(rows, 2, "DuckDB execution must honor LIMIT: {sql}");
+
+            // OFFSET must be honored too (skip=3, fetch=2 → rows 4..5).
+            let plan = LogicalPlanBuilder::scan("users5", lts.clone(), None)
+                .unwrap()
+                .limit(3, Some(2))
+                .unwrap()
+                .build()
+                .unwrap();
+            let sql = engine.compile_to_sql(&plan).unwrap();
+            assert!(
+                sql.contains("LIMIT 2") && sql.contains("OFFSET 3"),
+                "OFFSET+LIMIT must both be rendered: {sql}"
+            );
+            let result = engine.execute_sql(&sql).await.unwrap();
+            let rows: usize = result.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(rows, 2, "DuckDB execution must honor OFFSET+LIMIT: {sql}");
         });
     }
 
