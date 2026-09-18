@@ -1146,7 +1146,17 @@ impl SwanFlowEngine {
             // Find previous step output
             let mut prev_output = String::new();
             for edge in workflow.graph.edges_directed(node_idx, Direction::Incoming) {
-                let src_node = workflow.graph.node_weight(edge.source()).unwrap();
+                // P2-5: tolerate a missing endpoint instead of panicking (release uses panic=abort).
+                let src_node = match workflow.graph.node_weight(edge.source()) {
+                    Some(n) => n,
+                    None => {
+                        eprintln!(
+                            "[engine] WARNING: incoming edge from missing source node {:?}, skipping edge",
+                            edge.source()
+                        );
+                        continue;
+                    }
+                };
                 let table_name = format!("node_{}", &src_node.id.to_string()[..8]);
                 if let Ok(df) = ctx
                     .sql(&format!("SELECT * FROM \"{}\" LIMIT 1", table_name))
@@ -1242,9 +1252,18 @@ impl SwanFlowEngine {
             let children: Vec<_> = workflow
                 .graph
                 .edges_directed(node_idx, Direction::Outgoing)
-                .map(|edge| {
-                    let child_node = workflow.graph.node_weight(edge.target()).unwrap();
-                    child_node.clone()
+                .filter_map(|edge| {
+                    // P2-5: skip edges to missing target nodes instead of panicking.
+                    match workflow.graph.node_weight(edge.target()) {
+                        Some(child_node) => Some(child_node.clone()),
+                        None => {
+                            eprintln!(
+                                "[engine] WARNING: outgoing edge to missing target node {:?}, skipping edge",
+                                edge.target()
+                            );
+                            None
+                        }
+                    }
                 })
                 .collect();
 
@@ -1394,9 +1413,18 @@ impl SwanFlowEngine {
             let predecessors: Vec<_> = workflow
                 .graph
                 .edges_directed(node_idx, Direction::Incoming)
-                .map(|edge| {
-                    let src_node = workflow.graph.node_weight(edge.source()).unwrap();
-                    src_node.clone()
+                .filter_map(|edge| {
+                    // P2-5: skip edges from missing source nodes instead of panicking.
+                    match workflow.graph.node_weight(edge.source()) {
+                        Some(src_node) => Some(src_node.clone()),
+                        None => {
+                            eprintln!(
+                                "[engine] WARNING: incoming edge from missing source node {:?}, skipping edge",
+                                edge.source()
+                            );
+                            None
+                        }
+                    }
                 })
                 .collect();
 
@@ -1471,7 +1499,17 @@ impl SwanFlowEngine {
         incoming_edges.sort_by_key(|e| e.weight().target_port);
 
         for edge in &incoming_edges {
-            let src_node = workflow.graph.node_weight(edge.source()).unwrap();
+            // P2-5: tolerate a missing endpoint instead of panicking (release uses panic=abort).
+            let src_node = match workflow.graph.node_weight(edge.source()) {
+                Some(n) => n,
+                None => {
+                    eprintln!(
+                        "[engine] WARNING: incoming edge from missing source node {:?}, skipping edge",
+                        edge.source()
+                    );
+                    continue;
+                }
+            };
             let table_name = format!("node_{}", &src_node.id.to_string()[..8]);
             if let Ok(df) = ctx.sql(&format!("SELECT * FROM \"{}\"", table_name)).await {
                 input_plans.push(df.into_optimized_plan()?);

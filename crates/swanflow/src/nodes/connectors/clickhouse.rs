@@ -72,7 +72,7 @@ impl Connector for ClickHouseConnector {
 
     async fn get_schema(&self, table: &str) -> CoreResult<SchemaRef> {
         // URL-encode the query: DESCRIBE TABLE table_name
-        let query = format!("DESCRIBE TABLE {}", table);
+        let query = format!("DESCRIBE TABLE {}", quote_ident(table));
         let query_url = format!("{}/?query={}", self.url, urlencoding(&query));
 
         let resp = self.client.get(&query_url).send().await.map_err(|e| {
@@ -131,13 +131,14 @@ impl Connector for ClickHouseConnector {
             .iter()
             .map(|f| f.name().to_string())
             .collect();
+        // P2-1a: quote each column/table identifier (backtick syntax, escaped).
         let select_cols = col_names
             .iter()
-            .map(|c| format!("`{}`", c))
+            .map(|c| quote_ident(c))
             .collect::<Vec<_>>()
             .join(", ");
 
-        let query = format!("SELECT {} FROM {}", select_cols, table);
+        let query = format!("SELECT {} FROM {}", select_cols, quote_ident(table));
         let ch_url = self.url.clone();
         let client = self.client.clone();
         let proj_schema = projected_schema.clone();
@@ -251,6 +252,12 @@ impl Connector for ClickHouseConnector {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Quote a ClickHouse identifier with backticks, escaping embedded backticks.
+/// P2-1a: closes identifier-injection via table/column names.
+fn quote_ident(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
+}
 
 /// Map ClickHouse type names to Arrow DataType.
 fn ch_type_to_arrow(ch_type: &str) -> DataType {

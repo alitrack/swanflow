@@ -263,12 +263,13 @@ impl Connector for SqlServerConnector {
             .iter()
             .map(|f| f.name().to_string())
             .collect();
+        // P2-1a: quote each column/table identifier (bracket syntax, ] escaped).
         let select_cols = col_names
             .iter()
-            .map(|c| format!("[{}]", c))
+            .map(|c| quote_ident(c))
             .collect::<Vec<_>>()
             .join(", ");
-        let query_str = format!("SELECT {} FROM [{}]", select_cols, table);
+        let query_str = format!("SELECT {} FROM {}", select_cols, quote_ident(table));
 
         let server = self.server.clone();
         let port = self.port;
@@ -345,6 +346,12 @@ impl Connector for SqlServerConnector {
     fn name(&self) -> &'static str {
         "sqlserver"
     }
+}
+
+/// Quote a SQL Server identifier with brackets, escaping embedded `]` as `]]`.
+/// P2-1a: closes identifier-injection via table/column names.
+fn quote_ident(name: &str) -> String {
+    format!("[{}]", name.replace(']', "]]"))
 }
 
 /// Map SQL Server type names to Arrow DataType.

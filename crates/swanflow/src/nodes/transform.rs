@@ -11,6 +11,7 @@ use serde_json::Value as JsonValue;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::core::engine::duckdb_backend::quote_ident;
 use crate::nodes::config as cfg;
 use crate::nodes::{NodeBehavior, NodeCapability, NodeSpec, PortSpec, TypedNodeBehavior};
 
@@ -128,7 +129,9 @@ impl NodeBehavior for ProjectNode {
         let ctx = SessionContext::new();
         let df = DataFrame::new(ctx.state(), inputs[0].clone());
         ctx.register_table("project_input", df.into_view())?;
-        let sql = format!("SELECT {} FROM project_input", select_cols.join(", "));
+        // P2-1a: quote each column identifier to close name-based SQL injection.
+        let cols: Vec<String> = select_cols.iter().map(|c| quote_ident(c)).collect();
+        let sql = format!("SELECT {} FROM project_input", cols.join(", "));
         let projected = ctx.sql(&sql).await?;
         Ok(vec![projected.into_optimized_plan()?])
     }

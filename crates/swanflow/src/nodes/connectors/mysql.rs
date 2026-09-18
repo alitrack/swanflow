@@ -96,8 +96,13 @@ impl Connector for MySqlConnector {
             .iter()
             .map(|f| f.name().to_string())
             .collect();
-        let select_cols = col_names.join(", ");
-        let query = format!("SELECT {} FROM `{}`", select_cols, table);
+        // P2-1a: quote each column/table identifier (backtick syntax, escaped).
+        let select_cols = col_names
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!("SELECT {} FROM {}", select_cols, quote_ident(table));
 
         let pool = self.pool.clone();
         let proj_schema = projected_schema.clone();
@@ -148,6 +153,12 @@ impl Connector for MySqlConnector {
     fn name(&self) -> &'static str {
         "mysql"
     }
+}
+
+/// Quote a MySQL identifier with backticks, escaping embedded backticks.
+/// P2-1a: closes identifier-injection via table/column names.
+fn quote_ident(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
 }
 
 /// Map MySQL type names to Arrow DataType.

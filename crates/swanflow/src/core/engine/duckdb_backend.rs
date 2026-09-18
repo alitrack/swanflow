@@ -99,6 +99,48 @@ impl DuckDBEngine {
     }
 }
 
+/// Quote a SQL identifier (table/view/column name) with double quotes and
+/// escape embedded `"` as `""`. P2-1a: closes identifier-injection via names.
+pub(crate) fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Return true if `sql` contains a statement separator (`;`) outside of
+/// single-quoted string literals and `--` line comments. P2-1b: used to
+/// reject multi-statement input before it reaches DuckDB.
+fn contains_multi_statement(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let mut in_string = false;
+    let mut in_line_comment = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_line_comment {
+            if c == b'\n' {
+                in_line_comment = false;
+            }
+        } else if in_string {
+            if c == b'\'' {
+                // '' is an escaped quote inside a string literal.
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 1;
+                } else {
+                    in_string = false;
+                }
+            }
+        } else if c == b'\'' {
+            in_string = true;
+        } else if c == b'-' && i + 1 < bytes.len() && bytes[i + 1] == b'-' {
+            in_line_comment = true;
+            i += 1;
+        } else if c == b';' {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 #[async_trait]
 impl QueryEngine for DuckDBEngine {
     fn name(&self) -> &str {
@@ -125,15 +167,15 @@ impl QueryEngine for DuckDBEngine {
                         .iter()
                         .map(|f| {
                             format!(
-                                "\"{}\" {}",
-                                f.name(),
+                                "{} {}",
+                                quote_ident(f.name()),
                                 arrow_type_to_duckdb_type(f.data_type())
                             )
                         })
                         .collect();
                     let create_sql = format!(
-                        "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
-                        name,
+                        "CREATE TABLE IF NOT EXISTS {} ({})",
+                        quote_ident(&name),
                         col_defs.join(", ")
                     );
                     self.execute_ddl(&create_sql).await?;
@@ -145,15 +187,15 @@ impl QueryEngine for DuckDBEngine {
                         .iter()
                         .map(|f| {
                             format!(
-                                "\"{}\" {}",
-                                f.name(),
+                                "{} {}",
+                                quote_ident(f.name()),
                                 arrow_type_to_duckdb_type(f.data_type())
                             )
                         })
                         .collect();
                     let create_sql = format!(
-                        "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
-                        name,
+                        "CREATE TABLE IF NOT EXISTS {} ({})",
+                        quote_ident(&name),
                         col_defs.join(", ")
                     );
                     self.execute_ddl(&create_sql).await?;
@@ -166,24 +208,24 @@ impl QueryEngine for DuckDBEngine {
             }
             TableSource::Parquet { path } => {
                 let sql = format!(
-                    "CREATE OR REPLACE VIEW \"{}\" AS SELECT * FROM read_parquet('{}')",
-                    name, path
+                    "CREATE OR REPLACE VIEW {} AS SELECT * FROM read_parquet('{}')",
+                    quote_ident(&name), path
                 );
                 self.execute_ddl(&sql).await?;
             }
             TableSource::Csv { path, has_header } => {
                 let header_str = if *has_header { "true" } else { "false" };
                 let sql = format!(
-                    "CREATE OR REPLACE VIEW \"{}\" AS SELECT * FROM read_csv('{}', header={})",
-                    name, path, header_str
+                    "CREATE OR REPLACE VIEW {} AS SELECT * FROM read_csv('{}', header={})",
+                    quote_ident(&name), path, header_str
                 );
                 self.execute_ddl(&sql).await?;
             }
             TableSource::Native { identifier } => {
                 // Table already exists in DuckDB — register a view alias
                 let sql = format!(
-                    "CREATE OR REPLACE VIEW \"{}\" AS SELECT * FROM \"{}\"",
-                    name, identifier
+                    "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
+                    quote_ident(&name), quote_ident(identifier)
                 );
                 self.execute_ddl(&sql).await?;
             }
@@ -204,11 +246,17 @@ impl QueryEngine for DuckDBEngine {
     }
 
     async fn deregister_table(&self, name: &str) -> Result<()> {
-        let sql = format!("DROP VIEW IF EXISTS \"{}\"", name);
+        let sql = format!("DROP VIEW IF EXISTS {}", quote_ident(name));
         self.execute_ddl(&sql).await
     }
 
     async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>> {
+        // P2-1b: reject multi-statement input (only a single statement allowed).
+        if contains_multi_statement(sql) {
+            return Err(datafusion::error::DataFusionError::External(
+                anyhow::anyhow!("execute_sql rejects multiple SQL statements").into(),
+            ));
+        }
         let guard = self.conn.lock().await;
         let mut stmt = guard
             .prepare(sql)
@@ -233,7 +281,8 @@ impl QueryEngine for DuckDBEngine {
 
         // Build schema from column info
         let col_count = duck_schema.fields().len();
-        let duckdb_to_arrow = |col_type: &str| -> DataType {
+        // P2-3: unknown type strings still fall back to Utf8, but no longer silently.
+        let duckdb_to_arrow = |col_type: &str, col_name: &str, col_index: usize| -> DataType {
             match col_type.to_uppercase().as_str() {
                 "BOOLEAN" => DataType::Boolean,
                 "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "INT8" | "INT16"
@@ -249,7 +298,15 @@ impl QueryEngine for DuckDBEngine {
                 "DATE" => DataType::Date32,
                 "VARCHAR" | "TEXT" | "STRING" | "BLOB" | "UUID" | "ENUM" | "UTF8"
                 | "LARGEUTF8" | "BINARY" | "LARGEBINARY" => DataType::Utf8,
-                _ => DataType::Utf8,
+                _ => {
+                    // Unrecognized type bridge: keep the Utf8 fallback (no panic),
+                    // but surface it on stderr so mis-typed data is not silent.
+                    eprintln!(
+                        "[duckdb] WARNING: unrecognizable column type \"{}\" at col {} ({}), falling back to Utf8",
+                        col_type, col_index, col_name
+                    );
+                    DataType::Utf8
+                }
             }
         };
 
@@ -257,7 +314,11 @@ impl QueryEngine for DuckDBEngine {
         for field in duck_schema.fields().iter() {
             let col_type = duckdb_type_to_str(field.data_type());
             let col_name = field.name().clone();
-            fields.push(Field::new(col_name, duckdb_to_arrow(&col_type), true));
+            fields.push(Field::new(
+                col_name.clone(),
+                duckdb_to_arrow(&col_type, &col_name, fields.len()),
+                true,
+            ));
         }
         let schema = Arc::new(Schema::new(fields));
 
@@ -374,7 +435,7 @@ impl QueryEngine for DuckDBEngine {
                 Ok(sql)
             }
             LP::TableScan(scan) => {
-                Ok(format!("SELECT * FROM \"{}\"", scan.table_name))
+                Ok(format!("SELECT * FROM {}", quote_ident(&scan.table_name.to_string())))
             }
             LP::Subquery(_) => {
                 let inputs = plan.inputs();
@@ -483,7 +544,7 @@ impl QueryEngine for DuckDBEngine {
     async fn get_table_schema(&self, name: &str) -> Result<SchemaRef> {
         let guard = self.conn.lock().await;
         let mut stmt = guard
-            .prepare(&format!("DESCRIBE \"{}\"", name))
+            .prepare(&format!("DESCRIBE {}", quote_ident(name)))
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
         let mut fields = Vec::new();
@@ -671,7 +732,7 @@ fn build_insert_sql(table_name: &str, batch: &RecordBatch) -> Result<String> {
     let col_names: Vec<String> = schema
         .fields()
         .iter()
-        .map(|f| format!("\"{}\"", f.name()))
+        .map(|f| quote_ident(f.name()))
         .collect();
 
     let mut value_rows = Vec::with_capacity(batch.num_rows());
@@ -686,8 +747,8 @@ fn build_insert_sql(table_name: &str, batch: &RecordBatch) -> Result<String> {
     }
 
     Ok(format!(
-        "INSERT INTO \"{}\" ({}) VALUES {}",
-        table_name,
+        "INSERT INTO {} ({}) VALUES {}",
+        quote_ident(table_name),
         col_names.join(", "),
         value_rows.join(", ")
     ))
@@ -963,4 +1024,16 @@ mod tests {
             assert_eq!(result[0].num_rows(), 2);
         });
     }
+    #[test]
+    fn test_execute_sql_rejects_multiple_statements() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let engine = DuckDBEngine::new_in_memory().unwrap();
+            // P2-1b: a statement separator must be rejected.
+            assert!(engine.execute_sql("SELECT 1; SELECT 2").await.is_err());
+            // A semicolon inside a string literal is NOT a separator -> allowed.
+            assert!(engine.execute_sql("SELECT 'a;b' AS x").await.is_ok());
+        });
+    }
+
 }

@@ -228,11 +228,16 @@ impl Daemon {
         tracing::info!("SwanFlow daemon listening on {}", self.socket_path.display());
 
         loop {
-            let (stream, _addr) = listener.accept().await?;
+            let (stream, addr) = listener.accept().await?;
+            // P2-4: keep a peer label so write failures on a connection are identifiable.
+            let peer = addr
+                .as_pathname()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "unnamed-client".to_string());
             let engine = self.engine.clone();
             let workflows = self.workflows.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_client(stream, engine, workflows).await {
+                if let Err(e) = handle_client(stream, engine, workflows, peer).await {
                     tracing::warn!("Client error: {}", e);
                 }
             });
@@ -248,6 +253,7 @@ async fn handle_client(
     stream: UnixStream,
     engine: Arc<SwanFlowEngine>,
     workflows: Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
+    peer: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -268,7 +274,9 @@ async fn handle_client(
                     workflows: None,
                     status: None,
                 };
-                let _ = write_response(&mut writer, &resp).await;
+                if let Err(e) = write_response(&mut writer, &resp).await {
+                    eprintln!("[daemon] WARNING: write response to client {} failed: {}", peer, e);
+                }
                 continue;
             }
         };
@@ -281,7 +289,7 @@ async fn handle_client(
                 .and_then(|v| v.as_str())
                 .and_then(|s| Uuid::parse_str(s).ok());
             if let Some(id) = wf_id {
-                stream_workflow_events(&mut writer, id, &workflows).await;
+                stream_workflow_events(&mut writer, id, &workflows, &peer).await;
             } else {
                 let resp = DaemonResponse {
                     id: req.id.clone(),
@@ -291,13 +299,17 @@ async fn handle_client(
                     workflows: None,
                     status: None,
                 };
-                let _ = write_response(&mut writer, &resp).await;
+                if let Err(e) = write_response(&mut writer, &resp).await {
+                    eprintln!("[daemon] WARNING: write response to client {} failed: {}", peer, e);
+                }
             }
             return Ok(());
         }
 
         let resp = handle_method(&req, &engine, &workflows).await;
-        let _ = write_response(&mut writer, &resp).await;
+        if let Err(e) = write_response(&mut writer, &resp).await {
+            eprintln!("[daemon] WARNING: write response to client {} failed: {}", peer, e);
+        }
     }
 
     Ok(())
@@ -639,10 +651,17 @@ async fn stream_workflow_events(
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     wf_id: Uuid,
     workflows: &Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
+    peer: &str,
 ) {
     // Send initial ack
     let ack = serde_json::json!({"event":"workflow.subscribed","workflow_id":wf_id.to_string()});
-    let _ = writer.write_all(format!("{}\n", ack).as_bytes()).await;
+    if let Err(e) = writer.write_all(format!("{}\n", ack).as_bytes()).await {
+        eprintln!(
+            "[daemon] WARNING: write to client {} failed (workflow {}), dropping stream: {}",
+            peer, wf_id, e
+        );
+        return;
+    }
 
     loop {
         let done = {
@@ -658,9 +677,17 @@ async fn stream_workflow_events(
                     "nodes_error": state.nodes_error,
                     "nodes_total": state.nodes_total,
                 });
-                let _ = writer
+                if let Err(e) = writer
                     .write_all(format!("{}\n", serde_json::to_string(&event).unwrap_or_default()).as_bytes())
-                    .await;
+                    .await
+                {
+                    // P2-4: write failed -> peer gone; warn and stop streaming this connection.
+                    eprintln!(
+                        "[daemon] WARNING: write to client {} failed (workflow {}), dropping stream: {}",
+                        peer, wf_id, e
+                    );
+                    break;
+                }
 
                 state.run_state == "completed" || state.run_state == "error" || state.run_state == "cancelled"
             } else {
@@ -668,16 +695,30 @@ async fn stream_workflow_events(
                     "event": "workflow.not_found",
                     "workflow_id": wf_id.to_string(),
                 });
-                let _ = writer
+                if let Err(e) = writer
                     .write_all(format!("{}\n", serde_json::to_string(&event).unwrap_or_default()).as_bytes())
-                    .await;
+                    .await
+                {
+                    // P2-4: write failed -> peer gone; warn and stop streaming this connection.
+                    eprintln!(
+                        "[daemon] WARNING: write to client {} failed (workflow {}), dropping stream: {}",
+                        peer, wf_id, e
+                    );
+                    break;
+                }
                 true
             }
         };
 
         if done {
             let done_event = serde_json::json!({"event":"workflow.stream_end","workflow_id":wf_id.to_string()});
-            let _ = writer.write_all(format!("{}\n", done_event).as_bytes()).await;
+            if let Err(e) = writer.write_all(format!("{}\n", done_event).as_bytes()).await {
+                // P2-4: connection already gone when delivering the end event.
+                eprintln!(
+                    "[daemon] WARNING: write to client {} failed (workflow {}), stream end not delivered: {}",
+                    peer, wf_id, e
+                );
+            }
             break;
         }
 
