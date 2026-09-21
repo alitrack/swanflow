@@ -210,7 +210,11 @@ pub(crate) fn struct_literal(v: &JsonValue) -> Result<String> {
         JsonValue::Object(o) => {
             let parts: Result<Vec<String>> = o
                 .iter()
-                .map(|(k, val)| Ok(format!("'{}':{}", k, struct_literal(val)?)))
+                // Keys are quoted like string values: a `'` in a key would
+                // otherwise shift the literal (sigil review sev-3).
+                .map(|(k, val)| {
+                    Ok(format!("'{}':{}", k.replace('\'', "''"), struct_literal(val)?))
+                })
                 .collect();
             Ok(format!("{{{}}}", parts?.join(", ")))
         }

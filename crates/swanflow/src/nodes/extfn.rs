@@ -107,15 +107,18 @@ impl ExtFnNode {
             .iter()
             .map(|c| {
                 let call = if args_sql.is_empty() {
-                    format!("{f}(\"{c}\")")
+                    format!("{f}({})", quote_ident(c))
                 } else {
-                    format!("{f}(\"{c}\", {args_sql})")
+                    format!("{f}({}, {})", quote_ident(c), args_sql)
                 };
-                format!("{call} AS \"{c}\"")
+                // Alias disambiguates from the passthrough column of the same
+                // name (sigil review med-1: same-name output columns are
+                // ambiguous for name-based downstream consumers).
+                format!("{call} AS {}", quote_ident(&format!("{c}__extfn")))
             })
             .collect();
 
-        let mut parts: Vec<String> = input_cols.iter().map(|c| format!("\"{c}\"")).collect();
+        let mut parts: Vec<String> = input_cols.iter().map(|c| quote_ident(c)).collect();
         parts.extend(selects);
         Ok(format!(
             "SELECT * FROM (SELECT {} FROM input_0) AS _extfn_transform",
@@ -274,10 +277,37 @@ fn mode_of(config: &JsonValue, default_generator: bool) -> String {
         })
 }
 
+/// DuckDB identifier quoting with `"` doubling — the only provably safe way to
+/// embed an untrusted identifier. Applied to every column reference we splice.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Admissible function/extension identifier: DuckDB function names are
+/// `[A-Za-z_][A-Za-z0-9_]*`. Anything else in the catalog row (pollution,
+/// corruption, adversarial extension metadata) is rejected at REGISTRATION
+/// time — a bad row must never reach `build_query`'s SQL splicing.
+/// (sigil review 2026-09-21, sev-1: unvalidated splice = injection surface.)
+fn is_safe_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some('a'..='z' | 'A'..='Z' | '_'))
+        && chars.all(|c| matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_'))
+}
+
+impl ExtFnDef {
+    /// Registration-time gate: None when the row must be skipped (logged).
+    fn vetted(&self) -> bool {
+        is_safe_ident(&self.extension) && is_safe_ident(&self.function)
+    }
+}
+
 /// Render `config.args` into a SQL fragment.
 ///
 /// * missing / null -> empty (call with no extra arguments)
-/// * string         -> spliced verbatim (matches DuckFlow's raw-SQL `args`)
+/// * string         -> spliced verbatim (matches DuckFlow's raw-SQL `args`).
+///                     ⚠️ deliberate escape hatch for power users — node
+///                     config is authored by the workflow author, same trust
+///                     domain as hand-written SQL elsewhere in the graph.
 /// * array          -> positional literals, comma-joined
 /// * object         -> single DuckDB struct literal (`{'op':'run'}`)
 fn args_to_sql(args: Option<&JsonValue>) -> Result<String> {
@@ -400,7 +430,9 @@ QUALIFY row_number() OVER ( \
     PARTITION BY extension_name, function_name \
     ORDER BY (description IS NULL OR description = '') ASC, \
              length(coalesce(parameters, '')) ASC, \
-             coalesce(parameters, '') ASC \
+             coalesce(parameters, '') ASC, \
+             coalesce(return_type, '') ASC, \
+             coalesce(description, '') ASC \
 ) = 1 \
 ORDER BY extension_name, function_name";
 
@@ -429,11 +461,19 @@ ORDER BY extension_name, function_name";
     };
 
     let mut out = Vec::new();
+    let mut skipped_unsafe = 0usize;
     while let Ok(Some(row)) = rows.next() {
         let extension: String = row.get(0).unwrap_or_default();
         let function: String = row.get(1).unwrap_or_default();
         let function_type: String = row.get(2).unwrap_or_default();
         if extension.is_empty() || function.is_empty() {
+            continue;
+        }
+        // Registration-time identifier gate (sigil review sev-1): a catalog row
+        // whose extension/function name is not a plain identifier is treated as
+        // pollution — skipped with a count, never spliced into SQL.
+        if !(is_safe_ident(&extension) && is_safe_ident(&function)) {
+            skipped_unsafe += 1;
             continue;
         }
         out.push(ExtFnNode {
@@ -446,6 +486,11 @@ ORDER BY extension_name, function_name";
                 has_side_effects: row.get(5).unwrap_or(false),
             },
         });
+    }
+    if skipped_unsafe > 0 {
+        eprintln!(
+            "[extfn] skipped {skipped_unsafe} catalog row(s) with non-identifier extension/function names"
+        );
     }
 
     // Belt and braces: the SQL already collapses overloads via QUALIFY, but a
@@ -534,11 +579,41 @@ mod tests {
                 &serde_json::json!({"columns": ["geom"]}),
             )
             .unwrap();
-        // Input columns preserved, function applied only to the named column.
+        // Input columns preserved, function applied only to the named column,
+        // output aliased with __extfn suffix to avoid same-name ambiguity.
         assert_eq!(
             q,
-            "SELECT * FROM (SELECT \"id\", \"geom\", st_area(\"geom\") AS \"geom\" FROM input_0) AS _extfn_transform"
+            "SELECT * FROM (SELECT \"id\", \"geom\", st_area(\"geom\") AS \"geom__extfn\" FROM input_0) AS _extfn_transform"
         );
+    }
+
+    #[test]
+    fn test_build_query_quotes_hostile_column_names() {
+        // A column name containing `"` must not close the identifier
+        // (sigil review sev-2). Doubling is DuckDB's escape rule.
+        let n = node("spatial", "st_area", "scalar");
+        let q = n
+            .build_query(
+                &["id".to_string(), "we\"ird".to_string()],
+                &serde_json::json!({"columns": ["we\"ird"]}),
+            )
+            .unwrap();
+        assert!(q.contains("st_area(\"we\"\"ird\") AS \"we\"\"ird__extfn\""), "{q}");
+    }
+
+    #[test]
+    fn test_is_safe_ident_gates_pollution() {
+        // Plain identifiers pass; anything splice-hostile is rejected.
+        assert!(is_safe_ident("st_area"));
+        assert!(is_safe_ident("_private_fn"));
+        assert!(is_safe_ident("MD_ACCESS_TOKENS"));
+        assert!(!is_safe_ident("fn; DROP TABLE x"));
+        assert!(!is_safe_ident("evil--comment"));
+        assert!(!is_safe_ident("has space"));
+        assert!(!is_safe_ident("dot.name"));
+        assert!(!is_safe_ident(""));
+        assert!(!is_safe_ident("9starts_with_digit"));
+        assert!(!is_safe_ident("quote'in"));
     }
 
     #[test]
@@ -550,7 +625,7 @@ mod tests {
                 &serde_json::json!({"columns": ["geom"], "args": ["EPSG:4326"]}),
             )
             .unwrap();
-        assert!(q.contains("st_transform(\"geom\", 'EPSG:4326') AS \"geom\""), "{q}");
+        assert!(q.contains("st_transform(\"geom\", 'EPSG:4326') AS \"geom__extfn\""), "{q}");
     }
 
     #[test]
