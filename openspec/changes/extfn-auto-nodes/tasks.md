@@ -87,8 +87,17 @@
       离线解析拒绝 yanked `spin 0.10.0`（`crc-fast ← aws-smithy-checksums ←
       aws-sdk-s3` 链）。解法 = 拷共享树的 `Cargo.lock` 进克隆（yanked 版本
       「已锁定即可用」）。
-- [ ] **端到端未验**：真起 SwanFlow 看 `Auto-registered 66 DuckDB extension function nodes`
-      日志 + `list_nodes` 里出现 `ext.<ext>.<fn>`（单元层已验：255 全绿含 extfn 12 个）
+- [x] **端到端已验**（`examples/e2e_extfn.rs`，真起引擎）：
+      ```text
+      SWANFLOW_EXT_FUNCTIONS_DB=<catalog> cargo run --example e2e_extfn
+      catalog: ext_functions_154.duckdb (v1.5.4-built, mode B)
+      total node types : 288
+      ext.* node types : 173        ← 与目录构建预测 173 精确一致
+      probe get_node(ext.motherduck.MD_ACCESS_TOKENS) -> round-trip ok
+      E2E_EXTFN_OK 173
+      ```
+      同时实证：**引擎（bundled DuckDB 1.5.5）可直接打开 v1.5.4 CLI 建的目录文件**
+      （存储格式跨 1.5.x 兼容），注册期 SQL/谓词在真引擎连接上全部成立。
 - [ ] 未验 tier-1 节点真能跑数据：需挑一个确实可载的扩展（ducklake / quack /
       postgres_scanner / sqlite_scanner / excel / fts）做一次真实 `propose_plan` → 执行
 - [ ] 未测 `mode=scalar` 在真实扩展函数（如 spatial `st_area`）上的行为——本机 v2.0 目录无
