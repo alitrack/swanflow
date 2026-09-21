@@ -77,9 +77,19 @@
 
 ## 遗留待办
 
+- [x] **集成后 tip 已编译 + 全套 lib 测试通过**（rebase 到 origin/main 的
+      duckdb 1.5.5 升级 + 两个 audit fix 之上之后，`5a6fa5e`）：
+      ```bash
+      cargo test -p swanflow --lib --offline   # 冷编译 + 全套
+      # test result: ok. 255 passed; 0 failed; 0 filtered out; finished in 8.79s
+      ```
+      注意冷启动坑：本仓 `.gitignore:16` 忽略 `Cargo.lock` ⇒ 干净克隆无锁 ⇒
+      离线解析拒绝 yanked `spin 0.10.0`（`crc-fast ← aws-smithy-checksums ←
+      aws-sdk-s3` 链）。解法 = 拷共享树的 `Cargo.lock` 进克隆（yanked 版本
+      「已锁定即可用」）。
 - [ ] **端到端未验**：真起 SwanFlow 看 `Auto-registered 66 DuckDB extension function nodes`
-      日志 + `list_nodes` 里出现 `ext.<ext>.<fn>`
-- [ ] **未验 tier-1 节点真能跑数据**：需挑一个确实可载的扩展（ducklake / quack /
+      日志 + `list_nodes` 里出现 `ext.<ext>.<fn>`（单元层已验：255 全绿含 extfn 12 个）
+- [ ] 未验 tier-1 节点真能跑数据：需挑一个确实可载的扩展（ducklake / quack /
       postgres_scanner / sqlite_scanner / excel / fts）做一次真实 `propose_plan` → 执行
 - [ ] 未测 `mode=scalar` 在真实扩展函数（如 spatial `st_area`）上的行为——本机 v2.0 目录无
       spatial（v1.5.4 目录才有），需换 CLI 或换机器
