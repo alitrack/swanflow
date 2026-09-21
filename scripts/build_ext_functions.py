@@ -268,8 +268,14 @@ def build(cli: str, db: str, list_only: bool) -> None:
             log(f"note: {len(errs)} non-fatal error line(s) during LOAD:")
             for ln in errs[:10]:
                 log(f"  {ln}")
+        # A non-zero CLI exit code is EXPECTED here: in non-interactive mode the
+        # duckdb CLI exits non-zero if any statement errored, even with `.bail off`
+        # (where a failed LOAD must not abort the catalog build — one broken
+        # extension must not take the whole catalog down). The authoritative
+        # pass/fail signal is verify() below, which inspects what actually
+        # landed in the DB. Do NOT exit on p.returncode.
         if p.returncode != 0:
-            sys.exit(f"error: build failed ({p.returncode})")
+            log(f"note: CLI exited {p.returncode} (expected when an extension failed to LOAD)")
     finally:
         os.unlink(sql_file)
 
