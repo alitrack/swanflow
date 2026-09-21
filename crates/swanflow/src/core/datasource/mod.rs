@@ -538,12 +538,34 @@ impl ExecutionPlan for DuckDBScanExec {
         let batches = futures::executor::block_on(df.collect())
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
+        // The parquet reader (arrow 57) forces BYTE_ARRAY columns to view
+        // types (Utf8View/BinaryView), while `project_schema` came from the
+        // DuckDB C stream (Utf8/Binary). Downstream coalescers assert on the
+        // mismatch (debug panic / release soundness hazard). Cast every batch
+        // column to the declared schema — Utf8View→Utf8 etc. — before streaming.
+        // (Found by pi worker tier-1 dataflow verification, 2026-09-21.)
+        let target_schema = self.project_schema.as_ref();
+        let mut cast_batches = Vec::with_capacity(batches.len());
+        for b in batches {
+            let columns = target_schema
+                .fields()
+                .iter()
+                .zip(b.columns())
+                .map(|(field, col)| arrow::compute::cast(col, field.data_type()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+            cast_batches.push(
+                arrow::record_batch::RecordBatch::try_new(Arc::new(target_schema.clone()), columns)
+                    .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?,
+            );
+        }
+
         // Clean up
         std::fs::remove_file(tmp_file).ok();
 
         Ok(Box::pin(
             datafusion::physical_plan::memory::MemoryStream::try_new(
-                batches,
+                cast_batches,
                 self.project_schema.clone(),
                 None,
             )?,
