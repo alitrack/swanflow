@@ -106,14 +106,39 @@ impl NodeRegistry {
         // directly. Missing INDEX is fine — just the generic shell node remains.
         if let Some(index_path) = crate::nodes::luajit::default_luajit_libs_index() {
             let libs = crate::nodes::luajit::luajit_libs_from_index(&index_path);
+            let lib_count = libs.len();
             for lib in libs {
                 self.register_node(Arc::new(lib));
             }
             tracing::info!(
                 "Auto-registered {} luajit lib nodes from {}",
-                self.nodes.len().saturating_sub(1),
+                lib_count,
                 index_path
             );
+        }
+
+        // Second auto-registration source: DuckDB extension functions
+        // (implementation and rationale live in `nodes/extfn.rs`).
+        // Reads the materialized `ext_functions` catalog produced by
+        // `scripts/build_ext_functions.py`. Node bloat is guarded by the
+        // catalog's `enabled` column (tier-1 `table` functions of non-core
+        // extensions are pre-enabled; everything else needs human curation)
+        // plus the filter inside `extfn_nodes_from_table`. A missing catalog is
+        // fine — no ext nodes appear and the rest of the registry is unaffected.
+        // Design record: openspec/changes/extfn-auto-nodes/design.md
+        if let Some(db_path) = crate::nodes::extfn::default_ext_functions_db() {
+            let fns = crate::nodes::extfn::extfn_nodes_from_table(&db_path);
+            let fn_count = fns.len();
+            for f in fns {
+                self.register_node(Arc::new(f));
+            }
+            if fn_count > 0 {
+                tracing::info!(
+                    "Auto-registered {} DuckDB extension function nodes from {}",
+                    fn_count,
+                    db_path
+                );
+            }
         }
         self.register_node(Arc::new(CsvReadNode));
         self.register_node(Arc::new(ParquetReadNode));

@@ -173,7 +173,7 @@ impl NodeBehavior for LuaJitNode {
         // Early schema discovery: run the query against a scratch DuckDB
         // connection with the luajit extension loaded, so the logical schema
         // is accurate (planner needs it before physical execution).
-        let schema: DFSchemaRef = discover_schema(&query, config).unwrap_or_else(|_| {
+        let schema: DFSchemaRef = discover_schema(&query, &luajit_extension_paths()).unwrap_or_else(|_| {
             if !inputs.is_empty() {
                 inputs[0].schema().clone()
             } else {
@@ -201,10 +201,11 @@ impl TypedNodeBehavior for LuaJitNode {
 }
 
 /// Render a JSON value as a DuckDB literal (struct/list/string/number/bool).
-/// DuckDB struct literal syntax (verified on 1.5.5): `{'op':'run','n':1}` —
-/// keys single-quoted, strings single-quoted and escaped, numbers/bools bare,
-/// null → NULL. Nested objects/lists render recursively.
-fn struct_literal(v: &JsonValue) -> Result<String> {
+/// DuckDB struct literal syntax (verified on 1.5.5): `{'op':'run', 'n':1}` —
+/// entries are joined with `", "` (comma *and* space), keys single-quoted,
+/// strings single-quoted and escaped, numbers/bools bare, null → NULL.
+/// Nested objects/lists render recursively.
+pub(crate) fn struct_literal(v: &JsonValue) -> Result<String> {
     match v {
         JsonValue::Object(o) => {
             let parts: Result<Vec<String>> = o
@@ -442,14 +443,18 @@ pub fn luajit_extension_paths() -> Vec<String> {
     ]
 }
 
-/// Try to determine the output schema of a luajit query by executing it
-/// against a scratch DuckDB connection (unsigned extension allowed).
-fn discover_schema(query: &str, _config: &JsonValue) -> Result<DFSchemaRef> {
+/// Try to determine the output schema of a query by executing it against a
+/// scratch DuckDB connection (unsigned extension allowed).
+///
+/// `extensions` is the list to LOAD first; entries containing `/` or ending in
+/// `.duckdb_extension` are loaded by absolute path (required for locally built
+/// or pre-placed extensions, since `INSTALL` fails on dev/alpha builds).
+pub(crate) fn discover_schema(query: &str, extensions: &[String]) -> Result<DFSchemaRef> {
     let config = duckdb::Config::default()
         .allow_unsigned_extensions()
         .map_err(|e| anyhow!(e.to_string()))?;
     let conn = duckdb::Connection::open_with_flags(":memory:", config)?;
-    for ext in luajit_extension_paths() {
+    for ext in extensions {
         let sql = if ext.contains('/') || ext.ends_with(".duckdb_extension") {
             format!("LOAD '{}'", ext)
         } else {

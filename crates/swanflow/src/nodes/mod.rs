@@ -15,6 +15,7 @@ pub mod boundary;
 pub mod common;
 pub mod config;
 pub mod connectors;
+pub mod extfn;
 pub mod io;
 pub mod luajit;
 pub mod mcp;
