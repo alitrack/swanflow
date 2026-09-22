@@ -130,3 +130,19 @@
       ⚠️ 同类隐患面：其他走 listing scan 的读节点（parquet/json 等）若同样无
       存在性检查，可能同病——`UniversalReadNode` 的 dir 分支有 `path.exists()`
       先检（nodes.rs:709），但文件分支待核。
+- [x] **同类隐患面全扫 —— 已清**（`8279bf5`，pi+sigil 双 lane，云 token=0）：
+      **Lane A（pi@8017 tools，163s，8 case 实跑）**：同病 3 条路径——
+      `core.io.parquet_read`（含 `core.io.parquet` 别名）与 `core.io.universal_read`
+      的 csv/parquet file 分支（全 Executed、EXIT=0、零数据）；已防 2——
+      `core.io.duckdb_read` 报错（但读写模式打开会**静默创建 12KB 空库文件**，次要问题
+      待办）、universal json 分支已有 canonicalize；未注册 type_id（json/duckdb/
+      core.universal_read）以 missing node implementation 显式失败。
+      **Lane B（sigil@8014 单轮 159s + pi@8017 notools 复核 208s）**：确认判定 +
+      指出 CSV 修复两个残留缺陷（`exists()` 对目录也 true；glob 输入会被误杀——
+      DataFusion read_csv/read_parquet 支持通配符）。
+      **修法**：抽公共 `cfg::validate_local_file`（glob-aware：普通路径 `is_file()`，
+      glob 路径查父目录存在），Parquet/universal file 路由接上，CSV 换用 helper。
+      验证：CLI 集成测试 5/5（新增 parquet/universal 两用例）、lib 262/262
+      （新增 5 个 helper 单测）、glob 工作流真跑 EXIT=0（不误杀）。
+- [ ] **次要**：`core.io.duckdb_read` 对缺失 DB 文件以读写模式打开会静默创建空库
+      文件（Lane A 发现）——读语义应用只读模式打开。
