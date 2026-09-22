@@ -112,7 +112,9 @@
       可重跑脚本 `scripts/fill_versions.py` 已入库；db 本体被 gitignore（设计如此，
       数据可重建）。注：真测版本串多为 commit hash（如 httpfs `af7bcaf`），仅
       v1.4.5+/v1.5.4 内置扩展带语义版本——与上游发布方式一致。
-- [ ] 未把「怎么用」写进用户文档 / wiki
+- [x] 用户文档已写：`docs/extfn-nodes.md`（机制三层图 / 快速开始 / scalar vs table
+      两模式 / enabled 开闸 SQL / 已知边界含 INSTALL 上限 / 验证证据链 / 源码索引），
+      README 加入口（文档命令 `--list-only` 实跑核过：8 扩展可 LOAD）。
 
 ## 2026-09-22 遗留清理
 

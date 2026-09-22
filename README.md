@@ -99,6 +99,19 @@ swanflow knime scan ~/knime-workspace/
 
 **覆盖率：** 120 个工厂映射，61 Full (51%)，41 Emulated (34%)，15 Unsupported (12%)，3 Degraded (3%)
 
+### 扩展函数自动节点（extfn）
+
+DuckDB 扩展函数自动长成画布算子（`ext.<扩展>.<函数>`），无需写 Rust：
+
+```bash
+# 1. 采集本机扩展函数目录（幂等）
+python3 scripts/build_ext_functions.py
+
+# 2. 之后 swanflow 启动即自动注册 ext.* 节点（YAML 里直接用）
+```
+
+详见 [docs/extfn-nodes.md](docs/extfn-nodes.md)。
+
 ### MCP 集成
 
 SwanFlow 可嵌入任何支持 MCP 的平台（LangFlow · Claude Code · Dify · n8n）：
