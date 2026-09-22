@@ -43,7 +43,25 @@ pub struct DuckDBHelper;
 
 impl DuckDBHelper {
     pub fn open_connection(path: &str) -> Result<Connection> {
-        Connection::open(path).map_err(|e| anyhow!("Failed to open DuckDB: {}", e))
+        // Read-only semantics for file-backed databases: this helper only
+        // serves query_arrow (SELECT via COPY bridge). A read-write open
+        // would silently CREATE an empty database file when the path
+        // doesn't exist — masking the config mistake and littering the
+        // filesystem. In-memory databases can't be read-only, so they
+        // keep the default (read-write) config.
+        let conn = if path == ":memory:" {
+            Connection::open(path).map_err(|e| anyhow!("Failed to open DuckDB: {}", e))?
+        } else {
+            if !std::path::Path::new(path).is_file() {
+                return Err(anyhow!("DuckDB database file does not exist: {}", path));
+            }
+            let config = duckdb::Config::default()
+                .access_mode(duckdb::AccessMode::ReadOnly)
+                .map_err(|e| anyhow!("Failed to build DuckDB config: {}", e))?;
+            Connection::open_with_flags(path, config)
+                .map_err(|e| anyhow!("Failed to open DuckDB read-only: {}", e))?
+        };
+        Ok(conn)
     }
 
     pub fn prepare_connection(conn: &Connection, extensions: &[&str]) -> Result<()> {
