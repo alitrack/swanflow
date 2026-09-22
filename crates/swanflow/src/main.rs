@@ -8,7 +8,7 @@ use swanflow::core::graph::Workflow;
 use swanflow::mcp::client::McpClient;
 use swanflow::mcp::server::McpServer;
 use swanflow::nodes::registry::NodeRegistry;
-use swanflow::nodes::NodeEvent;
+use swanflow::nodes::{NodeEvent, NodeState};
 use swanflow_knime::KnwfParser;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use uuid::Uuid;
@@ -298,16 +298,25 @@ async fn main() -> anyhow::Result<()> {
             let mut rx = engine.execute_workflow(&workflow).await?;
 
             println!("📊 Execution Started...");
+            let mut failed = false;
             while let Some(event) = rx.recv().await {
                 match event {
                     NodeEvent::StateChanged { node_id, state } => {
                         println!("  Node[{}] -> {:?}", node_id, state);
+                        if matches!(state, NodeState::Error(_)) {
+                            failed = true;
+                        }
                     }
                     NodeEvent::Error { message, .. } => {
                         eprintln!("  ❌ Error: {}", message);
+                        failed = true;
                     }
                     _ => {}
                 }
+            }
+            if failed {
+                println!("❌ Execution Finished with errors.");
+                std::process::exit(1);
             }
             println!("✅ Execution Finished.");
         }
