@@ -121,7 +121,12 @@
       `.cargo/config.toml [env]` 里同款 `LD_LIBRARY_PATH`；(b) 引擎缓存目录
       `target/swanflow_cache`（含独占锁的 `metadata.duckdb`）相对 cwd 硬编码 ⇒
       每个测试 spawn 用独立 cwd，否则两测试并发互撞 DuckDB 文件锁。
-- [ ] **新发现（更深的一档）：CSV 源文件不存在时节点照样 `Executed`**（复现
-      `/tmp/fail_repro.yaml`：`core.io.csv` 指向不存在路径，两个节点全部
-      Executed、EXIT=0、零报错）——缺文件错误被吞在比事件循环更早的层（大概率是
-      注册表/规划期的 schema fallback）。待定位修复。
+- [x] **新发现（更深的一档）：CSV 源文件不存在时节点照样 `Executed` —— 已修**（`03de0d9`）：
+      复现（`core.io.csv` 指向不存在路径，新 node id + 干净 cwd 仍全 Executed、EXIT=0、
+      零报错；`inspect` 显示 `Port 0: []`）。根因：DataFusion listing-table scan 对
+      不存在的路径**不报错**——给空 schema、零批次，整条链路"成功"但没数据。
+      修法：`CsvReadNode::validate` 加存在性检查，校验期即报
+      `CSV file does not exist: <path>`。测试第三用例钉住（3/3 通过）；lib 257/257。
+      ⚠️ 同类隐患面：其他走 listing scan 的读节点（parquet/json 等）若同样无
+      存在性检查，可能同病——`UniversalReadNode` 的 dir 分支有 `path.exists()`
+      先检（nodes.rs:709），但文件分支待核。
