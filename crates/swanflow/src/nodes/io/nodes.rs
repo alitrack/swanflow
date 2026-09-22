@@ -339,7 +339,11 @@ impl NodeBehavior for ParquetReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        cfg::required_string(config, "path")?;
+        let path = cfg::required_string(config, "path")?;
+        // Same silent-success hazard as CsvReadNode: DataFusion's
+        // listing-table scan yields empty schema + zero batches for a
+        // nonexistent path. Fail fast at validation.
+        cfg::validate_local_file(&path, "Parquet")?;
         Ok(())
     }
 
@@ -392,9 +396,7 @@ impl NodeBehavior for CsvReadNode {
         // DataFusion's listing-table scan does NOT error on a nonexistent
         // path — it yields an empty schema and zero batches, so a typo'd CSV
         // path silently "succeeds" with no data. Fail fast at validation.
-        if !std::path::Path::new(&path).exists() {
-            return Err(anyhow!("CSV file does not exist: {}", path));
-        }
+        cfg::validate_local_file(&path, "CSV")?;
         Ok(())
     }
 
@@ -550,7 +552,31 @@ impl NodeBehavior for UniversalReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        let _route = Self::resolve_route_metadata(config)?;
+        let route = Self::resolve_route_metadata(config)?;
+        // Same silent-success hazard as CsvReadNode for local file routes:
+        // DataFusion's listing-table scan yields empty schema + zero batches
+        // for a nonexistent path (the JSON branch already canonicalizes, but
+        // the CSV/Parquet branches don't). Only check the "file" route —
+        // url/table routes have their own error paths. Directories and globs
+        // are legitimate inputs here, so accept any existing path.
+        if route["resolved_source_type"] == "file" {
+            let source = route["source"].as_str().unwrap_or_default();
+            let p = std::path::Path::new(source);
+            let contains_glob = source
+                .bytes()
+                .any(|b| matches!(b, b'*' | b'?' | b'[' | b']'));
+            let ok = if contains_glob {
+                p.parent()
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .map(|d| d.is_dir())
+                    .unwrap_or(true)
+            } else {
+                p.exists()
+            };
+            if !ok {
+                return Err(anyhow!("Source path does not exist: {}", source));
+            }
+        }
         Ok(())
     }
 

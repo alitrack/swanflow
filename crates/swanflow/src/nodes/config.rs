@@ -67,10 +67,84 @@ pub fn required_string_array(config: &JsonValue, key: &str) -> Result<Vec<String
         .collect()
 }
 
+/// Validate that a local file path exists, glob-aware.
+///
+/// DataFusion's listing-table scans (`read_csv` / `read_parquet`) do NOT
+/// error on a nonexistent path — they yield an empty schema and zero
+/// batches, so a typo'd path makes the whole workflow "succeed" silently
+/// with no data. This helper fails fast at validation time instead.
+///
+/// Glob semantics: DataFusion accepts glob patterns (`data/*.csv`), so a
+/// literal `is_file()` check would reject valid globs. When the path
+/// contains glob metacharacters we instead require the **parent directory**
+/// to exist. Plain paths must exist and be files (a directory would be a
+/// config mistake for single-file readers). Returns the path unchanged
+/// (relative paths are resolved against the caller's cwd by DataFusion at
+/// execution time, the same as before this check existed).
+pub fn validate_local_file(path: &str, what: &str) -> Result<()> {
+    let p = std::path::Path::new(path);
+    let contains_glob = path
+        .bytes()
+        .any(|b| matches!(b, b'*' | b'?' | b'[' | b']'));
+    if contains_glob {
+        let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
+        if let Some(dir) = parent {
+            if !dir.is_dir() {
+                return Err(anyhow!(
+                    "{} glob path's directory does not exist: {}",
+                    what,
+                    dir.display()
+                ));
+            }
+        }
+        return Ok(());
+    }
+    if !p.is_file() {
+        return Err(anyhow!("{} file does not exist: {}", what, path));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ── validate_local_file ──
+
+    #[test]
+    fn validate_local_file_rejects_missing_plain_path() {
+        let e = validate_local_file("/definitely/not/here/x.csv", "CSV").unwrap_err();
+        assert!(e.to_string().contains("does not exist"), "{}", e);
+    }
+
+    #[test]
+    fn validate_local_file_rejects_directory_as_plain_path() {
+        let e = validate_local_file("/tmp", "CSV").unwrap_err();
+        assert!(e.to_string().contains("does not exist"), "{}", e);
+    }
+
+    #[test]
+    fn validate_local_file_accepts_existing_file() {
+        // /etc/hostname exists on every Linux; fall back to /bin/sh for portability.
+        let p = if std::path::Path::new("/etc/hostname").is_file() {
+            "/etc/hostname"
+        } else {
+            "/bin/sh"
+        };
+        validate_local_file(p, "CSV").unwrap();
+    }
+
+    #[test]
+    fn validate_local_file_accepts_glob_with_existing_parent() {
+        validate_local_file("/tmp/*.csv", "CSV").unwrap();
+    }
+
+    #[test]
+    fn validate_local_file_rejects_glob_with_missing_parent() {
+        let e = validate_local_file("/definitely/not/here/*.csv", "CSV").unwrap_err();
+        assert!(e.to_string().contains("does not exist"), "{}", e);
+    }
 
     // ── required_string ──
 

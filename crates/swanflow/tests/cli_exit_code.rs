@@ -113,6 +113,76 @@ graph:
 }
 
 #[test]
+fn run_reports_nonzero_exit_on_missing_parquet_file() {
+    let yaml = r#"
+name: "cli-exit-code: missing parquet"
+id: "bbbbbbb0-0000-0000-0000-000000000004"
+graph:
+  nodes:
+    - id: "00000000-0000-0000-0000-000000000001"
+      type_id: "core.io.parquet_read"
+      config:
+        path: "/definitely/not/here/tiny.parquet"
+      state: "Configured"
+      sub_workflow: null
+    - id: "00000000-0000-0000-0000-000000000002"
+      type_id: "core.sql"
+      config: { query: "SELECT * FROM input_0 LIMIT 5" }
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
+"#;
+    let (code, stdout, stderr) = run_workflow(yaml);
+    assert_ne!(code, 0, "missing parquet file must produce non-zero exit");
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(
+        combined.contains("does not exist"),
+        "expected missing-file error, got: {}",
+        combined
+    );
+}
+
+#[test]
+fn run_reports_nonzero_exit_on_missing_universal_read_source() {
+    let yaml = r#"
+name: "cli-exit-code: missing universal source"
+id: "bbbbbbb0-0000-0000-0000-000000000005"
+graph:
+  nodes:
+    - id: "00000000-0000-0000-0000-000000000001"
+      type_id: "core.io.universal_read"
+      config:
+        source: "/definitely/not/here/tiny.csv"
+        source_type: "file"
+      state: "Configured"
+      sub_workflow: null
+    - id: "00000000-0000-0000-0000-000000000002"
+      type_id: "core.sql"
+      config: { query: "SELECT * FROM input_0 LIMIT 5" }
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
+"#;
+    let (code, stdout, stderr) = run_workflow(yaml);
+    assert_ne!(
+        code, 0,
+        "missing universal_read source must produce non-zero exit"
+    );
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(
+        combined.contains("does not exist"),
+        "expected missing-source error, got: {}",
+        combined
+    );
+}
+
+#[test]
 fn run_reports_zero_exit_on_success() {
     let yaml = r#"
 name: "cli-exit-code: happy path"
