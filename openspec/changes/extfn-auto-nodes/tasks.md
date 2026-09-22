@@ -144,5 +144,11 @@
       glob 路径查父目录存在），Parquet/universal file 路由接上，CSV 换用 helper。
       验证：CLI 集成测试 5/5（新增 parquet/universal 两用例）、lib 262/262
       （新增 5 个 helper 单测）、glob 工作流真跑 EXIT=0（不误杀）。
-- [ ] **次要**：`core.io.duckdb_read` 对缺失 DB 文件以读写模式打开会静默创建空库
-      文件（Lane A 发现）——读语义应用只读模式打开。
+- [x] **次要：`core.io.duckdb_read` 静默创建空库 —— 已修**（`31095ae`）：
+      `DuckDBHelper::open_connection` 只服务 query_arrow（SELECT 桥），文件路径改为
+      `is_file()` 先检 + `AccessMode::ReadOnly` 打开；`:memory:` 保持默认配置
+      （http_fetch/universal json/graph metadata 等内部调用要在内存建会话状态，
+      不能只读）；写节点走自己的 open 路径不受影响。
+      验证：缺文件 → 报错 + EXIT=1 + **不再创建空库文件**；真库（duckdb_write 造）→
+      EXIT=0；lib 262/262（并行+单线程各一遍）、cli_exit_code 5/5。
+      注：Python duckdb 造的库打不开是 storage 版本不兼容（999 vs 68），与修复无关。
