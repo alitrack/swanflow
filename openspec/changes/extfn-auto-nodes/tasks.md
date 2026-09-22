@@ -105,7 +105,13 @@
 - [ ] **`INSTALL` 能力未测**：本机全是 dev/alpha 构建（hash `5319116087`），官方不发布二进制，
       `INSTALL` 100% 失败 ⇒ 覆盖率天花板 = 有没有一个可 INSTALL 的发布版运行时。这是本方案
       唯一未解的上游未知数
-- [ ] `duckatlas.extension_versions` 表 0 行（兼容性矩阵数据缺口，独立任务）
+- [x] `duckatlas.extension_versions` 表 0 行 —— **已填**（`f74b4af`，2026-09-22）：
+      292 行 = 85 真测（27 核心扩展在 duckdb 1.1.3/1.2.2/1.3.2/1.4.5/1.5.4 五个
+      pinned venv 里逐个 INSTALL+LOAD，真实版本号取自 `duckdb_extensions()`）+
+      207 静态（community-extensions 仓库 description.yml，tested=false）。
+      可重跑脚本 `scripts/fill_versions.py` 已入库；db 本体被 gitignore（设计如此，
+      数据可重建）。注：真测版本串多为 commit hash（如 httpfs `af7bcaf`），仅
+      v1.4.5+/v1.5.4 内置扩展带语义版本——与上游发布方式一致。
 - [ ] 未把「怎么用」写进用户文档 / wiki
 
 ## 2026-09-22 遗留清理
