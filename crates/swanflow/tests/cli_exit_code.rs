@@ -77,6 +77,42 @@ graph:
 }
 
 #[test]
+fn run_reports_nonzero_exit_on_missing_source_file() {
+    // DataFusion's listing scan does not error on a nonexistent path — it
+    // yields an empty schema and zero batches, so this used to "succeed"
+    // silently with no data. Validation must fail fast.
+    let yaml = r#"
+name: "cli-exit-code: missing csv"
+id: "bbbbbbb0-0000-0000-0000-000000000003"
+graph:
+  nodes:
+    - id: "00000000-0000-0000-0000-000000000001"
+      type_id: "core.io.csv"
+      config:
+        path: "/definitely/not/here/tiny.csv"
+      state: "Configured"
+      sub_workflow: null
+    - id: "00000000-0000-0000-0000-000000000002"
+      type_id: "core.sql"
+      config: { query: "SELECT * FROM input_0 LIMIT 5" }
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
+"#;
+    let (code, stdout, stderr) = run_workflow(yaml);
+    assert_ne!(code, 0, "missing source file must produce non-zero exit");
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(
+        combined.contains("does not exist"),
+        "expected missing-file error, got: {}",
+        combined
+    );
+}
+
+#[test]
 fn run_reports_zero_exit_on_success() {
     let yaml = r#"
 name: "cli-exit-code: happy path"

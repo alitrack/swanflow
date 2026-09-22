@@ -388,7 +388,13 @@ impl NodeBehavior for CsvReadNode {
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
-        cfg::required_string(config, "path")?;
+        let path = cfg::required_string(config, "path")?;
+        // DataFusion's listing-table scan does NOT error on a nonexistent
+        // path — it yields an empty schema and zero batches, so a typo'd CSV
+        // path silently "succeeds" with no data. Fail fast at validation.
+        if !std::path::Path::new(&path).exists() {
+            return Err(anyhow!("CSV file does not exist: {}", path));
+        }
         Ok(())
     }
 
