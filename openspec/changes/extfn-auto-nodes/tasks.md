@@ -107,3 +107,21 @@
       唯一未解的上游未知数
 - [ ] `duckatlas.extension_versions` 表 0 行（兼容性矩阵数据缺口，独立任务）
 - [ ] 未把「怎么用」写进用户文档 / wiki
+
+## 2026-09-22 遗留清理
+
+- [x] **`swanflow run` 节点级错误吞掉后仍 EXIT=0 —— 已修**（`5ae513d`）：
+      复现（CSV 源 → `SELECT no_such_column`，规划期 `NodeEvent::Error` 打到 stderr
+      后照样 "✅ Execution Finished" + EXIT=0）。修法：run 的事件循环追踪
+      `NodeEvent::Error` 与 `NodeState::Error(_)`，任一命中则
+      "❌ Execution Finished with errors." + `exit(1)`。加载期错误（坏 YAML/UUID）
+      原本就非零退出。新增 `tests/cli_exit_code.rs`（起真二进制，双用例钉住契约）；
+      lib 测试 257/257 无回归。
+      测试坑两条：(a) 二进制动态链接 `libpython3.11.so.1.0`（pyo3），跑测试须带
+      `.cargo/config.toml [env]` 里同款 `LD_LIBRARY_PATH`；(b) 引擎缓存目录
+      `target/swanflow_cache`（含独占锁的 `metadata.duckdb`）相对 cwd 硬编码 ⇒
+      每个测试 spawn 用独立 cwd，否则两测试并发互撞 DuckDB 文件锁。
+- [ ] **新发现（更深的一档）：CSV 源文件不存在时节点照样 `Executed`**（复现
+      `/tmp/fail_repro.yaml`：`core.io.csv` 指向不存在路径，两个节点全部
+      Executed、EXIT=0、零报错）——缺文件错误被吞在比事件循环更早的层（大概率是
+      注册表/规划期的 schema fallback）。待定位修复。
