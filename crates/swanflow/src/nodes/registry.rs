@@ -85,8 +85,8 @@ impl NodeRegistry {
         use crate::nodes::luajit::LuaJitNode;
         use crate::nodes::mcp::McpToolNode;
         use crate::nodes::quality::{
-            NullCheckNode, RowCountAssertNode, SchemaAssertNode, UniquenessCheckNode,
-            ValueRangeCheckNode,
+            NullCheckNode, RowCountAssertNode, SchemaAssertNode, SqlAssertNode,
+            UniquenessCheckNode, ValueRangeCheckNode,
         };
         use crate::nodes::script::boxed_python::BoxedPythonNode;
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
@@ -173,6 +173,7 @@ impl NodeRegistry {
         self.register_node(Arc::new(RowCountAssertNode));
         self.register_node(Arc::new(SchemaAssertNode));
         self.register_node(Arc::new(ValueRangeCheckNode));
+        self.register_node(Arc::new(SqlAssertNode));
         self.register_node(Arc::new(SemanticCleanerNode));
         self.register_node(Arc::new(AiRouterNode));
         self.register_node(Arc::new(PythonNode));

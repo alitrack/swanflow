@@ -10,6 +10,10 @@
 //! - RowCountAssert: expected row count
 //! - SchemaAssert: column presence and type validation
 //! - ValueRangeCheck: min/max bounds on numeric columns
+//! - SqlAssert: arbitrary SQL assertion (ported from duckOrch's `@test`)
+
+pub mod sql_assert;
+pub use sql_assert::SqlAssertNode;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
