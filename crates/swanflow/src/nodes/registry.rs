@@ -215,7 +215,7 @@ impl NodeRegistry {
 
         // Register EntityExtractor if environment variables are set
         if let Ok(model) = std::env::var("LLM_MODEL") {
-            println!("[DEBUG] Found LLM_MODEL: {}", model);
+            eprintln!("[DEBUG] Found LLM_MODEL: {}", model);
             let config = LlmConfig {
                 provider: ProviderKind::OpenAI,
                 api_key: std::env::var("LLM_API_KEY").ok(),
@@ -224,12 +224,12 @@ impl NodeRegistry {
             };
             match OpenAiProvider::new(config) {
                 Ok(provider) => {
-                    println!("[DEBUG] Registering EntityExtractorNode");
+                    eprintln!("[DEBUG] Registering EntityExtractorNode");
                     self.register_node(Arc::new(EntityExtractorNode {
                         provider: Arc::new(provider),
                     }));
                 }
-                Err(e) => println!("[DEBUG] Failed to create OpenAiProvider: {}", e),
+                Err(e) => eprintln!("[DEBUG] Failed to create OpenAiProvider: {}", e),
             }
         } else if let Ok(provider) = OpenAiProvider::new(LlmConfig {
             provider: ProviderKind::OpenAI,
@@ -237,12 +237,12 @@ impl NodeRegistry {
             model: "gpt-4o".to_string(),
             endpoint: None,
         }) {
-            println!("[DEBUG] Registering EntityExtractorNode (Fallback)");
+            eprintln!("[DEBUG] Registering EntityExtractorNode (Fallback)");
             self.register_node(Arc::new(EntityExtractorNode {
                 provider: Arc::new(provider),
             }));
         } else {
-            println!("[DEBUG] No LLM_MODEL or OPENAI_API_KEY found, EntityExtractor skip");
+            eprintln!("[DEBUG] No LLM_MODEL or OPENAI_API_KEY found, EntityExtractor skip");
         }
     }
 }

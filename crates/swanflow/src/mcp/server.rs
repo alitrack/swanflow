@@ -8,6 +8,7 @@ use crate::mcp::{
 };
 use crate::nodes::registry::NodeRegistry;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io;
 
@@ -23,11 +24,266 @@ use tokio::io;
 pub struct McpServer {
     engine: SwanFlowEngine,
     registry: Arc<NodeRegistry>,
+    /// Registered workflows (name -> definition). Loaded from and persisted to
+    /// `~/.swanflow/registered_workflows.json` so registrations survive restarts.
+    registered: std::sync::Mutex<HashMap<String, RegisteredWorkflow>>,
+}
+
+/// A workflow registered as a named MCP tool.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RegisteredWorkflow {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The full workflow YAML/JSON text.
+    pub workflow_yaml: String,
+    /// Optional JSON Schema for call arguments; merged into the tool's input_schema.
+    #[serde(default)]
+    pub param_schema: Option<serde_json::Value>,
+    /// Node names/ids whose materialized parquet is returned on call.
+    #[serde(default)]
+    pub outputs: Vec<String>,
+}
+
+/// Reserved tool names that cannot be shadowed by a registered workflow.
+const RESERVED_TOOLS: &[&str] = &[
+    "run_workflow",
+    "inspect_workflow",
+    "list_nodes",
+    "execute_sql",
+    "list_connectors",
+    "register_workflow",
+    "unregister_workflow",
+    "list_registered",
+];
+
+fn registered_workflows_path() -> std::path::PathBuf {
+    let mut p = std::path::PathBuf::from(
+        std::env::var("HOME").unwrap_or_else(|_| ".".to_string()),
+    );
+    p.push(".swanflow");
+    p.push("registered_workflows.json");
+    p
+}
+
+/// Read node materializations back as JSON rows via an isolated in-memory
+/// DuckDB connection (does not touch the engine's DataFusion session).
+fn read_node_outputs(
+    cache_dir: &str,
+    output_specs: &[String],
+    max_rows: u64,
+) -> serde_json::Value {
+    let metadata_path = format!("{}/metadata.duckdb", cache_dir);
+    let conn = match duckdb::Connection::open(&metadata_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return json!({"error": format!("cannot open metadata db: {e}")});
+        }
+    };
+    let mut out = serde_json::Map::new();
+    for spec in output_specs {
+        // Match by table name (node_<uuid-prefix8>) or full node uuid.
+        let rows: Vec<(String, String)> = match conn
+            .prepare(
+                "SELECT table_name, parquet_path FROM flow_metadata WHERE node_id = ? OR table_name = ?",
+            ) {
+            Ok(mut stmt) => match stmt.query_map(
+                duckdb::params![spec.to_string(), format!("node_{}", spec)],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            ) {
+                Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+                Err(e) => {
+                    out.insert(
+                        spec.clone(),
+                        json!({"warning": format!("metadata query failed: {e}")}),
+                    );
+                    continue;
+                }
+            },
+            Err(e) => {
+                out.insert(
+                    spec.clone(),
+                    json!({"warning": format!("metadata lookup failed: {e}")}),
+                );
+                continue;
+            }
+        };
+        if rows.is_empty() {
+            out.insert(
+                spec.clone(),
+                json!({"warning": "no materialization found for this node"}),
+            );
+            continue;
+        }
+        // Use the latest entry (flow_metadata is append-ordered).
+        let (_table, parquet_path) = rows.last().unwrap().clone();
+        let limit = if max_rows == 0 { 10_000 } else { max_rows };
+        match conn.prepare(&format!(
+            "SELECT * FROM read_parquet('{}') LIMIT {}",
+            parquet_path.replace('\'', "''"),
+            limit + 1
+        )) {
+            Ok(mut stmt) => {
+                let arrow = match stmt.query_arrow([]) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        out.insert(
+                            spec.clone(),
+                            json!({"warning": format!("parquet read failed: {e}")}),
+                        );
+                        continue;
+                    }
+                };
+                let mut records = Vec::new();
+                let mut truncated = false;
+                for batch in arrow {
+                    for row_idx in 0..batch.num_rows() {
+                        if (records.len() as u64) >= limit {
+                            truncated = true;
+                            break;
+                        }
+                        let mut obj = serde_json::Map::new();
+                        for (col_idx, field) in batch.schema().fields().iter().enumerate() {
+                            let col = batch.column(col_idx).clone();
+                            let v = arrow_value_to_json(&col, row_idx);
+                            obj.insert(field.name().clone(), v);
+                        }
+                        records.push(serde_json::Value::Object(obj));
+                    }
+                }
+                let mut entry = json!({"rows": records});
+                if truncated {
+                    entry["truncated"] = json!(true);
+                }
+                out.insert(spec.clone(), entry);
+            }
+            Err(e) => {
+                out.insert(
+                    spec.clone(),
+                    json!({"warning": format!("parquet read failed: {e}")}),
+                );
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Best-effort conversion of an Arrow cell to JSON (strings/numbers/bools/null;
+/// other types fall back to their debug string).
+///
+/// Uses duckdb's bundled arrow (query_arrow returns duckdb::arrow batches, a
+/// different crate instance from datafusion::arrow).
+fn arrow_value_to_json(
+    col: &std::sync::Arc<dyn duckdb::arrow::array::Array + 'static>,
+    row: usize,
+) -> serde_json::Value {
+    use duckdb::arrow::array::*;
+    use duckdb::arrow::datatypes::DataType;
+    if col.is_null(row) {
+        return serde_json::Value::Null;
+    }
+    match col.data_type() {
+        DataType::Utf8 => {
+            json!(col.as_any().downcast_ref::<StringArray>().unwrap().value(row))
+        }
+        DataType::LargeUtf8 => json!(col
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .unwrap()
+            .value(row)),
+        DataType::Utf8View => json!(col
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .unwrap()
+            .value(row)),
+        DataType::Boolean => json!(col
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap()
+            .value(row)),
+        DataType::Int8 => json!(col
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .unwrap()
+            .value(row)),
+        DataType::Int16 => json!(col
+            .as_any()
+            .downcast_ref::<Int16Array>()
+            .unwrap()
+            .value(row)),
+        DataType::Int32 => json!(col
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .value(row)),
+        DataType::Int64 => json!(col
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(row)),
+        DataType::UInt8 => json!(col
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap()
+            .value(row)),
+        DataType::UInt16 => json!(col
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .unwrap()
+            .value(row)),
+        DataType::UInt32 => json!(col
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap()
+            .value(row)),
+        DataType::UInt64 => json!(col
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(row)),
+        DataType::Float32 => json!(col
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap()
+            .value(row)),
+        DataType::Float64 => json!(col
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(row)),
+        _ => json!(format!("{:?}", col)),
+    }
 }
 
 impl McpServer {
     pub fn new(engine: SwanFlowEngine, registry: Arc<NodeRegistry>) -> Self {
-        Self { engine, registry }
+        let registered = Self::load_registry()
+            .unwrap_or_default();
+        Self {
+            engine,
+            registry,
+            registered: std::sync::Mutex::new(registered),
+        }
+    }
+
+    fn load_registry() -> anyhow::Result<HashMap<String, RegisteredWorkflow>> {
+        let path = registered_workflows_path();
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+        let text = std::fs::read_to_string(&path)?;
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    fn persist_registry(&self) -> anyhow::Result<()> {
+        let path = registered_workflows_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let map = self.registered.lock().unwrap();
+        let text = serde_json::to_string_pretty(&*map)?;
+        std::fs::write(&path, text)?;
+        Ok(())
     }
 
     /// Run the MCP server loop on stdin/stdout.
@@ -121,11 +377,11 @@ impl McpServer {
     }
 
     fn list_tools(&self) -> Vec<McpTool> {
-        vec![
+        let mut tools = vec![
             McpTool {
                 name: "run_workflow".to_string(),
                 description: Some(
-                    "Execute a SwanFlow workflow from YAML/JSON and return a summary of results"
+                    "Execute a SwanFlow workflow from YAML/JSON with optional params; returns output node data when output_nodes or workflow 'outputs' are set"
                         .to_string(),
                 ),
                 input_schema: json!({
@@ -134,6 +390,15 @@ impl McpServer {
                         "workflow_yaml": {
                             "type": "string",
                             "description": "YAML or JSON workflow definition string"
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "Variables merged into workflow.context (override YAML-declared values); referenced in nodes via ${context.key} or {{key}}"
+                        },
+                        "output_nodes": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Node names/ids whose materialized results should be returned (overrides workflow 'outputs')"
                         }
                     },
                     "required": ["workflow_yaml"]
@@ -186,7 +451,52 @@ impl McpServer {
                     "properties": {}
                 }),
             },
-        ]
+            McpTool {
+                name: "register_workflow".to_string(),
+                description: Some(
+                    "Register a workflow YAML as a named MCP tool; call it later by name with JSON arguments as params"
+                        .to_string(),
+                ),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Tool name for the registered workflow"},
+                        "workflow_yaml": {"type": "string", "description": "Workflow YAML/JSON text"},
+                        "description": {"type": "string", "description": "Tool description (optional)"},
+                        "param_schema": {"type": "object", "description": "JSON Schema for call arguments (optional)"},
+                        "outputs": {"type": "array", "items": {"type": "string"}, "description": "Node names/ids to return (defaults to workflow 'outputs')"}
+                    },
+                    "required": ["name", "workflow_yaml"]
+                }),
+            },
+            McpTool {
+                name: "unregister_workflow".to_string(),
+                description: Some("Remove a previously registered workflow tool".to_string()),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "required": ["name"]
+                }),
+            },
+            McpTool {
+                name: "list_registered".to_string(),
+                description: Some("List registered workflow tools".to_string()),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+        ];
+
+        // Merge registered workflows as named tools.
+        if let Ok(map) = self.registered.lock() {
+            for wf in map.values() {
+                tools.push(wf.to_tool());
+            }
+        }
+        tools
     }
 
     async fn call_tool(
@@ -194,28 +504,137 @@ impl McpServer {
         name: &str,
         arguments: serde_json::Value,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
+        // Registered workflow tools: name is not a reserved tool -> execute it
+        // with arguments as params.
+        if !RESERVED_TOOLS.contains(&name) {
+            let wf = {
+                let map = self.registered.lock().unwrap();
+                map.get(name).cloned()
+            };
+            if let Some(wf) = wf {
+                let result = self
+                    .execute_with_params(&wf.workflow_yaml, arguments, wf.outputs.clone())
+                    .await?;
+                return Ok(vec![json!({
+                    "type": "text",
+                    "text": serde_json::to_string(&result)?
+                })]);
+            }
+            // fall through to the reserved-tool match, which reports Unknown tool
+        }
         match name {
             "run_workflow" => {
                 let yaml_str = arguments["workflow_yaml"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Missing workflow_yaml argument"))?;
 
-                let trimmed = yaml_str.trim();
-                let workflow: Workflow = if trimmed.starts_with('{') {
-                    serde_json::from_str(trimmed)?
-                } else {
-                    serde_yaml::from_str(trimmed)?
-                };
+                let params = arguments.get("params").cloned().unwrap_or(json!({}));
+                let output_nodes: Vec<String> = arguments
+                    .get("output_nodes")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-                let mut rx = self.engine.execute_workflow(&workflow).await?;
-                let mut events = Vec::new();
-                while let Some(event) = rx.recv().await {
-                    events.push(serde_json::to_value(event)?);
+                let result = self.execute_with_params(yaml_str, params, output_nodes).await?;
+                Ok(vec![json!({
+                    "type": "text",
+                    "text": serde_json::to_string(&result)?
+                })])
+            }
+
+            "register_workflow" => {
+                let wf_name = arguments["name"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing name argument"))?
+                    .to_string();
+                let yaml_str = arguments["workflow_yaml"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing workflow_yaml argument"))?;
+
+                // Validate: parse the workflow, reject reserved-name collisions.
+                let workflow = parse_workflow(yaml_str)
+                    .map_err(|e| anyhow::anyhow!("Invalid workflow definition: {e}"))?;
+                if RESERVED_TOOLS.contains(&wf_name.as_str()) {
+                    return Err(anyhow::anyhow!(
+                        "'{wf_name}' is a reserved tool name; pick another"
+                    ));
                 }
+
+                // outputs: explicit argument > workflow 'outputs' field
+                let outputs: Vec<String> = arguments
+                    .get("outputs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .filter(|v: &Vec<String>| !v.is_empty())
+                    .unwrap_or(workflow.outputs.clone());
+
+                let entry = RegisteredWorkflow {
+                    name: wf_name.clone(),
+                    description: arguments
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    workflow_yaml: yaml_str.to_string(),
+                    param_schema: arguments.get("param_schema").cloned(),
+                    outputs,
+                };
+                {
+                    let mut map = self.registered.lock().unwrap();
+                    map.insert(wf_name.clone(), entry);
+                }
+                self.persist_registry()?;
 
                 Ok(vec![json!({
                     "type": "text",
-                    "text": format!("Workflow '{}' executed. {} events produced.", workflow.name, events.len())
+                    "text": format!("Workflow '{}' registered as tool '{}'", workflow.name, wf_name)
+                })])
+            }
+
+            "unregister_workflow" => {
+                let wf_name = arguments["name"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing name argument"))?;
+                let removed = {
+                    let mut map = self.registered.lock().unwrap();
+                    map.remove(wf_name)
+                };
+                match removed {
+                    Some(_) => {
+                        self.persist_registry()?;
+                        Ok(vec![json!({
+                            "type": "text",
+                            "text": format!("Tool '{wf_name}' unregistered")
+                        })])
+                    }
+                    None => Err(anyhow::anyhow!("No registered tool named '{wf_name}'")),
+                }
+            }
+
+            "list_registered" => {
+                let list: Vec<serde_json::Value> = {
+                    let map = self.registered.lock().unwrap();
+                    map.values()
+                        .map(|wf| {
+                            json!({
+                                "name": wf.name,
+                                "description": wf.description,
+                                "outputs": wf.outputs,
+                                "has_param_schema": wf.param_schema.is_some(),
+                            })
+                        })
+                        .collect()
+                };
+                Ok(vec![json!({
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&list)?
                 })])
             }
 
@@ -224,12 +643,7 @@ impl McpServer {
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Missing workflow_yaml argument"))?;
 
-                let trimmed = yaml_str.trim();
-                let workflow: Workflow = if trimmed.starts_with('{') {
-                    serde_json::from_str(trimmed)?
-                } else {
-                    serde_yaml::from_str(trimmed)?
-                };
+                let workflow = parse_workflow(yaml_str)?;
 
                 let metadata = self.engine.infer_metadata(&workflow).await?;
 
@@ -309,6 +723,56 @@ impl McpServer {
         }
     }
 
+    /// Parse a workflow from YAML or JSON text.
+    fn parse_workflow_text(yaml_str: &str) -> anyhow::Result<Workflow> {
+        parse_workflow(yaml_str)
+    }
+
+    /// Execute a workflow with params merged into its context, then read back
+    /// materialized outputs for the given output specs (empty = summary only).
+    async fn execute_with_params(
+        &self,
+        yaml_str: &str,
+        params: serde_json::Value,
+        output_specs: Vec<String>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let mut workflow = parse_workflow(yaml_str)?;
+
+        // Merge params into workflow.context — call-side values win.
+        if let Some(map) = params.as_object() {
+            for (k, v) in map {
+                workflow.context.insert(k.clone(), v.clone());
+            }
+        }
+
+        let effective_outputs: Vec<String> = if output_specs.is_empty() {
+            workflow.outputs.clone()
+        } else {
+            output_specs
+        };
+
+        let wf_name = workflow.name.clone();
+        let mut rx = self.engine.execute_workflow(&workflow).await?;
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(serde_json::to_value(&event)?);
+        }
+
+        let mut result = json!({
+            "workflow": wf_name,
+            "events": events.len(),
+        });
+        if !effective_outputs.is_empty() {
+            let outputs = read_node_outputs(
+                &self.engine.cache_dir,
+                &effective_outputs,
+                self.engine.max_rows_per_node,
+            );
+            result["outputs"] = outputs;
+        }
+        Ok(result)
+    }
+
     /// SELECT-only SQL guard — rejects write operations at protocol level.
     ///
     /// This is structural AI safety: no prompt or model can override this check.
@@ -381,6 +845,92 @@ impl McpServer {
             }
             _ => Err(anyhow::anyhow!("Resource not found: {uri}")),
         }
+    }
+}
+
+/// Parse a workflow from YAML or JSON text (JSON detected by leading '{').
+fn parse_workflow(yaml_str: &str) -> anyhow::Result<Workflow> {
+    let trimmed = yaml_str.trim();
+    if trimmed.starts_with('{') {
+        Ok(serde_json::from_str(trimmed)?)
+    } else {
+        Ok(serde_yaml::from_str(trimmed)?)
+    }
+}
+
+impl RegisteredWorkflow {
+    /// Project this registration into an MCP tool definition.
+    fn to_tool(&self) -> McpTool {
+        let schema = self.param_schema.clone().unwrap_or_else(|| {
+            // Infer a permissive object schema when none was provided.
+            json!({
+                "type": "object",
+                "description": "Arguments are merged into workflow.context as params"
+            })
+        });
+        McpTool {
+            name: self.name.clone(),
+            description: Some(
+                self.description
+                    .clone()
+                    .unwrap_or_else(|| format!("Run registered workflow '{}'", self.name)),
+            ),
+            input_schema: schema,
+        }
+    }
+}
+
+#[cfg(test)]
+mod workflow_as_api_tests {
+    use super::{parse_workflow, RegisteredWorkflow, RESERVED_TOOLS};
+
+    const MIN_YAML: &str = "id: 00000000-0000-0000-0000-000000000099\nname: t\ngraph:\n  nodes: []\n  edges: []\n  edge_property: directed\n";
+
+    #[test]
+    fn parse_workflow_yaml_and_json() {
+        let by_yaml = parse_workflow(MIN_YAML).unwrap();
+        assert_eq!(by_yaml.name, "t");
+        let by_json = parse_workflow(
+            r#"{"id":"00000000-0000-0000-0000-000000000099","name":"t","graph":{"nodes":[],"edges":[],"edge_property":"directed"}}"#,
+        )
+        .unwrap();
+        assert_eq!(by_json.name, "t");
+    }
+
+    #[test]
+    fn parse_workflow_reads_outputs_field() {
+        let yaml = "id: 00000000-0000-0000-0000-000000000098\nname: t\noutputs: [n1]\ngraph:\n  nodes: []\n  edges: []\n  edge_property: directed\n";
+        let wf = parse_workflow(yaml).unwrap();
+        assert_eq!(wf.outputs, vec!["n1".to_string()]);
+        // omitted -> default empty, not an error
+        assert!(parse_workflow(MIN_YAML).unwrap().outputs.is_empty());
+    }
+
+    #[test]
+    fn reserved_names_cannot_be_registered() {
+        for name in RESERVED_TOOLS {
+            assert!(RESERVED_TOOLS.contains(name));
+        }
+        assert!(RESERVED_TOOLS.contains(&"run_workflow"));
+        assert!(!RESERVED_TOOLS.contains(&"graph_query"));
+    }
+
+    #[test]
+    fn registered_workflow_to_tool_defaults() {
+        let wf = RegisteredWorkflow {
+            name: "graph_query".into(),
+            description: None,
+            workflow_yaml: MIN_YAML.into(),
+            param_schema: None,
+            outputs: vec!["n1".into()],
+        };
+        let tool = wf.to_tool();
+        assert_eq!(tool.name, "graph_query");
+        assert!(tool.description.as_deref().unwrap().contains("graph_query"));
+        assert_eq!(
+            tool.input_schema["type"].as_str().unwrap(),
+            "object"
+        );
     }
 }
 

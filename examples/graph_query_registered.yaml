@@ -1,0 +1,37 @@
+# GraphRAG 检索流 — 参数化版（可注册为 MCP 工具 graph_query）
+#
+# 用法：
+#   1) MCP: tools/call register_workflow {name: "graph_query", workflow_yaml: <本文件内容>}
+#   2) 之后: tools/call graph_query {"entity": "Alice", "depth": 2}
+#      -> params 合并进 context，节点配置里的 ${context.entity}/${context.depth} 被替换
+#      -> outputs 声明的节点物化结果以 JSON 行返回
+#
+# 等价 CLI/API: swanflow run 此文件前无需改 YAML —— 参数由调用侧注入。
+id: 00000000-0000-0000-0000-000000000005
+name: graph_query
+outputs:
+  - bbbbbbbb-2222-2222-2222-222222222222   # ai.graph_retriever 节点（也可写 node_bbbbbbbb）
+context:
+  entity: Alice       # 默认值；调用侧 params 同名键会覆盖
+  depth: 2
+graph:
+  nodes:
+    - id: bbbbbbbb-1111-1111-1111-111111111111
+      type_id: core.sql
+      config:
+        query: "SELECT 1 AS dummy"
+      state: Configured
+      materialize: false
+      sub_workflow: null
+    - id: bbbbbbbb-2222-2222-2222-222222222222
+      type_id: ai.graph_retriever
+      config:
+        depth: "${context.depth}"
+        entity_name: "${context.entity}"
+      state: Configured
+      materialize: true
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

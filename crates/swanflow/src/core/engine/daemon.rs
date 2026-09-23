@@ -355,6 +355,9 @@ async fn handle_method(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
+            // Optional params merged into workflow.context (call-side wins).
+            let params = req.params.get("params").cloned();
+
             if path.is_empty() {
                 return DaemonResponse {
                     id: req.id.clone(),
@@ -366,7 +369,7 @@ async fn handle_method(
                 };
             }
 
-            match submit_workflow(path, engine, workflows).await {
+            match submit_workflow(path, params.as_ref(), engine, workflows).await {
                 Ok(wf_id) => DaemonResponse {
                     id: req.id.clone(),
                     ok: Some(true),
@@ -526,6 +529,7 @@ async fn handle_method(
 
 async fn submit_workflow(
     path: &str,
+    params: Option<&serde_json::Value>,
     engine: &Arc<SwanFlowEngine>,
     workflows: &Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
 ) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
@@ -537,10 +541,18 @@ async fn submit_workflow(
     let core_wf = swanflow_knime::import_knwf(path)
         .await
         .map_err(|e| format!("Failed to import KNIME workflow: {}", e))?;
-    let workflow_json = serde_json::to_value(&core_wf)
-        .map_err(|e| format!("Serialization error: {}", e))?;
-    let workflow: Workflow = serde_json::from_value(workflow_json)
-        .map_err(|e| format!("Deserialization error: {}", e))?;
+    let mut workflow: Workflow = {
+        let workflow_json = serde_json::to_value(&core_wf)
+            .map_err(|e| format!("Serialization error: {}", e))?;
+        serde_json::from_value(workflow_json)
+            .map_err(|e| format!("Deserialization error: {}", e))?
+    };
+    // Merge optional params into workflow.context — call-side values win.
+    if let Some(map) = params.and_then(|p| p.as_object()) {
+        for (k, v) in map {
+            workflow.context.insert(k.clone(), v.clone());
+        }
+    }
     let wf_name = workflow.name.clone();
 
     let node_count = workflow.graph.node_count();

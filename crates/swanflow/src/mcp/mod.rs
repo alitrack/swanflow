@@ -154,6 +154,11 @@ impl<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>
                         format!("Invalid Content-Length: {e}"),
                     )
                 })?;
+                // Consume the blank line terminating the header block before
+                // reading the body, or its \r\n leaks into the body and
+                // truncates the JSON tail.
+                let mut blank = String::new();
+                let _ = self.reader.read_line(&mut blank).await?;
                 break len;
             }
             // Ignore other headers

@@ -103,6 +103,10 @@ pub struct Workflow {
     /// Global context/variables available to all nodes via templating.
     #[serde(default)]
     pub context: HashMap<String, JsonValue>,
+    /// Names of nodes whose materialized results should be returned when the
+    /// workflow is executed as an API/MCP tool. Optional; empty = summary only.
+    #[serde(default)]
+    pub outputs: Vec<String>,
     /// The logical graph using petgraph's StableGraph.
     pub graph: StableGraph<NodeInstance, EdgeInstance>,
 }
@@ -169,6 +173,7 @@ impl Workflow {
             id: Uuid::new_v4(),
             name: name.to_string(),
             context: HashMap::new(),
+            outputs: Vec::new(),
             graph: StableGraph::new(),
         }
     }

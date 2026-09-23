@@ -469,7 +469,9 @@ async fn main() -> anyhow::Result<()> {
         },
         Commands::Mcp { command } => match command {
             McpCommands::Serve => {
-                println!("🧩 Starting SwanFlow MCP Server (stdio)...");
+                // stdout is the JSON-RPC transport — all diagnostics to stderr,
+                // or real MCP clients cannot parse our frames.
+                eprintln!("Starting SwanFlow MCP Server (stdio)...");
                 let registry = Arc::new(NodeRegistry::default());
                 let engine = SwanFlowEngine::new(registry.clone());
                 let server = McpServer::new(engine, registry);
