@@ -278,6 +278,12 @@ impl EntityExtractorExec {
         provider: Arc<dyn LlmProvider>,
         port: usize,
     ) -> Self {
+        // CRITICAL: coalesce input partitions to 1 — without this, multi-partition
+        // inputs (e.g. UnionExec from a UNION ALL source) only feed partition 0's
+        // rows into extraction; other partitions' texts are silently dropped.
+        let input: Arc<dyn ExecutionPlan> = Arc::new(
+            datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input),
+        );
         let schema = if port == 0 {
             GraphSchemas::node_schema()
         } else {
@@ -378,6 +384,7 @@ impl Stream for EntityExtractionStream {
 
                         let fut = async move {
                             let mut node_id_builder = Int64Builder::new();
+                            let mut node_name_builder = StringBuilder::new();
                             let mut node_label_builder = StringBuilder::new();
                             let mut node_props_builder = StringBuilder::new();
 
@@ -395,50 +402,51 @@ impl Stream for EntityExtractionStream {
                             for i in 0..batch.num_rows() {
                                 let text = text_col.value(i);
                                 let prompt = format!(
-                                        "Extract entities and relationships from this text.
-                                        Return JSON format:
-                                        {{
-                                          \"nodes\": [{{ \"name\": \"...\", \"label\": \"...\", \"properties\": {{}} }}],
-                                          \"edges\": [{{ \"source\": \"...\", \"target\": \"...\", \"type\": \"...\", \"weight\": 1.0 }}]
-                                        }}
-                                        Text: {}",
+                                        "Extract entities and relationships from this text.\nReturn JSON format:\n{{\n  \"nodes\": [{{ \"name\": \"...\", \"label\": \"...\", \"properties\": {{}} }}],\n  \"edges\": [{{ \"source\": \"...\", \"target\": \"...\", \"type\": \"...\", \"weight\": 1.0 }}]\n}}\nText: {}",
                                         text
                                     );
 
-                                if let Ok(result) = provider.complete(&prompt).await {
-                                    let json_str =
-                                        crate::nodes::ai::ConfigWizard::extract_json_from_response(
-                                            &result,
-                                        )
-                                        .unwrap_or(&result);
-                                    if let Ok(json) = serde_json::from_str::<JsonValue>(json_str) {
-                                        if let Some(nodes) = json["nodes"].as_array() {
-                                            for n in nodes {
-                                                let name = n["name"].as_str().unwrap_or("");
-                                                node_id_builder
-                                                    .append_value(hash_string_to_i64(name));
-                                                node_label_builder.append_value(
-                                                    n["label"].as_str().unwrap_or(""),
-                                                );
-                                                node_props_builder
-                                                    .append_value(n["properties"].to_string());
-                                            }
-                                        }
-                                        if let Some(edges) = json["edges"].as_array() {
-                                            for e in edges {
-                                                let src = e["source"].as_str().unwrap_or("");
-                                                let dst = e["target"].as_str().unwrap_or("");
-                                                edge_src_builder
-                                                    .append_value(hash_string_to_i64(src));
-                                                edge_dst_builder
-                                                    .append_value(hash_string_to_i64(dst));
-                                                edge_type_builder
-                                                    .append_value(e["type"].as_str().unwrap_or(""));
-                                                edge_weight_builder.append_value(
-                                                    e["weight"].as_f64().unwrap_or(1.0),
-                                                );
-                                            }
-                                        }
+                                let result = provider.complete(&prompt).await.map_err(|e| {
+                                    DataFusionError::Execution(format!(
+                                        "Entity extraction LLM call failed for row {i}: {e}"
+                                    ))
+                                })?;
+                                let json_str =
+                                    crate::nodes::ai::ConfigWizard::extract_json_from_response(
+                                        &result,
+                                    )
+                                    .unwrap_or(&result);
+                                let json: JsonValue = serde_json::from_str(json_str).map_err(|e| {
+                                    DataFusionError::Execution(format!(
+                                        "Entity extraction returned invalid JSON for row {i}: {e}"
+                                    ))
+                                })?;
+                                if let Some(nodes) = json["nodes"].as_array() {
+                                    for n in nodes {
+                                        let name = n["name"].as_str().unwrap_or("");
+                                        node_id_builder
+                                            .append_value(hash_string_to_i64(name));
+                                        node_name_builder.append_value(name);
+                                        node_label_builder.append_value(
+                                            n["label"].as_str().unwrap_or(""),
+                                        );
+                                        node_props_builder
+                                            .append_value(n["properties"].to_string());
+                                    }
+                                }
+                                if let Some(edges) = json["edges"].as_array() {
+                                    for e in edges {
+                                        let src = e["source"].as_str().unwrap_or("");
+                                        let dst = e["target"].as_str().unwrap_or("");
+                                        edge_src_builder
+                                            .append_value(hash_string_to_i64(src));
+                                        edge_dst_builder
+                                            .append_value(hash_string_to_i64(dst));
+                                        edge_type_builder
+                                            .append_value(e["type"].as_str().unwrap_or(""));
+                                        edge_weight_builder.append_value(
+                                            e["weight"].as_f64().unwrap_or(1.0),
+                                        );
                                     }
                                 }
                             }
@@ -448,6 +456,7 @@ impl Stream for EntityExtractionStream {
                                     GraphSchemas::node_schema(),
                                     vec![
                                         Arc::new(node_id_builder.finish()),
+                                        Arc::new(node_name_builder.finish()),
                                         Arc::new(node_label_builder.finish()),
                                         Arc::new(node_props_builder.finish()),
                                     ],
@@ -522,7 +531,8 @@ impl NodeBehavior for GraphRetrieverNode {
             config_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "depth": { "type": "integer", "default": 1 }
+                    "depth": { "type": "integer", "default": 1 },
+                    "entity_name": { "type": "string", "description": "Anchor entity name to walk from (preferred over entity_id input)" }
                 }
             }),
         }
@@ -542,11 +552,13 @@ impl NodeBehavior for GraphRetrieverNode {
         }
 
         let depth = config["depth"].as_u64().unwrap_or(1);
+        let entity_name = config["entity_name"].as_str().map(|s| s.to_string());
 
         Ok(vec![LogicalPlan::Extension(Extension {
             node: Arc::new(GraphRetrieverLogical {
                 input: inputs[0].clone(),
                 depth,
+                entity_name,
             }),
         })])
     }
@@ -556,6 +568,7 @@ impl NodeBehavior for GraphRetrieverNode {
 pub struct GraphRetrieverLogical {
     pub input: LogicalPlan,
     pub depth: u64,
+    pub entity_name: Option<String>,
 }
 
 impl UserDefinedLogicalNodeCore for GraphRetrieverLogical {
@@ -587,6 +600,7 @@ impl UserDefinedLogicalNodeCore for GraphRetrieverLogical {
         Ok(Self {
             input: inputs[0].clone(),
             depth: self.depth,
+            entity_name: self.entity_name.clone(),
         })
     }
 }
@@ -594,12 +608,13 @@ impl UserDefinedLogicalNodeCore for GraphRetrieverLogical {
 pub struct GraphRetrieverExec {
     pub input: Arc<dyn ExecutionPlan>,
     pub depth: u64,
+    pub entity_name: Option<String>,
     pub cache_dir: String,
     cache: PlanProperties,
 }
 
 impl fmt::Debug for GraphRetrieverExec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("GraphRetrieverExec")
             .field("depth", &self.depth)
             .finish()
@@ -607,7 +622,17 @@ impl fmt::Debug for GraphRetrieverExec {
 }
 
 impl GraphRetrieverExec {
-    pub fn new(input: Arc<dyn ExecutionPlan>, depth: u64, cache_dir: String) -> Self {
+    pub fn new(
+        input: Arc<dyn ExecutionPlan>,
+        depth: u64,
+        entity_name: Option<String>,
+        cache_dir: String,
+    ) -> Self {
+        // CRITICAL: coalesce input partitions to 1 (same partition-drop hazard as
+        // EntityExtractorExec) so all input rows reach the retrieval anchor logic.
+        let input: Arc<dyn ExecutionPlan> = Arc::new(
+            datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input),
+        );
         let schema = Arc::new(Schema::new(vec![Field::new(
             "context",
             DataType::Utf8,
@@ -622,6 +647,7 @@ impl GraphRetrieverExec {
         Self {
             input,
             depth,
+            entity_name,
             cache_dir,
             cache,
         }
@@ -655,6 +681,7 @@ impl ExecutionPlan for GraphRetrieverExec {
         Ok(Arc::new(Self::new(
             children[0].clone(),
             self.depth,
+            self.entity_name.clone(),
             self.cache_dir.clone(),
         )))
     }
@@ -666,6 +693,8 @@ impl ExecutionPlan for GraphRetrieverExec {
         let input = self.input.execute(partition, context)?;
         Ok(Box::pin(GraphRetrievalStream {
             input,
+            depth: self.depth,
+            entity_name: self.entity_name.clone(),
             cache_dir: self.cache_dir.clone(),
             state: StreamState::PollingInput,
         }))
@@ -680,6 +709,8 @@ impl ExecutionPlan for GraphRetrieverExec {
 
 struct GraphRetrievalStream {
     input: SendableRecordBatchStream,
+    depth: u64,
+    entity_name: Option<String>,
     cache_dir: String,
     state: StreamState,
 }
@@ -692,28 +723,51 @@ impl Stream for GraphRetrievalStream {
                 StreamState::PollingInput => match self.input.poll_next_unpin(cx) {
                     Poll::Ready(Some(Ok(batch))) => {
                         let cache_dir = self.cache_dir.clone();
+                        let depth = self.depth;
+                        let entity_name = self.entity_name.clone();
                         let fut = async move {
                             let mut context_builder = StringBuilder::new();
-                            let entity_ids = batch
-                                .column(0)
-                                .as_any()
-                                .downcast_ref::<Int64Array>()
-                                .unwrap();
                             let metadata_path = format!("{}/metadata.duckdb", cache_dir);
 
-                            for i in 0..batch.num_rows() {
-                                let eid = entity_ids.value(i);
+                            // Anchor selection: config entity_name (preferred) or entity_id from input rows
+                            let anchors: Vec<String> = if let Some(name) = &entity_name {
+                                vec![format!(
+                                    "SELECT id, 0 FROM meta.__graph_nodes WHERE name = '{}'",
+                                    name.replace('\'', "''")
+                                )]
+                            } else {
+                                let entity_ids = batch
+                                    .column(0)
+                                    .as_any()
+                                    .downcast_ref::<Int64Array>()
+                                    .ok_or_else(|| {
+                                        DataFusionError::Execution(
+                                            "GraphRetriever input column 0 must be Int64 entity ids, or set config 'entity_name'"
+                                                .to_string(),
+                                        )
+                                    })?;
+                                (0..batch.num_rows())
+                                    .map(|i| format!("SELECT {}, 0", entity_ids.value(i)))
+                                    .collect()
+                            };
+
+                            for anchor in anchors {
+                                // Recursive multi-hop walk (depth honored)
                                 let query = format!(
-                                    "SELECT label, properties FROM __graph_nodes WHERE id = {}
-                                         UNION ALL
-                                         SELECT n.label, n.properties
-                                         FROM __graph_edges e
-                                         JOIN __graph_nodes n ON e.target_id = n.id
-                                         WHERE e.source_id = {}",
-                                    eid, eid
+                                    "WITH RECURSIVE walk(entity_id, hop) AS (
+                                        {anchor}
+                                        UNION
+                                        SELECT CASE WHEN e.source_id = w.entity_id THEN e.target_id ELSE e.source_id END, w.hop + 1
+                                        FROM walk w
+                                        JOIN meta.__graph_edges e
+                                          ON e.source_id = w.entity_id OR e.target_id = w.entity_id
+                                        WHERE w.hop < {depth}
+                                     )
+                                     SELECT n.name, n.label, n.properties
+                                     FROM walk w JOIN meta.__graph_nodes n ON n.id = w.entity_id"
                                 );
 
-                                if let Ok(batches) = crate::nodes::io::DuckDBHelper::query_arrow(
+                                let batches = crate::nodes::io::DuckDBHelper::query_arrow(
                                     ":memory:",
                                     &query,
                                     &[],
@@ -723,19 +777,55 @@ impl Stream for GraphRetrievalStream {
                                     )),
                                 )
                                 .await
-                                {
-                                    for b in batches {
-                                        let labels = b
-                                            .column(0)
-                                            .as_any()
-                                            .downcast_ref::<StringArray>()
-                                            .unwrap();
-                                        for j in 0..b.num_rows() {
-                                            context_builder.append_value(format!(
-                                                "Entity: {}",
-                                                labels.value(j)
-                                            ));
-                                        }
+                                .map_err(|e| {
+                                    DataFusionError::Execution(format!(
+                                        "Graph retrieval query failed: {e}"
+                                    ))
+                                })?;
+                                for b in batches {
+                                    // DuckDB may return Utf8View/LargeUtf8/Dictionary string
+                                    // columns depending on version — cast explicitly
+                                    // instead of unwrap-panicking on downcast.
+                                    let names_col = datafusion::arrow::compute::cast(
+                                        b.column(0),
+                                        &DataType::Utf8,
+                                    )
+                                    .map_err(|e| {
+                                        DataFusionError::Execution(format!(
+                                            "Graph retrieval: cast name column failed: {e}"
+                                        ))
+                                    })?;
+                                    let labels_col = datafusion::arrow::compute::cast(
+                                        b.column(1),
+                                        &DataType::Utf8,
+                                    )
+                                    .map_err(|e| {
+                                        DataFusionError::Execution(format!(
+                                            "Graph retrieval: cast label column failed: {e}"
+                                        ))
+                                    })?;
+                                    let names = names_col
+                                        .as_any()
+                                        .downcast_ref::<StringArray>()
+                                        .ok_or_else(|| {
+                                            DataFusionError::Execution(
+                                                "Graph retrieval: name column not string".into(),
+                                            )
+                                        })?;
+                                    let labels = labels_col
+                                        .as_any()
+                                        .downcast_ref::<StringArray>()
+                                        .ok_or_else(|| {
+                                            DataFusionError::Execution(
+                                                "Graph retrieval: label column not string".into(),
+                                            )
+                                        })?;
+                                    for j in 0..b.num_rows() {
+                                        context_builder.append_value(format!(
+                                            "Entity: {} ({})",
+                                            names.value(j),
+                                            labels.value(j)
+                                        ));
                                     }
                                 }
                             }

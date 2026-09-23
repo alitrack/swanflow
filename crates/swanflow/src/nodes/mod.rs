@@ -210,6 +210,7 @@ impl GraphSchemas {
     pub fn node_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
             Field::new("label", DataType::Utf8, true),
             Field::new("properties", DataType::Utf8, true), // JSON string
         ]))
@@ -343,5 +344,24 @@ pub trait TypedNodeBehavior: NodeBehavior {
         } else {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod graph_schema_tests {
+    use super::*;
+
+    #[test]
+    fn node_schema_has_four_columns_including_name() {
+        let schema = GraphSchemas::node_schema();
+        let fields: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(fields, vec!["id", "name", "label", "properties"]);
+    }
+
+    #[test]
+    fn edge_schema_unchanged() {
+        let schema = GraphSchemas::edge_schema();
+        let fields: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(fields, vec!["source_id", "target_id", "type", "weight"]);
     }
 }

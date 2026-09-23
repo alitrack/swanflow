@@ -68,6 +68,12 @@ impl StateProbeExec {
         input: Arc<dyn ExecutionPlan>,
         event_tx: mpsc::UnboundedSender<NodeEvent>,
     ) -> Self {
+        // CRITICAL: coalesce input partitions to 1. Without this, a multi-partition
+        // input (e.g. UnionExec with one partition per UNION ALL branch) silently
+        // drops all partitions except 0 — only partition 0's rows ever flow
+        // downstream and get materialized.
+        let input: Arc<dyn ExecutionPlan> =
+            Arc::new(datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input));
         let input_props = input.properties();
         let cache = PlanProperties::new(
             EquivalenceProperties::new(input.schema()),
@@ -268,6 +274,10 @@ impl MaterializerExec {
         cache_dir: String,
         input: Arc<dyn ExecutionPlan>,
     ) -> Self {
+        // CRITICAL: coalesce input partitions to 1 (same reason as StateProbeExec) —
+        // multi-partition inputs would otherwise only materialize partition 0.
+        let input: Arc<dyn ExecutionPlan> =
+            Arc::new(datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input));
         let input_props = input.properties();
         let cache = PlanProperties::new(
             EquivalenceProperties::new(input.schema()),

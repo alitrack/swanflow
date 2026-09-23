@@ -1286,6 +1286,18 @@ impl GraphIndexWriterExec {
         edges_input: Arc<dyn ExecutionPlan>,
         cache_dir: String,
     ) -> Self {
+        // CRITICAL: coalesce both inputs to 1 partition — same partition-drop hazard
+        // as the other graph execs; multi-partition inputs would lose node/edge rows.
+        let nodes_input: Arc<dyn ExecutionPlan> = Arc::new(
+            datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(
+                nodes_input,
+            ),
+        );
+        let edges_input: Arc<dyn ExecutionPlan> = Arc::new(
+            datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(
+                edges_input,
+            ),
+        );
         let schema = Arc::new(Schema::empty());
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema),
@@ -1401,32 +1413,47 @@ impl Stream for GraphIndexingStream {
                         }
 
                         tokio::task::spawn_blocking(move || {
-                            if let Ok(conn) = Connection::open(&metadata_path) {
-                                for batch in nodes_batches {
-                                    let ids = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-                                    let labels = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-                                    let properties = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
-                                    for i in 0..batch.num_rows() {
-                                        conn.execute(
-                                            "INSERT OR REPLACE INTO __graph_nodes (id, label, properties) VALUES (?, ?, ?)",
-                                            duckdb::params![ids.value(i), labels.value(i), properties.value(i)],
-                                        ).ok();
-                                    }
-                                }
-                                for batch in edges_batches {
-                                    let src_ids = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-                                    let dst_ids = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-                                    let types = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
-                                    let weights = batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
-                                    for i in 0..batch.num_rows() {
-                                        conn.execute(
-                                            "INSERT OR REPLACE INTO __graph_edges (source_id, target_id, type, weight) VALUES (?, ?, ?, ?)",
-                                            duckdb::params![src_ids.value(i), dst_ids.value(i), types.value(i), weights.value(i)],
-                                        ).ok();
-                                    }
+                            let conn = Connection::open(&metadata_path).map_err(|e| {
+                                DataFusionError::Execution(format!(
+                                    "GraphIndexWriter failed to open metadata db {metadata_path}: {e}"
+                                ))
+                            })?;
+                            for batch in nodes_batches {
+                                let ids = batch.column(0).as_any().downcast_ref::<Int64Array>().ok_or_else(|| DataFusionError::Execution("graph nodes column 0 must be Int64".into()))?;
+                                let names = batch.column(1).as_any().downcast_ref::<StringArray>().ok_or_else(|| DataFusionError::Execution("graph nodes column 1 (name) must be Utf8".into()))?;
+                                let labels = batch.column(2).as_any().downcast_ref::<StringArray>().ok_or_else(|| DataFusionError::Execution("graph nodes column 2 (label) must be Utf8".into()))?;
+                                let properties = batch.column(3).as_any().downcast_ref::<StringArray>().ok_or_else(|| DataFusionError::Execution("graph nodes column 3 (properties) must be Utf8".into()))?;
+                                for i in 0..batch.num_rows() {
+                                    conn.execute(
+                                        "INSERT OR REPLACE INTO __graph_nodes (id, name, label, properties) VALUES (?, ?, ?, ?)",
+                                        duckdb::params![ids.value(i), names.value(i), labels.value(i), properties.value(i)],
+                                    ).map_err(|e| {
+                                        DataFusionError::Execution(format!(
+                                            "GraphIndexWriter failed to insert node {}: {e}",
+                                            ids.value(i)
+                                        ))
+                                    })?;
                                 }
                             }
-                        }).await.map_err(|e| DataFusionError::Execution(format!("Spawn blocking error: {}", e)))?;
+                            for batch in edges_batches {
+                                let src_ids = batch.column(0).as_any().downcast_ref::<Int64Array>().ok_or_else(|| DataFusionError::Execution("graph edges column 0 must be Int64".into()))?;
+                                let dst_ids = batch.column(1).as_any().downcast_ref::<Int64Array>().ok_or_else(|| DataFusionError::Execution("graph edges column 1 must be Int64".into()))?;
+                                let types = batch.column(2).as_any().downcast_ref::<StringArray>().ok_or_else(|| DataFusionError::Execution("graph edges column 2 must be Utf8".into()))?;
+                                let weights = batch.column(3).as_any().downcast_ref::<Float64Array>().ok_or_else(|| DataFusionError::Execution("graph edges column 3 must be Float64".into()))?;
+                                for i in 0..batch.num_rows() {
+                                    conn.execute(
+                                        "INSERT OR REPLACE INTO __graph_edges (source_id, target_id, type, weight) VALUES (?, ?, ?, ?)",
+                                        duckdb::params![src_ids.value(i), dst_ids.value(i), types.value(i), weights.value(i)],
+                                    ).map_err(|e| {
+                                        DataFusionError::Execution(format!(
+                                            "GraphIndexWriter failed to insert edge {}->{}: {e}",
+                                            src_ids.value(i), dst_ids.value(i)
+                                        ))
+                                    })?;
+                                }
+                            }
+                            Ok::<(), DataFusionError>(())
+                        }).await.map_err(|e| DataFusionError::Execution(format!("Spawn blocking error: {}", e)))??;
                         Ok(())
                     };
                     self.state = IndexerState::Writing(Box::pin(fut));

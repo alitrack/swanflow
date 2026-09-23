@@ -104,6 +104,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 crate::nodes::ai::graph::GraphRetrieverExec::new(
                     physical_inputs[0].clone(),
                     retriever.depth,
+                    retriever.entity_name.clone(),
                     self.cache_dir.clone(),
                 ),
             )));

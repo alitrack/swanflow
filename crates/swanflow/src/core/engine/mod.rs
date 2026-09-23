@@ -266,12 +266,18 @@ impl SwanFlowEngine {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS __graph_nodes (
                 id BIGINT PRIMARY KEY,
+                name TEXT,
                 label TEXT,
                 properties TEXT
             )",
             [],
         )
         .expect("Failed to create graph nodes table");
+        // Backward compat: older caches lack the name column
+        let _ = conn.execute(
+            "ALTER TABLE __graph_nodes ADD COLUMN name TEXT",
+            [],
+        );
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS __graph_edges (
