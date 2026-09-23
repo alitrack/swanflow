@@ -98,13 +98,17 @@
       ```
       同时实证：**引擎（bundled DuckDB 1.5.5）可直接打开 v1.5.4 CLI 建的目录文件**
       （存储格式跨 1.5.x 兼容），注册期 SQL/谓词在真引擎连接上全部成立。
-- [ ] 未验 tier-1 节点真能跑数据：需挑一个确实可载的扩展（ducklake / quack /
-      postgres_scanner / sqlite_scanner / excel / fts）做一次真实 `propose_plan` → 执行
+- [x] 未验 tier-1 节点真能跑数据 —— **已验**（2026-09-21 双 lane，pi@8017）：`ext.sqlite_scanner.sqlite_scan`
+      节点端到端真跑（真实工作流 → sink 落盘 → 读回逐值一致，独立复现确认）；过程中还抓到并修复了
+      引擎级 DuckDB scan 桥 VARCHAR/BLOB 列 panic bug（`05b6e4f`）。详见 wiki
+      `duckdb-extension-to-skill-to-operator-20260921.md` §3.2.5
 - [ ] 未测 `mode=scalar` 在真实扩展函数（如 spatial `st_area`）上的行为——本机 v2.0 目录无
-      spatial（v1.5.4 目录才有），需换 CLI 或换机器
+      spatial（v1.5.4 目录才有），需换 CLI 或换机器。**留观**：非阻塞，scalar 路径已有
+      单测覆盖 + 恶意标识符用例（`13ed83c`），缺的只是真扩展函数的集成验证
 - [ ] **`INSTALL` 能力未测**：本机全是 dev/alpha 构建（hash `5319116087`），官方不发布二进制，
       `INSTALL` 100% 失败 ⇒ 覆盖率天花板 = 有没有一个可 INSTALL 的发布版运行时。这是本方案
-      唯一未解的上游未知数
+      唯一未解的上游未知数。**留观**：天花板在上游（duckdb 官方是否给 alpha 构建发二进制），
+      非本仓可解；有发布版运行时后回来重测
 - [x] `duckatlas.extension_versions` 表 0 行 —— **已填**（`f74b4af`，2026-09-22）：
       292 行 = 85 真测（27 核心扩展在 duckdb 1.1.3/1.2.2/1.3.2/1.4.5/1.5.4 五个
       pinned venv 里逐个 INSTALL+LOAD，真实版本号取自 `duckdb_extensions()`）+
