@@ -5,6 +5,7 @@
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::{collect, ExecutionPlan};
 use datafusion::prelude::*;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn union_all_rows_survive_state_probe_and_materializer_partition_pull() {

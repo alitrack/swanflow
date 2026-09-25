@@ -3,7 +3,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{DFSchemaRef, Result};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::{EquivalenceProperties, OrderingRequirements};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
@@ -72,11 +72,29 @@ impl StateProbeExec {
         // input (e.g. UnionExec with one partition per UNION ALL branch) silently
         // drops all partitions except 0 — only partition 0's rows ever flow
         // downstream and get materialized.
-        let input: Arc<dyn ExecutionPlan> =
-            Arc::new(datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input));
+        // Bug 17: when the input has a declared ordering (e.g. a user ORDER BY
+        // planned below this node), a plain CoalescePartitionsExec would merge
+        // partitions non-order-preserving and shuffle rows. Use a
+        // SortPreservingMerge instead so the order survives the coalesce.
+        let input: Arc<dyn ExecutionPlan> = match input.properties().equivalence_properties().output_ordering() {
+            Some(ordering) => {
+                let lex = datafusion::physical_expr::LexOrdering::new(ordering.iter().cloned())
+                    .expect("non-empty output ordering");
+                Arc::new(
+                    datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec::new(
+                        lex, input,
+                    ),
+                )
+            }
+            None => Arc::new(
+                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(
+                    input,
+                ),
+            ),
+        };
         let input_props = input.properties();
         let cache = PlanProperties::new(
-            EquivalenceProperties::new(input.schema()),
+            input_props.equivalence_properties().clone(),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
             input_props.emission_type,
             input_props.boundedness,
@@ -132,6 +150,22 @@ impl ExecutionPlan for StateProbeExec {
     }
     fn properties(&self) -> &PlanProperties {
         &self.cache
+    }
+    // Bug 17: StateProbe passes rows through untouched — it maintains the
+    // input ordering. Without this the physical optimizer sees "no ordering
+    // consumer" and strips the user's SortExec below us.
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true]
+    }
+    // Bug 17: soft requirement — if the subtree below us computed an ordering
+    // (e.g. a user ORDER BY), ask the optimizer to keep it.
+    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
+        vec![self
+            .input
+            .properties()
+            .equivalence_properties()
+            .output_ordering()
+            .map(|lex| OrderingRequirements::new_soft(lex.into()))]
     }
     fn name(&self) -> &str {
         "StateProbeExec"
@@ -274,13 +308,28 @@ impl MaterializerExec {
         cache_dir: String,
         input: Arc<dyn ExecutionPlan>,
     ) -> Self {
-        // CRITICAL: coalesce input partitions to 1 (same reason as StateProbeExec) —
-        // multi-partition inputs would otherwise only materialize partition 0.
-        let input: Arc<dyn ExecutionPlan> =
-            Arc::new(datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input));
+        // Bug 17 (see StateProbeExec::new): keep ordering alive through the
+        // coalesce, and propagate the input's equivalence properties (incl.
+        // ordering) so the optimizer knows order is preserved by this node.
+        let input: Arc<dyn ExecutionPlan> = match input.properties().equivalence_properties().output_ordering() {
+            Some(ordering) => {
+                let lex = datafusion::physical_expr::LexOrdering::new(ordering.iter().cloned())
+                    .expect("non-empty output ordering");
+                Arc::new(
+                    datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec::new(
+                        lex, input,
+                    ),
+                )
+            }
+            None => Arc::new(
+                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(
+                    input,
+                ),
+            ),
+        };
         let input_props = input.properties();
         let cache = PlanProperties::new(
-            EquivalenceProperties::new(input.schema()),
+            input_props.equivalence_properties().clone(),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
             input_props.emission_type,
             input_props.boundedness,
@@ -345,6 +394,19 @@ impl ExecutionPlan for MaterializerExec {
     }
     fn properties(&self) -> &PlanProperties {
         &self.cache
+    }
+    // Bug 17: see StateProbeExec — materialization writes rows to parquet in
+    // stream order, so we must maintain and request the input ordering.
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true]
+    }
+    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
+        vec![self
+            .input
+            .properties()
+            .equivalence_properties()
+            .output_ordering()
+            .map(|lex| OrderingRequirements::new_soft(lex.into()))]
     }
     fn name(&self) -> &str {
         "MaterializerExec"
