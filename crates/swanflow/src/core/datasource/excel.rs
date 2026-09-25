@@ -15,7 +15,7 @@ use datafusion::arrow::array::{
 use arrow::array::StringViewArray;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DFSchemaRef, ScalarValue};
+use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -393,7 +393,13 @@ impl UserDefinedLogicalNodeCore for ExcelSinkLogical {
         self.inputs.iter().collect()
     }
     fn schema(&self) -> &DFSchemaRef {
-        self.inputs[0].schema()
+        // Empty inputs would panic on index [0]; fall back to an empty schema
+        // so a mis-wired sink fails at plan time (bail in propose_plan) instead
+        // of crashing the process.
+        static EMPTY: std::sync::OnceLock<DFSchemaRef> = std::sync::OnceLock::new();
+        self.inputs.first().map(|p| p.schema()).unwrap_or_else(|| {
+            EMPTY.get_or_init(|| Arc::new(DFSchema::empty()))
+        })
     }
     fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
         vec![]
@@ -502,8 +508,16 @@ impl ExecutionPlan for ExcelSinkExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        // CRITICAL: coalesce each input to a single partition. Without this,
+        // `input.execute(partition, ..)` only pulls partition `partition` of a
+        // repartitioned upstream (e.g. a hash-repartitioned aggregation), and
+        // rows living in other partitions are silently dropped — producing
+        // randomly-truncated workbooks. (Same lesson as StateProbeExec.)
         let mut streams = Vec::new();
         for input in &self.inputs {
+            let input: Arc<dyn ExecutionPlan> = Arc::new(
+                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input.clone()),
+            );
             streams.push(input.execute(partition, context.clone())?);
         }
 
@@ -517,6 +531,7 @@ impl ExecutionPlan for ExcelSinkExec {
             convert_to_table: self.convert_to_table,
             all_batches: vec![Vec::new(); input_count],
             finished_mask: vec![false; input_count],
+            finalized: false,
         }))
     }
 }
@@ -531,6 +546,9 @@ struct ExcelWritingStream {
     /// Stores batches per input (sheet)
     all_batches: Vec<Vec<RecordBatch>>,
     finished_mask: Vec<bool>,
+    /// Guard so finalize_workbook (and the aggregated-batch emission) runs
+    /// exactly once even if poll_next is called again after end-of-stream.
+    finalized: bool,
 }
 
 impl RecordBatchStream for ExcelWritingStream {
@@ -546,6 +564,15 @@ impl Stream for ExcelWritingStream {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        // BUFFERED SINK SEMANTICS (Bug 16b): a sink must not pass batches
+        // through as it receives them. The engine may drop the output stream
+        // early (e.g. when this sink's plan is re-executed as part of a
+        // downstream stage's embedded chain), and a pass-through sink would
+        // then write whatever partial batches it had seen — producing
+        // randomly-truncated workbooks (last writer wins). Instead: drain all
+        // inputs fully, write the workbook exactly once at end-of-stream,
+        // then emit a single aggregated batch so the engine can still
+        // register the node's output as a table.
         let n = self.inputs.len();
         let mut any_pending = false;
 
@@ -556,10 +583,8 @@ impl Stream for ExcelWritingStream {
 
             match self.inputs[i].poll_next_unpin(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
-                    self.all_batches[i].push(batch.clone());
-                    if i == 0 {
-                        return Poll::Ready(Some(Ok(batch)));
-                    }
+                    self.all_batches[i].push(batch);
+                    // Buffered semantics: do NOT return the batch here.
                 }
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
                 Poll::Ready(None) => {
@@ -572,7 +597,31 @@ impl Stream for ExcelWritingStream {
         if any_pending {
             Poll::Pending
         } else if self.finished_mask.iter().all(|&f| f) {
+            if self.finalized {
+                // Already emitted the aggregated batch on a previous poll;
+                // the stream is now exhausted.
+                return Poll::Ready(None);
+            }
+            self.finalized = true;
             self.finalize_workbook()?;
+            // Emit the buffered input_0 batches as the node's own output so
+            // downstream stages / table registration still see the data.
+            if !self.all_batches.is_empty() && !self.all_batches[0].is_empty() {
+                let batches = std::mem::take(&mut self.all_batches[0]);
+                let mut combined: Option<RecordBatch> = None;
+                for b in batches {
+                    combined = Some(match combined {
+                        None => b,
+                        Some(acc) => datafusion::arrow::compute::concat_batches(
+                            &b.schema(),
+                            &[acc, b],
+                        )?,
+                    });
+                }
+                if let Some(batch) = combined {
+                    return Poll::Ready(Some(Ok(batch)));
+                }
+            }
             Poll::Ready(None)
         } else {
             cx.waker().wake_by_ref();
@@ -825,11 +874,31 @@ impl ExcelWritingStream {
                                 }
                             }
                             _ => {
-                                let val = array
-                                    .as_any()
-                                    .downcast_ref::<StringArray>()
-                                    .map(|a| a.value(row_idx).to_string())
-                                    .unwrap_or_else(|| "".to_string());
+                                // Handle Utf8, LargeUtf8, Utf8View, and Dictionary-
+                                // encoded strings: the old StringArray-only downcast
+                                // silently wrote "" for Utf8View columns (e.g. the
+                                // output of substr()/string functions in DataFusion).
+                                let val: Option<String> =
+                                    if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
+                                        (!a.is_null(row_idx)).then(|| a.value(row_idx).to_string())
+                                    } else if let Some(a) = array
+                                        .as_any()
+                                        .downcast_ref::<datafusion::arrow::array::LargeStringArray>()
+                                    {
+                                        (!a.is_null(row_idx)).then(|| a.value(row_idx).to_string())
+                                    } else if let Some(a) = array
+                                        .as_any()
+                                        .downcast_ref::<datafusion::arrow::array::StringViewArray>()
+                                    {
+                                        (!a.is_null(row_idx)).then(|| a.value(row_idx).to_string())
+                                    } else {
+                                        let scalar = datafusion::arrow::util::display::array_value_to_string(
+                                            array, row_idx,
+                                        )
+                                        .ok();
+                                        scalar.filter(|_| !array.is_null(row_idx))
+                                    };
+                                let val = val.unwrap_or_default();
                                 if let Some(fmt) = cell_format {
                                     worksheet
                                         .write_with_format(
@@ -1044,8 +1113,16 @@ impl ExecutionPlan for ExcelTemplateExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        // CRITICAL: coalesce each input to a single partition. Without this,
+        // `input.execute(partition, ..)` only pulls partition `partition` of a
+        // repartitioned upstream (e.g. a hash-repartitioned aggregation), and
+        // rows living in other partitions are silently dropped — producing
+        // randomly-truncated workbooks. (Same lesson as StateProbeExec.)
         let mut streams = Vec::new();
         for input in &self.inputs {
+            let input: Arc<dyn ExecutionPlan> = Arc::new(
+                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input.clone()),
+            );
             streams.push(input.execute(partition, context.clone())?);
         }
 
@@ -1328,8 +1405,16 @@ impl ExecutionPlan for ExcelReportExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        // CRITICAL: coalesce each input to a single partition. Without this,
+        // `input.execute(partition, ..)` only pulls partition `partition` of a
+        // repartitioned upstream (e.g. a hash-repartitioned aggregation), and
+        // rows living in other partitions are silently dropped — producing
+        // randomly-truncated workbooks. (Same lesson as StateProbeExec.)
         let mut streams = Vec::new();
         for input in &self.inputs {
+            let input: Arc<dyn ExecutionPlan> = Arc::new(
+                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input.clone()),
+            );
             streams.push(input.execute(partition, context.clone())?);
         }
 

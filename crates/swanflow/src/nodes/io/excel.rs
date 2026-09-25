@@ -204,13 +204,46 @@ impl NodeBehavior for ExcelReadNode {
         let path = PathBuf::from(cfg::required_string(config, "path")?);
         let sheet = cfg::optional_string(config, "sheet");
         let mode = ExcelScanMode::Validated;
+        let has_header = cfg::optional_bool(config, "has_header").unwrap_or(true);
+
+        // Read the real header row (or first data row when has_header=false) so
+        // downstream SQL can resolve column names at plan time. The previous
+        // DFSchema::empty() placeholder made every downstream column reference
+        // fail with "No field named ..." (and produced 0-column Arrow batches).
+        let mut workbook: Xlsx<_> = open_workbook(&path)
+            .map_err(|e| anyhow!("Cannot open Excel file {}: {}", path.display(), e))?;
+        let range = if let Some(ref name) = sheet {
+            workbook
+                .worksheet_range(name)
+                .map_err(|e| anyhow!("Error reading sheet {}: {}", name, e))?
+        } else {
+            workbook
+                .worksheet_range_at(0)
+                .ok_or_else(|| anyhow!("No sheets found"))?
+                .map_err(|e| anyhow!("Error reading first sheet: {}", e))?
+        };
+        let header_row = range
+            .rows()
+            .next()
+            .ok_or_else(|| anyhow!("Empty sheet"))?;
+        let fields: Vec<Field> = if has_header {
+            header_row
+                .iter()
+                .map(|c: &Data| Field::new(&c.to_string(), DataType::Utf8, true))
+                .collect()
+        } else {
+            (0..header_row.len())
+                .map(|i| Field::new(&format!("column_{}", i), DataType::Utf8, true))
+                .collect()
+        };
+        let real_schema = Arc::new(DFSchema::try_from(Arc::new(Schema::new(fields)))?);
 
         let scan_node = LogicalPlan::Extension(Extension {
             node: Arc::new(ExcelScanLogical {
                 path,
                 sheet,
                 mode,
-                schema: Arc::new(DFSchema::empty()), // Placeholder, will be inferred
+                schema: real_schema,
             }),
         });
 
@@ -265,6 +298,9 @@ impl NodeBehavior for ExcelWriteNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
+        if inputs.is_empty() {
+            anyhow::bail!("ExcelWriteNode requires at least one input (connect an upstream node to its input port)");
+        }
         let path = PathBuf::from(cfg::required_string(config, "path")?);
         let sheet = cfg::optional_string(config, "sheet").unwrap_or_else(|| "Sheet1".to_string());
         let convert_to_table = cfg::optional_bool(config, "convert_to_table").unwrap_or(true);
