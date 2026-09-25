@@ -348,6 +348,8 @@ impl ExecutionPlan for EntityExtractorExec {
             input,
             provider: self.provider.clone(),
             port: self.port,
+            entity_types: self.entity_types.clone(),
+            relation_types: self.relation_types.clone(),
             state: StreamState::PollingInput,
         }))
     }
@@ -369,6 +371,8 @@ struct EntityExtractionStream {
     input: SendableRecordBatchStream,
     provider: Arc<dyn LlmProvider>,
     port: usize,
+    entity_types: Vec<String>,
+    relation_types: Vec<String>,
     state: StreamState,
 }
 
@@ -381,6 +385,8 @@ impl Stream for EntityExtractionStream {
                     Poll::Ready(Some(Ok(batch))) => {
                         let provider = self.provider.clone();
                         let port = self.port;
+                        let entity_types = self.entity_types.clone();
+                        let relation_types = self.relation_types.clone();
 
                         let fut = async move {
                             let mut node_id_builder = Int64Builder::new();
@@ -401,24 +407,74 @@ impl Stream for EntityExtractionStream {
 
                             for i in 0..batch.num_rows() {
                                 let text = text_col.value(i);
+                                let guidance = if !entity_types.is_empty() {
+                                    format!(
+                                        "\nFocus on entity types: {}. Relation types: {}.",
+                                        entity_types.join(", "),
+                                        if relation_types.is_empty() {
+                                            "any".to_string()
+                                        } else {
+                                            relation_types.join(", ")
+                                        }
+                                    )
+                                } else {
+                                    String::new()
+                                };
                                 let prompt = format!(
-                                        "Extract entities and relationships from this text.\nReturn JSON format:\n{{\n  \"nodes\": [{{ \"name\": \"...\", \"label\": \"...\", \"properties\": {{}} }}],\n  \"edges\": [{{ \"source\": \"...\", \"target\": \"...\", \"type\": \"...\", \"weight\": 1.0 }}]\n}}\nText: {}",
+                                        "Extract entities and relationships from this text.\nReturn JSON format:\n{{\n  \"nodes\": [{{ \"name\": \"...\", \"label\": \"...\", \"properties\": {{}} }}],\n  \"edges\": [{{ \"source\": \"...\", \"target\": \"...\", \"type\": \"...\", \"weight\": 1.0 }}]\n}}\nBe concise: at most 8 nodes and 10 edges. Output ONLY the JSON object, no markdown fences, no commentary.{guidance}\nText: {}",
                                         text
                                     );
 
-                                let result = provider.complete(&prompt).await.map_err(|e| {
+                                // Retry loop: reasoning-capable servers occasionally return
+                                // truncated JSON with finish_reason=stop (observed on SGLang).
+                                // Parse failures trigger up to 3 re-calls before failing.
+                                let mut json: Option<JsonValue> = None;
+                                let mut last_err = String::new();
+                                for attempt in 0..3 {
+                                    // Identical retries are useless at temperature=0 (deterministic
+                                    // truncation observed on SGLang reasoning models). Vary the
+                                    // prompt on retries to break the degenerate output.
+                                    let attempt_prompt = if attempt == 0 {
+                                        prompt.clone()
+                                    } else {
+                                        format!(
+                                            "{prompt}\nIMPORTANT: Output the COMPLETE JSON object. It must be valid JSON ending with the closing brace }}. Do not stop early."
+                                        )
+                                    };
+                                    let result = provider.complete(&attempt_prompt).await.map_err(|e| {
+                                        DataFusionError::Execution(format!(
+                                            "Entity extraction LLM call failed for row {i}: {e}"
+                                        ))
+                                    })?;
+                                    let json_str =
+                                        crate::nodes::ai::ConfigWizard::extract_json_from_response(
+                                            &result,
+                                        )
+                                        .unwrap_or(&result);
+                                    match serde_json::from_str(json_str) {
+                                        Ok(v) => {
+                                            if attempt > 0 {
+                                                eprintln!(
+                                                    "  [LLM] row {i}: JSON parsed on retry {attempt}"
+                                                );
+                                            }
+                                            json = Some(v);
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "  [LLM] row {i}: invalid JSON (attempt {}): {} | extracted tail: {:?}",
+                                                attempt + 1,
+                                                e,
+                                                json_str.chars().rev().take(120).collect::<String>()
+                                            );
+                                            last_err = format!("{e}");
+                                        }
+                                    }
+                                }
+                                let json: JsonValue = json.ok_or_else(|| {
                                     DataFusionError::Execution(format!(
-                                        "Entity extraction LLM call failed for row {i}: {e}"
-                                    ))
-                                })?;
-                                let json_str =
-                                    crate::nodes::ai::ConfigWizard::extract_json_from_response(
-                                        &result,
-                                    )
-                                    .unwrap_or(&result);
-                                let json: JsonValue = serde_json::from_str(json_str).map_err(|e| {
-                                    DataFusionError::Execution(format!(
-                                        "Entity extraction returned invalid JSON for row {i}: {e}"
+                                        "Entity extraction returned invalid JSON for row {i} after 3 attempts: {last_err}"
                                     ))
                                 })?;
                                 if let Some(nodes) = json["nodes"].as_array() {

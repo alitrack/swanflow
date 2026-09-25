@@ -85,7 +85,7 @@ impl LlmProvider for OpenAiProvider {
             }
         }
 
-        println!("  [LLM] Calling {} with model {}", url, self.config.model);
+        eprintln!("  [LLM] Calling {} with model {}", url, self.config.model);
 
         let response = self
             .client
@@ -97,7 +97,8 @@ impl LlmProvider for OpenAiProvider {
             .json(&serde_json::json!({
                 "model": self.config.model,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0
+                "temperature": 0.0,
+                "max_tokens": 32768
             }))
             .send()
             .await?;
@@ -112,6 +113,15 @@ impl LlmProvider for OpenAiProvider {
         let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
             anyhow::anyhow!("Failed to parse LLM JSON: {}. Response was: {}", e, text)
         })?;
+
+        // Log finish_reason + usage so silent truncation (finish_reason=length on
+        // reasoning models sharing max_tokens between reasoning and content) is
+        // diagnosable from stderr.
+        eprintln!(
+            "  [LLM] finish_reason={:?} usage={}",
+            body["choices"][0]["finish_reason"].as_str().unwrap_or("?"),
+            body["usage"].to_string()
+        );
 
         Ok(body["choices"][0]["message"]["content"]
             .as_str()

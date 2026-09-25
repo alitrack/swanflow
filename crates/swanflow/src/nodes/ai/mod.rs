@@ -92,13 +92,16 @@ User Request: {}",
         // Look for { ... }
         if let Some(start) = response.find('{') {
             let mut brace_count = 0;
-            for (i, c) in response[start..].chars().enumerate() {
+            // Use char_indices so `end` is a BYTE offset — chars().enumerate() yields
+            // char positions which are NOT byte offsets for multi-byte UTF-8
+            // (Chinese text: 3 bytes/char), slicing at a char index truncates the JSON.
+            for (i, c) in response[start..].char_indices() {
                 match c {
                     '{' => brace_count += 1,
                     '}' => {
                         brace_count -= 1;
                         if brace_count == 0 {
-                            return Ok(&response[start..start + i + 1]);
+                            return Ok(&response[start..start + i + c.len_utf8()]);
                         }
                     }
                     _ => {}
@@ -138,6 +141,16 @@ mod tests {
         let response = r#"{"key": "value"}"#;
         let result = ConfigWizard::extract_json_from_response(response).unwrap();
         assert!(result.contains("key"));
+    }
+
+    #[test]
+    fn test_extract_json_chinese_multibyte_not_truncated() {
+        // Regression (Bug 13): chars().enumerate() yields CHAR indices but the slice
+        // used BYTE offsets — Chinese JSON (3 bytes/char) got deterministically
+        // truncated at "EOF while parsing a string". ASCII tests all passed.
+        let response = r#"{"nodes": [{"name": "患者0001", "label": "心内科"}], "edges": [{"source": "患者0001", "target": "心内科", "type": "就诊于"}]}"#;
+        let result = ConfigWizard::extract_json_from_response(response).unwrap();
+        assert_eq!(result, response, "multi-byte JSON must extract complete, not truncated");
     }
 
     #[test]
