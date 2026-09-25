@@ -318,6 +318,19 @@ impl ExtensionPlanner for SwanFlowPlanner {
             ));
         }
         if let Some(python) = node.as_any().downcast_ref::<PythonLogical>() {
+            // The physical plan must advertise the same schema the logical plan
+            // reports (probed/declared override), or DataFusion rejects it as a
+            // mismatched schema.
+            if let Some(df_schema) = &python.schema_override {
+                let arrow_schema = datafusion::arrow::datatypes::SchemaRef::new(
+                    df_schema.as_arrow().clone(),
+                );
+                return Ok(Some(Arc::new(PythonExec::with_schema(
+                    python.script.clone(),
+                    physical_inputs[0].clone(),
+                    arrow_schema,
+                ))));
+            }
             return Ok(Some(Arc::new(PythonExec::new(
                 python.script.clone(),
                 physical_inputs[0].clone(),

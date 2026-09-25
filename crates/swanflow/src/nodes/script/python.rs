@@ -33,6 +33,10 @@ use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 pub struct PythonLogical {
     pub script: String,
     pub input: LogicalPlan,
+    /// Output schema probed at plan time by running the script once against a
+    /// sample batch. When None (probe failed / skipped), falls back to the
+    /// pass-through input schema like before.
+    pub schema_override: Option<DFSchemaRef>,
 }
 
 impl PartialOrd for PythonLogical {
@@ -51,7 +55,9 @@ impl UserDefinedLogicalNodeCore for PythonLogical {
     }
 
     fn schema(&self) -> &DFSchemaRef {
-        self.input.schema()
+        self.schema_override
+            .as_ref()
+            .unwrap_or_else(|| self.input.schema())
     }
 
     fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
@@ -70,6 +76,7 @@ impl UserDefinedLogicalNodeCore for PythonLogical {
         Ok(Self {
             script: self.script.clone(),
             input: inputs[0].clone(),
+            schema_override: self.schema_override.clone(),
         })
     }
 }
@@ -79,6 +86,11 @@ impl UserDefinedLogicalNodeCore for PythonLogical {
 pub struct PythonExec {
     pub script: String,
     pub input: Arc<dyn ExecutionPlan>,
+    /// Advertised output schema (probed/declared). None = pass-through input
+    /// schema. Must survive `with_new_children` rebuilds or the optimizer
+    /// re-derives the schema from the input and DataFusion rejects the plan
+    /// as mismatched.
+    pub schema_override: Option<datafusion::arrow::datatypes::SchemaRef>,
     cache: PlanProperties,
 }
 
@@ -93,6 +105,30 @@ impl PythonExec {
         Self {
             script,
             input,
+            schema_override: None,
+            cache,
+        }
+    }
+
+    /// Like `new`, but advertises a probed/declared output schema (the physical
+    /// batches are produced by the Python script, whose schema may differ from
+    /// the input's — e.g. new columns). The logical plan's schema override and
+    /// the physical plan's schema must agree or DataFusion rejects the plan.
+    pub fn with_schema(
+        script: String,
+        input: Arc<dyn ExecutionPlan>,
+        schema: datafusion::arrow::datatypes::SchemaRef,
+    ) -> Self {
+        let cache = PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            input.properties().output_partitioning().clone(),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        );
+        Self {
+            script,
+            input,
+            schema_override: Some(schema),
             cache,
         }
     }
@@ -114,7 +150,13 @@ impl ExecutionPlan for PythonExec {
     }
 
     fn schema(&self) -> arrow::datatypes::SchemaRef {
-        self.input.schema()
+        // The physical plan must advertise the transform's output schema, not
+        // the input's — DataFusion's extension-planner check compares this
+        // against the logical schema and rejects mismatches.
+        match &self.schema_override {
+            Some(s) => s.clone(),
+            None => self.input.schema(),
+        }
     }
 
     fn properties(&self) -> &PlanProperties {
@@ -129,10 +171,18 @@ impl ExecutionPlan for PythonExec {
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(Self::new(
-            self.script.clone(),
-            children[0].clone(),
-        )))
+        // Preserve the advertised schema across optimizer rebuilds.
+        Ok(match &self.schema_override {
+            Some(schema) => Arc::new(Self::with_schema(
+                self.script.clone(),
+                children[0].clone(),
+                schema.clone(),
+            )),
+            None => Arc::new(Self::new(
+                self.script.clone(),
+                children[0].clone(),
+            )),
+        })
     }
 
     fn execute(
@@ -198,8 +248,19 @@ def make_restricted_import(original_import):
             let restricted_import_fn =
                 make_restricted_import_fn.call1((original_import.clone(),))?;
 
-            let locals = PyDict::new(py);
-            locals.set_item("__import__", restricted_import_fn)?;
+            // Sandbox should restrict IMPORTS, not strip all builtins. The old
+            // code set __builtins__ to a dict containing only __import__, which
+            // made len/range/min/max/abs/Exception... undefined (NameError) in
+            // every non-trivial script. Copy the real builtins and override only
+            // __import__ with the restricted one.
+            let builtins_module = PyModule::import(py, "builtins")?;
+            let builtins_dict = builtins_module.dict();
+            let sandbox_builtins = PyDict::new(py);
+            sandbox_builtins.update(builtins_dict.as_mapping())?;
+            let restricted_import_py: PyObject =
+                restricted_import_fn.clone().into_pyobject(py)?.into();
+            sandbox_builtins.set_item("__import__", restricted_import_py)?;
+            let locals: PyObject = sandbox_builtins.into_any().into();
 
             let full_script = format!(
                 "import pyarrow as pa\n\
@@ -245,6 +306,7 @@ def make_restricted_import(original_import):
         Ok(Box::pin(PythonStream {
             input: input_stream,
             compiled_fn,
+            schema_override: self.schema_override.clone(),
             pending_result: None,
         }))
     }
@@ -253,13 +315,20 @@ def make_restricted_import(original_import):
 struct PythonStream {
     input: SendableRecordBatchStream,
     compiled_fn: Py<PyAny>,
+    /// Advertised output schema (mirrors PythonExec.schema_override).
+    schema_override: Option<arrow::datatypes::SchemaRef>,
     /// Stores the oneshot receiver from an in-flight spawn_blocking Python call.
     pending_result: Option<tokio::sync::oneshot::Receiver<std::result::Result<RecordBatch, anyhow::Error>>>,
 }
 
 impl RecordBatchStream for PythonStream {
     fn schema(&self) -> arrow::datatypes::SchemaRef {
-        self.input.schema()
+        // Must match PythonExec::schema() — the transform's advertised output,
+        // not the input's (downstream materializers read this).
+        match &self.schema_override {
+            Some(s) => s.clone(),
+            None => self.input.schema(),
+        }
     }
 }
 
@@ -378,15 +447,96 @@ impl NodeBehavior for PythonNode {
     ) -> Result<Vec<LogicalPlan>> {
         let script = cfg::required_string(config, "script")?;
         let sandboxed = config.get("sandboxed").and_then(|v| v.as_bool()).unwrap_or(true);
+        let full_script = format!("sandboxed:{}\n{}", sandboxed, script); // encode sandboxed flag in script prefix
+
+        // Output schema resolution for downstream planning. A Python transform
+        // is a black box to the planner; the old pass-through behavior made any
+        // NEW column unresolvable downstream ("No field named ...").
+        // Resolution order:
+        //   1. probe: run the script once against a sample batch (may fail when
+        //      the upstream logical plan embeds engine-only extension nodes)
+        //   2. declared: `output_columns` config, e.g. {"flag": "string"}
+        //   3. fallback: pass-through input schema (old behavior)
+        let schema_override = probe_python_schema(&full_script, inputs[0].clone())
+            .await
+            .or_else(|| declared_output_schema(config));
+
         Ok(vec![LogicalPlan::Extension(
             datafusion::logical_expr::Extension {
                 node: Arc::new(PythonLogical {
-                    script: format!("sandboxed:{}\n{}", sandboxed, script), // encode sandboxed flag in script prefix
+                    script: full_script,
                     input: inputs[0].clone(),
+                    schema_override,
                 }),
             },
         )])
     }
+}
+
+/// Build a schema from a declarative `output_columns` config object mapping
+/// column name -> type string ("string"|"int64"|"float64"|"bool"). Returns
+/// None when the config key is absent or malformed.
+fn declared_output_schema(config: &JsonValue) -> Option<DFSchemaRef> {
+    let cols = config.get("output_columns")?.as_object()?;
+    let mut fields = Vec::new();
+    for (name, ty) in cols {
+        let dt = match ty.as_str()? {
+            "string" | "utf8" => datafusion::arrow::datatypes::DataType::Utf8,
+            "int64" => datafusion::arrow::datatypes::DataType::Int64,
+            "float64" => datafusion::arrow::datatypes::DataType::Float64,
+            "bool" => datafusion::arrow::datatypes::DataType::Boolean,
+            _ => return None,
+        };
+        fields.push(datafusion::arrow::datatypes::Field::new(name, dt, true));
+    }
+    if fields.is_empty() {
+        return None;
+    }
+    Some(Arc::new(datafusion::common::DFSchema::try_from(
+        datafusion::arrow::datatypes::Schema::new(fields),
+    )
+    .ok()?))
+}
+
+/// Execute the input plan, feed the first batch through the compiled Python
+/// transform, and return the output schema. Returns None on any failure —
+/// planning then falls back to pass-through schema (old behavior).
+async fn probe_python_schema(script: &str, input: LogicalPlan) -> Option<DFSchemaRef> {
+    // 1. Pull a small sample of rows from the (logical) input plan.
+    let ctx = datafusion::prelude::SessionContext::new();
+    let df = datafusion::prelude::DataFrame::new(ctx.state(), input);
+    let batches = df.limit(0, Some(8)).ok()?.collect().await.ok()?;
+    let first = batches.into_iter().next()?;
+
+    // 2. Wrap the sample batch in an in-memory physical plan via MemTable scan.
+    let mem_table = datafusion::datasource::MemTable::try_new(
+        first.schema(),
+        vec![vec![first.clone()]],
+    )
+    .ok()?;
+    let probe_ctx = datafusion::prelude::SessionContext::new();
+    probe_ctx
+        .register_table("python_probe_input", Arc::new(mem_table))
+        .ok()?;
+    let df = probe_ctx.sql("SELECT * FROM python_probe_input").await.ok()?;
+    let plan = df.into_unoptimized_plan();
+    let state = probe_ctx.state();
+    let physical_input = state
+        .create_physical_plan(&plan)
+        .await
+        .ok()?;
+
+    // 3. Run it through PythonExec and take the first output batch's schema.
+    let exec = PythonExec::new(script.to_string(), physical_input);
+    let task_ctx = Arc::new(datafusion::execution::context::TaskContext::default());
+    let mut stream = exec.execute(0, task_ctx).ok()?;
+    use futures::StreamExt;
+    let out = stream.next().await?;
+    let batch = out.ok()?;
+    if batch.num_rows() == 0 || batch.num_columns() == 0 {
+        return None;
+    }
+    Some(Arc::new(datafusion::common::DFSchema::try_from(batch.schema()).ok()?))
 }
 
 /// A node that registers a Python-based UDF into DataFusion.
