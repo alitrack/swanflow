@@ -134,6 +134,30 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 ),
             )));
         }
+        if let Some(embedder) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::vector::EmbedderLogical>()
+        {
+            return Ok(Some(Arc::new(crate::nodes::ai::vector::EmbedderExec::new(
+                physical_inputs[0].clone(),
+                embedder.endpoint.clone(),
+                embedder.column.clone(),
+                embedder.batch_size,
+            ))));
+        }
+        if let Some(search) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::vector::VectorSearchLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::vector::VectorSearchExec::new(
+                    physical_inputs[0].clone(),
+                    search.endpoint.clone(),
+                    search.query.clone(),
+                    search.top_k,
+                ),
+            )));
+        }
         if let Some(research) = node
             .as_any()
             .downcast_ref::<crate::nodes::ai::graph::ResearchLoopLogical>()

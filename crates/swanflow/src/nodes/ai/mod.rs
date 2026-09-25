@@ -6,6 +6,7 @@ pub mod providers;
 pub mod retrieval;
 pub mod runtime;
 pub mod tool_executor;
+pub mod vector;
 pub mod verification;
 
 use self::providers::LlmProvider;

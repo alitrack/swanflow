@@ -245,6 +245,13 @@ impl NodeRegistry {
         } else {
             eprintln!("[DEBUG] No LLM_MODEL or OPENAI_API_KEY found, EntityExtractor skip");
         }
+
+        // Vector nodes: real /embeddings endpoint (config-resolved, env fallback
+        // EMBED_MODEL / EMBED_API_BASE / EMBED_API_KEY). Registered always —
+        // validation fails loudly at workflow-load time if the endpoint config
+        // is unusable (no silent pass-through behavior).
+        self.register_node(Arc::new(crate::nodes::ai::vector::EmbedderNode));
+        self.register_node(Arc::new(crate::nodes::ai::vector::VectorSearchNode));
     }
 }
 
