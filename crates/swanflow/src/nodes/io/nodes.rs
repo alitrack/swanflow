@@ -173,6 +173,7 @@ impl NodeBehavior for DuckDBReadNode {
                 attach_sql: None,
                 query,
                 schema: Arc::new(df_schema),
+                input_tables: Vec::new(),
             }),
         })])
     }
@@ -321,6 +322,7 @@ impl NodeBehavior for HttpFetchNode {
                 attach_sql: Some("SET force_download=true;".to_string()),
                 query,
                 schema: Arc::new(df_schema),
+                input_tables: Vec::new(),
             }),
         })])
     }
@@ -821,6 +823,7 @@ impl NodeBehavior for UniversalReadNode {
                                 attach_sql: None,
                                 query,
                                 schema: Arc::new(df_schema),
+                                input_tables: Vec::new(),
                             }),
                         },
                     )])
@@ -871,6 +874,7 @@ impl NodeBehavior for UniversalReadNode {
                                 attach_sql: None,
                                 query,
                                 schema: Arc::new(df_schema),
+                                input_tables: Vec::new(),
                             }),
                         },
                     )])
@@ -951,6 +955,7 @@ impl DbConnectorNode {
                     attach_sql,
                     query: query.to_string(),
                     schema: Arc::new(df_schema),
+                    input_tables: Vec::new(),
                 }),
             },
         )])
@@ -1418,7 +1423,24 @@ impl Stream for GraphIndexingStream {
                                     "GraphIndexWriter failed to open metadata db {metadata_path}: {e}"
                                 ))
                             })?;
+                            // BUGFIX: materialized parquet round-trips BYTE_ARRAY as
+                            // Utf8View (see planner.rs parquet reader note), so the
+                            // historical StringArray downcasts could never succeed.
+                            // Cast the whole batch to the canonical layout first.
+                            let nodes_target = arrow_schema_of(&[
+                                ("id", DataType::Int64),
+                                ("name", DataType::Utf8),
+                                ("label", DataType::Utf8),
+                                ("properties", DataType::Utf8),
+                            ]);
+                            let edges_target = arrow_schema_of(&[
+                                ("source_id", DataType::Int64),
+                                ("target_id", DataType::Int64),
+                                ("type", DataType::Utf8),
+                                ("weight", DataType::Float64),
+                            ]);
                             for batch in nodes_batches {
+                                let batch = cast_record_batch(&batch, nodes_target.clone())?;
                                 let ids = batch.column(0).as_any().downcast_ref::<Int64Array>().ok_or_else(|| DataFusionError::Execution("graph nodes column 0 must be Int64".into()))?;
                                 let names = batch.column(1).as_any().downcast_ref::<StringArray>().ok_or_else(|| DataFusionError::Execution("graph nodes column 1 (name) must be Utf8".into()))?;
                                 let labels = batch.column(2).as_any().downcast_ref::<StringArray>().ok_or_else(|| DataFusionError::Execution("graph nodes column 2 (label) must be Utf8".into()))?;
@@ -1436,6 +1458,7 @@ impl Stream for GraphIndexingStream {
                                 }
                             }
                             for batch in edges_batches {
+                                let batch = cast_record_batch(&batch, edges_target.clone())?;
                                 let src_ids = batch.column(0).as_any().downcast_ref::<Int64Array>().ok_or_else(|| DataFusionError::Execution("graph edges column 0 must be Int64".into()))?;
                                 let dst_ids = batch.column(1).as_any().downcast_ref::<Int64Array>().ok_or_else(|| DataFusionError::Execution("graph edges column 1 must be Int64".into()))?;
                                 let types = batch.column(2).as_any().downcast_ref::<StringArray>().ok_or_else(|| DataFusionError::Execution("graph edges column 2 must be Utf8".into()))?;
@@ -1479,4 +1502,37 @@ impl RecordBatchStream for GraphIndexingStream {
     fn schema(&self) -> SchemaRef {
         Arc::new(Schema::empty())
     }
+}
+
+// ---- GraphIndexWriter helpers: canonical-schema cast --------------------
+fn arrow_schema_of(cols: &[(&str, DataType)]) -> SchemaRef {
+    let fields: Vec<_> = cols
+        .iter()
+        .map(|(n, t)| Field::new(*n, t.clone(), true))
+        .collect();
+    std::sync::Arc::new(Schema::new(fields))
+}
+
+fn cast_record_batch(
+    batch: &RecordBatch,
+    target: SchemaRef,
+) -> Result<RecordBatch, DataFusionError> {
+    if batch.schema() == target {
+        return Ok(batch.clone());
+    }
+    let cols: Result<Vec<_>, DataFusionError> = target
+        .fields()
+        .iter()
+        .zip(batch.columns().iter())
+        .map(|(f, c)| {
+            arrow::compute::cast(c, f.data_type()).map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "GraphIndexWriter cast to {} failed: {e}",
+                    f.data_type()
+                ))
+            })
+        })
+        .collect();
+    RecordBatch::try_new(target, cols?)
+        .map_err(|e| DataFusionError::Execution(format!("GraphIndexWriter batch rebuild: {e}")))
 }

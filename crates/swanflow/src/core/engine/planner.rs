@@ -7,6 +7,7 @@ use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::Result;
 use datafusion::execution::context::{QueryPlanner, SessionState};
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
+use datafusion::physical_plan::displayable;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
@@ -389,12 +390,13 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 })
                 .collect::<Vec<_>>();
             let arrow_schema = datafusion::arrow::datatypes::Schema::new(fields);
-            return Ok(Some(Arc::new(DuckDBScanExec::new(
+            return Ok(Some(Arc::new(DuckDBScanExec::with_inputs(
                 duck_scan.connection_path.clone(),
                 duck_scan.extensions.clone(),
                 duck_scan.attach_sql.clone(),
                 duck_scan.query.clone(),
                 Arc::new(arrow_schema),
+                physical_inputs.to_vec(),
             ))));
         }
         if let Some(sqlx_scan) = node.as_any().downcast_ref::<SqlxScanLogical>() {

@@ -388,6 +388,10 @@ pub struct DuckDBScanLogical {
     pub attach_sql: Option<String>,
     pub query: String,
     pub schema: DFSchemaRef,
+    /// Upstream DataFusion plans materialized as DuckDB tables input_0..N
+    /// before the query runs (used by e.g. luajit scalar mode). Empty for
+    /// pure external scans (postgres/sqlite/http).
+    pub input_tables: Vec<LogicalPlan>,
 }
 
 impl PartialOrd for DuckDBScanLogical {
@@ -401,7 +405,7 @@ impl UserDefinedLogicalNodeCore for DuckDBScanLogical {
         "DuckDBScan"
     }
     fn inputs(&self) -> Vec<&LogicalPlan> {
-        vec![]
+        self.input_tables.iter().collect()
     }
     fn schema(&self) -> &DFSchemaRef {
         &self.schema
@@ -415,9 +419,12 @@ impl UserDefinedLogicalNodeCore for DuckDBScanLogical {
     fn with_exprs_and_inputs(
         &self,
         _exprs: Vec<datafusion::logical_expr::Expr>,
-        _inputs: Vec<LogicalPlan>,
+        inputs: Vec<LogicalPlan>,
     ) -> Result<Self> {
-        Ok(self.clone())
+        Ok(Self {
+            input_tables: inputs,
+            ..self.clone()
+        })
     }
 }
 
@@ -429,6 +436,8 @@ pub struct DuckDBScanExec {
     pub attach_sql: Option<String>,
     pub query: String,
     pub project_schema: SchemaRef,
+    /// Physical plans for the input_tables (planner converts logical->physical).
+    input_plans: Vec<Arc<dyn ExecutionPlan>>,
     cache: PlanProperties,
 }
 
@@ -439,6 +448,24 @@ impl DuckDBScanExec {
         attach_sql: Option<String>,
         query: String,
         project_schema: SchemaRef,
+    ) -> Self {
+        Self::with_inputs(
+            connection_path,
+            extensions,
+            attach_sql,
+            query,
+            project_schema,
+            Vec::new(),
+        )
+    }
+
+    pub fn with_inputs(
+        connection_path: String,
+        extensions: Vec<String>,
+        attach_sql: Option<String>,
+        query: String,
+        project_schema: SchemaRef,
+        input_plans: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Self {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(project_schema.clone()),
@@ -452,6 +479,7 @@ impl DuckDBScanExec {
             attach_sql,
             query,
             project_schema,
+            input_plans,
             cache,
         }
     }
@@ -477,14 +505,21 @@ impl ExecutionPlan for DuckDBScanExec {
         &self.cache
     }
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
+        self.input_plans.iter().collect()
     }
 
     fn with_new_children(
         self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(self)
+        Ok(Arc::new(DuckDBScanExec::with_inputs(
+            self.connection_path.clone(),
+            self.extensions.clone(),
+            self.attach_sql.clone(),
+            self.query.clone(),
+            self.project_schema.clone(),
+            children,
+        )))
     }
 
     fn execute(
@@ -492,84 +527,146 @@ impl ExecutionPlan for DuckDBScanExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        // allow_unsigned_extensions so locally-built extensions (e.g. luajit)
-        // can be LOADed by absolute path; registry extensions are unaffected.
-        let config = duckdb::Config::default()
-            .allow_unsigned_extensions()
-            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-        let conn = duckdb::Connection::open_with_flags(&self.connection_path, config)
-            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        // Everything (DuckDB conn, input materialization, COPY, read-back) runs
+        // inside a spawned task — execute() must not block_on upstream streams:
+        // those streams are polled by the SAME runtime workers, blocking here
+        // deadlocks (wf78 hang root cause).
+        let mut builder = RecordBatchReceiverStream::builder(self.project_schema.clone(), 1);
+        let tx = builder.tx();
 
-        for ext in &self.extensions {
-            // Absolute paths (or bare .duckdb_extension paths) are LOADed
-            // directly — they're local unsigned builds, INSTALL would fail.
-            // Bare names go through INSTALL + LOAD (registry extensions).
-            if ext.contains('/') || ext.contains('\\') || ext.ends_with(".duckdb_extension") {
-                conn.execute(&format!("LOAD '{}';", ext), [])
-                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-            } else {
-                conn.execute(&format!("INSTALL {};", ext), []).ok();
-                conn.execute(&format!("LOAD {};", ext), [])
+        let connection_path = self.connection_path.clone();
+        let extensions = self.extensions.clone();
+        let attach_sql = self.attach_sql.clone();
+        let query = self.query.clone();
+        let project_schema = self.project_schema.clone();
+        // inputs are executed in the spawned task via their own plans
+        let input_plans = self.input_plans.clone();
+        let task_context = _context.clone();
+
+        builder.spawn(async move {
+            let config = duckdb::Config::default()
+                .allow_unsigned_extensions()
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            let conn = duckdb::Connection::open_with_flags(&connection_path, config)
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+
+            for ext in &extensions {
+                if ext.contains('/') || ext.contains('\\') || ext.ends_with(".duckdb_extension") {
+                    conn.execute(&format!("LOAD '{}';", ext), [])
+                        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                } else {
+                    conn.execute(&format!("INSTALL {};", ext), []).ok();
+                    conn.execute(&format!("LOAD {};", ext), [])
+                        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                }
+            }
+
+            if let Some(ref attach) = attach_sql {
+                conn.execute(attach, [])
                     .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
             }
-        }
 
-        if let Some(ref attach) = self.attach_sql {
-            conn.execute(attach, [])
+            // Materialize upstream inputs as DuckDB tables input_0..N via temp
+            // parquet (same bridge technique as sql_duckdb::run_duckdb_query).
+            for (i, plan) in input_plans.iter().enumerate() {
+                use futures::TryStreamExt;
+                let mut stream = plan.execute(0, task_context.clone())?;
+                let f = std::env::temp_dir()
+                    .join(format!("rustflow_dbscan_in_{}_{}.parquet", i, uuid::Uuid::new_v4()));
+                use parquet::arrow::ArrowWriter;
+                let mut writer: Option<ArrowWriter<std::fs::File>> = None;
+                while let Some(batch) = stream.next().await {
+                    let batch = batch?;
+                    if writer.is_none() {
+                        let file = std::fs::File::create(&f)
+                            .map_err(datafusion::error::DataFusionError::IoError)?;
+                        writer = Some(
+                            ArrowWriter::try_new(file, batch.schema(), None)
+                                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?,
+                        );
+                    }
+                    if let Some(w) = writer.as_mut() {
+                        w.write(&batch)
+                            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                    }
+                }
+                if writer.is_none() {
+                    return Err(datafusion::error::DataFusionError::Internal(format!(
+                        "DuckDBScan input_{i} produced no batches"
+                    )));
+                }
+                writer
+                    .unwrap()
+                    .close()
+                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                let in_path = f.to_string_lossy().replace('\'', "''");
+                conn.execute(
+                    &format!(
+                        "CREATE TEMP TABLE input_{i} AS SELECT * FROM read_parquet('{in_path}')"
+                    ),
+                    [],
+                )
                 .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-        }
+                let _ = std::fs::remove_file(&f);
+            }
 
-        // Use a temporary parquet file to bridge DuckDB and DataFusion Arrow versions
-        let tmp_dir = std::env::temp_dir();
-        let tmp_file = tmp_dir.join(format!("rustflow_duckdb_{}.parquet", uuid::Uuid::new_v4()));
-        let tmp_path = tmp_file.to_str().unwrap();
+            // Use a temporary parquet file to bridge DuckDB and DataFusion Arrow versions
+            let tmp_dir = std::env::temp_dir();
+            let tmp_file = tmp_dir.join(format!("rustflow_duckdb_{}.parquet", uuid::Uuid::new_v4()));
+            let tmp_path = tmp_file.to_str().unwrap();
 
-        let copy_sql = format!("COPY ({}) TO '{}' (FORMAT PARQUET)", self.query, tmp_path);
-        conn.execute(&copy_sql, [])
-            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            let copy_sql = format!("COPY ({}) TO '{}' (FORMAT PARQUET)", query, tmp_path);
+            conn.execute(&copy_sql, [])
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
-        // Read back with DataFusion
-        let ctx = SessionContext::new();
-        let df = futures::executor::block_on(
-            ctx.read_parquet(tmp_path, datafusion::prelude::ParquetReadOptions::default()),
-        )
-        .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            // Read back with DataFusion
+            let ctx = SessionContext::new();
+            let df = ctx
+                .read_parquet(tmp_path, datafusion::prelude::ParquetReadOptions::default())
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
-        let batches = futures::executor::block_on(df.collect())
-            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            let batches = df
+                .collect()
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
-        // The parquet reader (arrow 57) forces BYTE_ARRAY columns to view
-        // types (Utf8View/BinaryView), while `project_schema` came from the
-        // DuckDB C stream (Utf8/Binary). Downstream coalescers assert on the
-        // mismatch (debug panic / release soundness hazard). Cast every batch
-        // column to the declared schema — Utf8View→Utf8 etc. — before streaming.
-        // (Found by pi worker tier-1 dataflow verification, 2026-09-21.)
-        let target_schema = self.project_schema.as_ref();
-        let mut cast_batches = Vec::with_capacity(batches.len());
-        for b in batches {
-            let columns = target_schema
-                .fields()
-                .iter()
-                .zip(b.columns())
-                .map(|(field, col)| arrow::compute::cast(col, field.data_type()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
-            cast_batches.push(
-                arrow::record_batch::RecordBatch::try_new(Arc::new(target_schema.clone()), columns)
-                    .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?,
-            );
-        }
+            // The parquet reader (arrow 57) forces BYTE_ARRAY columns to view
+            // types (Utf8View/BinaryView), while `project_schema` came from the
+            // DuckDB C stream (Utf8/Binary). Downstream coalescers assert on the
+            // mismatch (debug panic / release soundness hazard). Cast every batch
+            // column to the declared schema — Utf8View→Utf8 etc. — before streaming.
+            // (Found by pi worker tier-1 dataflow verification, 2026-09-21.)
+            let target_schema = project_schema.as_ref();
+            for b in batches {
+                let columns = target_schema
+                    .fields()
+                    .iter()
+                    .zip(b.columns())
+                    .map(|(field, col)| arrow::compute::cast(col, field.data_type()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                    })?;
+                let batch = arrow::record_batch::RecordBatch::try_new(
+                    Arc::new(target_schema.clone()),
+                    columns,
+                )
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                })?;
+                if tx.send(Ok(batch)).await.is_err() {
+                    break; // receiver dropped
+                }
+            }
 
-        // Clean up
-        std::fs::remove_file(tmp_file).ok();
+            // Clean up
+            std::fs::remove_file(tmp_file).ok();
 
-        Ok(Box::pin(
-            datafusion::physical_plan::memory::MemoryStream::try_new(
-                cast_batches,
-                self.project_schema.clone(),
-                None,
-            )?,
-        ))
+            Ok(())
+        });
+
+        Ok(builder.build())
     }
 }
 

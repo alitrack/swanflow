@@ -678,7 +678,11 @@ impl NodeBehavior for GraphMergerNode {
         ctx.register_table("edges_a", DataFrame::new(ctx.state(), edges_a).into_view())?;
         ctx.register_table("edges_b", DataFrame::new(ctx.state(), edges_b).into_view())?;
 
-        let nodes_merged = ctx.sql("SELECT id, ANY_VALUE(label) as label, ANY_VALUE(properties) as properties FROM (SELECT * FROM nodes_a UNION ALL SELECT * FROM nodes_b) GROUP BY id").await?;
+        // NOTE: DataFusion has no ANY_VALUE() (DuckDB-only) — use min() which
+        // both engines support; for duplicate-id resolution semantics are
+        // "pick one deterministic value" either way (bug: ANY_VALUE made this
+        // node unplannable in DataFusion from day one).
+        let nodes_merged = ctx.sql("SELECT id, min(label) as label, min(properties) as properties FROM (SELECT * FROM nodes_a UNION ALL SELECT * FROM nodes_b) GROUP BY id").await?;
         let edges_merged = ctx.sql("SELECT source_id, target_id, type, SUM(weight) as weight FROM (SELECT * FROM edges_a UNION ALL SELECT * FROM edges_b) GROUP BY source_id, target_id, type").await?;
 
         Ok(vec![

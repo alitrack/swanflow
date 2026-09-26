@@ -247,6 +247,7 @@ impl NodeBehavior for ExtFnNode {
             attach_sql: None,
             query,
             schema,
+            input_tables: inputs,
         };
 
         Ok(vec![LogicalPlan::Extension(Extension {

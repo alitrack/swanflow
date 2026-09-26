@@ -187,6 +187,10 @@ impl NodeBehavior for LuaJitNode {
             attach_sql: None,
             query,
             schema,
+            // Scalar mode queries `FROM input_0` — the upstream plan MUST be
+            // carried into the scan so the exec can materialize it as a
+            // DuckDB table (bug: previously dropped, scalar mode never worked).
+            input_tables: if mode == "scalar" { inputs } else { Vec::new() },
         };
 
         Ok(vec![LogicalPlan::Extension(Extension {
