@@ -681,6 +681,7 @@ impl SwanFlowEngine {
 
                     match state.create_physical_plan(&logical_plan).await {
                         Ok(physical_plan) => {
+
                             let task_ctx = ctx_shared.task_ctx();
                             let node_id_exec = node_id;
                             let physical_plan_clone = physical_plan.clone();
@@ -1289,6 +1290,22 @@ impl SwanFlowEngine {
                 .await;
             }
 
+            // Execute the fan-out parent itself FIRST so its output is
+            // registered (node_<id> table) — children reference it as
+            // input_0 via their incoming edges.
+            let _ = Self::compile_and_execute_node(
+                node,
+                workflow,
+                node_idx,
+                step_context,
+                ctx,
+                cache_dir,
+                registry,
+                tx,
+                hook,
+            )
+            .await;
+
             // Execute children in parallel, honoring each child's error_mode
             // (elastic fan-out, borrowed from Forge research #2026081102).
             let mut handles = Vec::new();
@@ -1504,7 +1521,7 @@ impl SwanFlowEngine {
             .collect();
         incoming_edges.sort_by_key(|e| e.weight().target_port);
 
-        for edge in &incoming_edges {
+        for (edge_i, edge) in incoming_edges.iter().enumerate() {
             // P2-5: tolerate a missing endpoint instead of panicking (release uses panic=abort).
             let src_node = match workflow.graph.node_weight(edge.source()) {
                 Some(n) => n,
@@ -1518,7 +1535,14 @@ impl SwanFlowEngine {
             };
             let table_name = format!("node_{}", &src_node.id.to_string()[..8]);
             if let Ok(df) = ctx.sql(&format!("SELECT * FROM \"{}\"", table_name)).await {
-                input_plans.push(df.into_optimized_plan()?);
+                let plan = df.into_optimized_plan()?;
+                // Also register as input_{i} so late-binding SQL nodes
+                // (SqlProxyLogical) can reference input_0 in this path.
+                let alias = format!("input_{}", edge_i);
+                let reg_df = datafusion::prelude::DataFrame::new(ctx.state(), plan.clone());
+                let _ = ctx.deregister_table(&alias);
+                let _ = ctx.register_table(&alias, reg_df.into_view());
+                input_plans.push(plan);
             }
         }
 

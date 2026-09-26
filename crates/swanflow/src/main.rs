@@ -31,6 +31,11 @@ enum Commands {
     Run {
         /// Path to the workflow file
         file: PathBuf,
+
+        /// Use the legacy step-engine (execute_yaml_workflow) which honors
+        /// node mode annotations (loop/conditional/fan_out/collect + sub_workflow)
+        #[arg(long)]
+        legacy_yaml: bool,
     },
     /// Inspect a workflow's inferred schemas without executing it
     Inspect {
@@ -285,7 +290,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file } => {
+        Commands::Run { file, legacy_yaml } => {
             let workflow = load_workflow(file)?;
             println!(
                 "🚀 Loading Workflow: {} (ID: {})",
@@ -295,7 +300,11 @@ async fn main() -> anyhow::Result<()> {
             let registry = Arc::new(NodeRegistry::default());
             let engine = SwanFlowEngine::new(registry);
 
-            let mut rx = engine.execute_workflow(&workflow).await?;
+            let mut rx = if legacy_yaml {
+                engine.execute_yaml_workflow(&workflow).await?
+            } else {
+                engine.execute_workflow(&workflow).await?
+            };
 
             println!("📊 Execution Started...");
             let mut failed = false;
