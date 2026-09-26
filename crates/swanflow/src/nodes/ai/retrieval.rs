@@ -1,12 +1,30 @@
 use crate::nodes::ai::ConfigWizard;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use datafusion::logical_expr::LogicalPlan;
+use datafusion::arrow::array::{StringArray, StringBuilder, UInt32Builder};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::error::{DataFusionError, Result as DFResult};
+use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_plan::{
+    coalesce_partitions::CoalescePartitionsExec, DisplayAs, DisplayFormatType, ExecutionPlan,
+    PlanProperties, RecordBatchStream,
+};
+use datafusion::physical_expr::EquivalenceProperties;
+use futures::stream::Stream;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::any::Any;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
@@ -220,12 +238,12 @@ impl NodeBehavior for EmbeddingGeneratorNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
             return Err(anyhow!("Embedding Generator requires one input plan"));
         }
-        Ok(vec![inputs[0].clone()])
+        Ok(vec![xform_plan(inputs, config, XformMode::Embed)?])
     }
 }
 
@@ -313,12 +331,12 @@ impl NodeBehavior for SemanticChunkerNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
             return Err(anyhow!("Semantic Chunker requires one input plan"));
         }
-        Ok(vec![inputs[0].clone()])
+        Ok(vec![xform_plan(inputs, config, XformMode::Chunk)?])
     }
 }
 
@@ -855,12 +873,12 @@ impl NodeBehavior for HybridRetrieverNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
             return Err(anyhow!("Hybrid Retriever requires at least one input plan"));
         }
-        Ok(vec![inputs[0].clone()])
+        Ok(vec![xform_plan(inputs, config, XformMode::Hybrid)?])
     }
 }
 
@@ -1017,12 +1035,12 @@ impl NodeBehavior for RerankerNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
             return Err(anyhow!("Reranker requires one input plan"));
         }
-        Ok(vec![inputs[0].clone()])
+        Ok(vec![xform_plan(inputs, config, XformMode::Rerank)?])
     }
 }
 
@@ -1213,5 +1231,491 @@ impl NodeBehavior for VectorRetrieverNode {
             return Err(anyhow!("Vector Retriever requires one input plan"));
         }
         Ok(vec![inputs[0].clone()])
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// TextXform: real execution for the retrieval shell nodes
+// (chunk / embed / rerank / hybrid). Deterministic, no LLM required.
+// ══════════════════════════════════════════════════════════════════
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum XformMode {
+    Chunk,
+    Embed,
+    Rerank,
+    Hybrid,
+}
+
+impl XformMode {
+    fn tag(&self) -> &'static str {
+        match self {
+            XformMode::Chunk => "chunk",
+            XformMode::Embed => "embed",
+            XformMode::Rerank => "rerank",
+            XformMode::Hybrid => "hybrid",
+        }
+    }
+    fn out_fields(&self) -> Vec<Field> {
+        match self {
+            XformMode::Chunk => vec![
+                Field::new("row_id", DataType::UInt32, true),
+                Field::new("chunk_id", DataType::UInt32, true),
+                Field::new("chunk_text", DataType::Utf8, true),
+            ],
+            XformMode::Embed => vec![
+                Field::new("row_id", DataType::UInt32, true),
+                Field::new("embed_norm", DataType::Utf8, true),
+                Field::new("embed_json", DataType::Utf8, true),
+            ],
+            XformMode::Rerank | XformMode::Hybrid => vec![
+                Field::new("rank", DataType::UInt32, true),
+                Field::new("source_id", DataType::Utf8, true),
+                Field::new("content", DataType::Utf8, true),
+                Field::new("score", DataType::Utf8, true),
+            ],
+        }
+    }
+}
+
+fn xform_plan(
+    inputs: Vec<LogicalPlan>,
+    config: &JsonValue,
+    mode: XformMode,
+) -> Result<LogicalPlan> {
+    let column = config
+        .get("column")
+        .and_then(|v| v.as_str())
+        .unwrap_or("text")
+        .to_string();
+    let cfg = config.clone();
+    Ok(LogicalPlan::Extension(datafusion::logical_expr::Extension {
+        node: Arc::new(TextXformLogical {
+            input: inputs[0].clone(),
+            column,
+            mode,
+            config: cfg,
+        }),
+    }))
+}
+
+#[derive(Clone)]
+pub struct TextXformLogical {
+    pub input: LogicalPlan,
+    pub column: String,
+    pub mode: XformMode,
+    pub config: JsonValue,
+}
+
+impl fmt::Debug for TextXformLogical {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextXformLogical")
+            .field("column", &self.column)
+            .field("mode", &self.mode.tag())
+            .finish()
+    }
+}
+
+impl PartialEq for TextXformLogical {
+    fn eq(&self, other: &Self) -> bool {
+        self.column == other.column && self.mode == other.mode
+    }
+}
+impl Eq for TextXformLogical {}
+impl Hash for TextXformLogical {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.column.hash(state);
+        self.mode.hash(state);
+    }
+}
+impl PartialOrd for TextXformLogical {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for TextXformLogical {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.column.clone(), self.mode.tag()).cmp(&(other.column.clone(), other.mode.tag()))
+    }
+}
+
+impl UserDefinedLogicalNodeCore for TextXformLogical {
+    fn name(&self) -> &str {
+        "TextXformLogical"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        lazy_static::lazy_static! {
+            static ref CHUNK_S: DFSchemaRef = Arc::new(
+                DFSchema::try_from(Schema::new(XformMode::Chunk.out_fields())).unwrap()
+            );
+            static ref EMBED_S: DFSchemaRef = Arc::new(
+                DFSchema::try_from(Schema::new(XformMode::Embed.out_fields())).unwrap()
+            );
+            static ref RERANK_S: DFSchemaRef = Arc::new(
+                DFSchema::try_from(Schema::new(XformMode::Rerank.out_fields())).unwrap()
+            );
+            static ref HYBRID_S: DFSchemaRef = Arc::new(
+                DFSchema::try_from(Schema::new(XformMode::Hybrid.out_fields())).unwrap()
+            );
+        }
+        match self.mode {
+            XformMode::Chunk => &CHUNK_S,
+            XformMode::Embed => &EMBED_S,
+            XformMode::Rerank => &RERANK_S,
+            XformMode::Hybrid => &HYBRID_S,
+        }
+    }
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "TextXformLogical(column={}, mode={})", self.column, self.mode.tag())
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> std::result::Result<Self, DataFusionError> {
+        Ok(Self {
+            input: inputs[0].clone(),
+            column: self.column.clone(),
+            mode: self.mode,
+            config: self.config.clone(),
+        })
+    }
+}
+
+pub struct TextXformExec {
+    input: Arc<dyn ExecutionPlan>,
+    column: String,
+    mode: XformMode,
+    config: JsonValue,
+    schema: SchemaRef,
+    cache: PlanProperties,
+}
+
+impl TextXformExec {
+    pub fn new(input: Arc<dyn ExecutionPlan>, column: String, mode: XformMode, config: JsonValue) -> Self {
+        let input: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(input));
+        let schema = Arc::new(Schema::new(mode.out_fields()));
+        let cache = PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
+            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
+            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
+        );
+        Self { input, column, mode, config, schema, cache }
+    }
+}
+
+impl fmt::Debug for TextXformExec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextXformExec").field("mode", &self.mode.tag()).finish()
+    }
+}
+
+impl DisplayAs for TextXformExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "TextXformExec(mode={})", self.mode.tag())
+    }
+}
+
+impl ExecutionPlan for TextXformExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(Arc::new(Self::new(
+            children[0].clone(),
+            self.column.clone(),
+            self.mode,
+            self.config.clone(),
+        )))
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
+        let input = self.input.execute(partition, context)?;
+        Ok(Box::pin(TextXformStream {
+            input,
+            column: self.column.clone(),
+            mode: self.mode,
+            config: self.config.clone(),
+            schema: self.schema.clone(),
+            state: XformStreamState::PollingInput,
+        }))
+    }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn name(&self) -> &str {
+        "TextXformExec"
+    }
+}
+
+enum XformStreamState {
+    PollingInput,
+    Done,
+}
+
+struct TextXformStream {
+    input: SendableRecordBatchStream,
+    column: String,
+    mode: XformMode,
+    config: JsonValue,
+    schema: SchemaRef,
+    state: XformStreamState,
+}
+
+fn col_to_strings(batch: &RecordBatch, column: &str) -> Vec<String> {
+    let idx = batch.schema().index_of(column).unwrap_or(0);
+    let col = batch.column(idx);
+    use datafusion::arrow::util::display::array_value_to_string;
+    (0..batch.num_rows())
+        .map(|i| array_value_to_string(col, i).unwrap_or_default())
+        .collect()
+}
+
+impl Stream for TextXformStream {
+    type Item = std::result::Result<RecordBatch, DataFusionError>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match &mut self.state {
+            XformStreamState::PollingInput => match self.input.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    let texts = col_to_strings(&batch, &self.column);
+                    let mode = self.mode;
+                    let config = self.config.clone();
+                    let schema = self.schema.clone();
+                    let out = build_xform_batch(texts, mode, &config, schema)
+                        .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                    Poll::Ready(Some(Ok(out)))
+                }
+                Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+                Poll::Ready(None) => {
+                    self.state = XformStreamState::Done;
+                    Poll::Ready(None)
+                }
+                Poll::Pending => Poll::Pending,
+            },
+            XformStreamState::Done => Poll::Ready(None),
+        }
+    }
+}
+
+impl RecordBatchStream for TextXformStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+fn build_xform_batch(
+    texts: Vec<String>,
+    mode: XformMode,
+    config: &JsonValue,
+    schema: SchemaRef,
+) -> Result<RecordBatch> {
+    match mode {
+        XformMode::Chunk => {
+            let chunker = SemanticChunkerNode;
+            let mut rid = UInt32Builder::new();
+            let mut cid = UInt32Builder::new();
+            let mut txt = StringBuilder::new();
+            for (i, text) in texts.iter().enumerate() {
+                let chunks = chunker.chunk_text(text, config)?;
+                for (j, c) in chunks.iter().enumerate() {
+                    rid.append_value(i as u32);
+                    cid.append_value(j as u32);
+                    txt.append_value(c);
+                }
+            }
+            Ok(RecordBatch::try_new(
+                schema,
+                vec![Arc::new(rid.finish()), Arc::new(cid.finish()), Arc::new(txt.finish())],
+            )
+            .map_err(|e| anyhow!("chunk batch: {}", e))?)
+        }
+        XformMode::Embed => {
+            // Deterministic hashing embedding (no external service): FNV-1a
+            // token hashing into a fixed-width vector, L2-normalized.
+            let dim = config["dim"].as_u64().unwrap_or(64) as usize;
+            let mut rid = UInt32Builder::new();
+            let mut norm = StringBuilder::new();
+            let mut js = StringBuilder::new();
+            for (i, text) in texts.iter().enumerate() {
+                let mut v = vec![0f32; dim];
+                for tok in text.to_lowercase().split_whitespace() {
+                    let mut h = 2166136261u32;
+                    for b in tok.as_bytes() {
+                        h ^= *b as u32;
+                        h = h.wrapping_mul(16777619);
+                    }
+                    v[(h as usize) % dim] += 1.0;
+                }
+                let l2 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if l2 > 0.0 {
+                    for x in v.iter_mut() {
+                        *x /= l2;
+                    }
+                }
+                rid.append_value(i as u32);
+                norm.append_value(format!("{:.4}", l2));
+                js.append_value(serde_json::to_string(&v).unwrap_or_default());
+            }
+            Ok(RecordBatch::try_new(
+                schema,
+                vec![Arc::new(rid.finish()), Arc::new(norm.finish()), Arc::new(js.finish())],
+            )
+            .map_err(|e| anyhow!("embed batch: {}", e))?)
+        }
+        XformMode::Rerank | XformMode::Hybrid => {
+            // Input expectation: rows of (query, content) in the first two
+            // string columns; single query row set reranked/hybrid-fused.
+            // Build candidates from all rows: source_id = row index string.
+            let query = texts.first().cloned().unwrap_or_default();
+            let candidates: Vec<RetrievalCandidate> = texts
+                .iter()
+                .enumerate()
+                .map(|(i, c)| RetrievalCandidate {
+                    source_id: format!("s{}", i),
+                    content: c.clone(),
+                    score: 0.0,
+                })
+                .collect();
+            let ranked = if mode == XformMode::Rerank {
+                let top_k = config["top_k"].as_u64().unwrap_or(10) as usize;
+                let term_boost = config["term_boost"].as_f64().unwrap_or(0.1) as f32;
+                RerankerNode.rerank_with_overlap_pub(&query, candidates, top_k, term_boost)
+            } else {
+                // Hybrid: treat candidates as the sparse leg; semantic leg
+                // derives from content-hash similarity to the query.
+                let semantic: Vec<RetrievalCandidate> = texts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| RetrievalCandidate {
+                        source_id: format!("s{}", i),
+                        content: c.clone(),
+                        score: hash_similarity(&query, c),
+                    })
+                    .collect();
+                HybridRetrieverNode.fuse_candidates(candidates, semantic, config)?
+            };
+            let mut rank = UInt32Builder::new();
+            let mut sid = StringBuilder::new();
+            let mut content = StringBuilder::new();
+            let mut score = StringBuilder::new();
+            for (i, c) in ranked.iter().enumerate() {
+                rank.append_value(i as u32);
+                sid.append_value(&c.source_id);
+                content.append_value(&c.content);
+                score.append_value(format!("{:.4}", c.score));
+            }
+            Ok(RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(rank.finish()),
+                    Arc::new(sid.finish()),
+                    Arc::new(content.finish()),
+                    Arc::new(score.finish()),
+                ],
+            )
+            .map_err(|e| anyhow!("rank batch: {}", e))?)
+        }
+    }
+}
+
+fn hash_similarity(a: &str, b: &str) -> f32 {
+    let ta: HashSet<String> = a.to_lowercase().split_whitespace().map(str::to_string).collect();
+    let tb: HashSet<String> = b.to_lowercase().split_whitespace().map(str::to_string).collect();
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let inter = ta.intersection(&tb).count() as f32;
+    2.0 * inter / (ta.len() + tb.len()) as f32
+}
+
+impl RerankerNode {
+    pub fn rerank_with_overlap_pub(
+        &self,
+        query: &str,
+        candidates: Vec<RetrievalCandidate>,
+        top_k: usize,
+        term_boost: f32,
+    ) -> Vec<RetrievalCandidate> {
+        self.rerank_with_overlap(query, candidates, top_k, term_boost)
+    }
+}
+
+#[cfg(test)]
+mod xform_tests {
+    use super::*;
+
+    #[test]
+    fn test_xform_mode_schemas() {
+        for mode in [XformMode::Chunk, XformMode::Embed, XformMode::Rerank, XformMode::Hybrid] {
+            let logical = TextXformLogical {
+                input: LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+                    produce_one_row: false,
+                    schema: Arc::new(DFSchema::empty()),
+                }),
+                column: "text".into(),
+                mode,
+                config: serde_json::json!({}),
+            };
+            assert_eq!(logical.schema().fields().len(), mode.out_fields().len());
+        }
+    }
+
+    #[test]
+    fn test_chunk_deterministic_window() {
+        let texts = vec!["a b c d e f".to_string()];
+        let batch = build_xform_batch(
+            texts,
+            XformMode::Chunk,
+            &serde_json::json!({"chunk_size": 4, "overlap": 1}),
+            Arc::new(Schema::new(XformMode::Chunk.out_fields())),
+        )
+        .unwrap();
+        let col = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        let chunks: Vec<&str> = col.iter().map(|s| s.unwrap_or("")).collect();
+        assert_eq!(chunks, vec!["a b c d", "d e f"]);
+    }
+
+    #[test]
+    fn test_embed_l2_normalized() {
+        let texts = vec!["x y z".to_string(), "x x y".to_string()];
+        let batch = build_xform_batch(
+            texts,
+            XformMode::Embed,
+            &serde_json::json!({"dim": 8}),
+            Arc::new(Schema::new(XformMode::Embed.out_fields())),
+        )
+        .unwrap();
+        let col = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        for v in col.iter() {
+            let vec: Vec<f32> = serde_json::from_str(v.unwrap()).unwrap();
+            let n: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((n - 1.0).abs() < 0.01, "not normalized: {}", n);
+        }
+    }
+
+    #[test]
+    fn test_hash_similarity_bounds() {
+        assert_eq!(hash_similarity("a b", "a b"), 1.0);
+        assert_eq!(hash_similarity("a b", "c d"), 0.0);
+        assert!(hash_similarity("a b c", "a b d") > 0.0);
     }
 }

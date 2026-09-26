@@ -73,6 +73,19 @@ impl ExtensionPlanner for SwanFlowPlanner {
         if let Some(missing) = node.as_any().downcast_ref::<MissingNodeLogical>() {
             return Ok(Some(Arc::new(MissingNodeExec::new(missing))));
         }
+        if let Some(xform) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::retrieval::TextXformLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::retrieval::TextXformExec::new(
+                    physical_inputs[0].clone(),
+                    xform.column.clone(),
+                    xform.mode,
+                    xform.config.clone(),
+                ),
+            )));
+        }
         if let Some(pii) = node
             .as_any()
             .downcast_ref::<crate::nodes::ai::privacy::PiiLogical>()
@@ -81,7 +94,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 crate::nodes::ai::privacy::PiiExec::new(
                     physical_inputs[0].clone(),
                     pii.column.clone(),
-                    pii.mode,
+                    pii.mode.clone(),
                 ),
             )));
         }

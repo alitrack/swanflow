@@ -278,10 +278,11 @@ impl NodeBehavior for PiiDetectorNode {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum PiiMode {
     Detect,
     Mask,
+    Gate(String, JsonValue),
 }
 
 #[derive(Clone)]
@@ -302,14 +303,25 @@ impl fmt::Debug for PiiLogical {
 
 impl PartialEq for PiiLogical {
     fn eq(&self, other: &Self) -> bool {
-        self.column == other.column && self.mode == other.mode
+        if self.column != other.column { return false; }
+        match (&self.mode, &other.mode) {
+            (PiiMode::Detect, PiiMode::Detect) => true,
+            (PiiMode::Mask, PiiMode::Mask) => true,
+            (PiiMode::Gate(a, _), PiiMode::Gate(b, _)) => a == b,
+            _ => false,
+        }
     }
 }
 impl Eq for PiiLogical {}
 impl std::hash::Hash for PiiLogical {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.column.hash(state);
-        format!("{:?}", self.mode).hash(state);
+        let tag = match &self.mode {
+            PiiMode::Detect => "detect".to_string(),
+            PiiMode::Mask => "mask".to_string(),
+            PiiMode::Gate(a, _) => format!("gate:{}", a),
+        };
+        tag.hash(state);
     }
 }
 impl PartialOrd for PiiLogical {
@@ -319,8 +331,11 @@ impl PartialOrd for PiiLogical {
 }
 impl Ord for PiiLogical {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.column.clone(), format!("{:?}", self.mode))
-            .cmp(&(other.column.clone(), format!("{:?}", other.mode)))
+        self.column.cmp(&other.column).then_with(|| {
+            let a = match &self.mode { PiiMode::Detect => 0, PiiMode::Mask => 1, PiiMode::Gate(..) => 2 };
+            let b = match &other.mode { PiiMode::Detect => 0, PiiMode::Mask => 1, PiiMode::Gate(..) => 2 };
+            a.cmp(&b)
+        })
     }
 }
 
@@ -349,11 +364,21 @@ impl datafusion::logical_expr::UserDefinedLogicalNodeCore for PiiLogical {
                 ]))
                 .unwrap(),
             );
+            static ref GATE_SCHEMA: DFSchemaRef = Arc::new(
+                DFSchema::try_from(Schema::new(vec![
+                    Field::new("text", DataType::Utf8, true),
+                    Field::new("has_pii", DataType::UInt32, true),
+                    Field::new("allow", DataType::UInt32, true),
+                    Field::new("reason", DataType::Utf8, true),
+                    Field::new("requires_approval", DataType::UInt32, true),
+                ]))
+                .unwrap(),
+            );
         }
-        if self.mode == PiiMode::Detect {
-            &DETECT_SCHEMA
-        } else {
-            &MASK_SCHEMA
+        match self.mode {
+            PiiMode::Detect => &DETECT_SCHEMA,
+            PiiMode::Mask => &MASK_SCHEMA,
+            PiiMode::Gate(..) => &GATE_SCHEMA,
         }
     }
     fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
@@ -370,7 +395,7 @@ impl datafusion::logical_expr::UserDefinedLogicalNodeCore for PiiLogical {
         Ok(Self {
             input: inputs[0].clone(),
             column: self.column.clone(),
-            mode: self.mode,
+            mode: self.mode.clone(),
         })
     }
 }
@@ -512,6 +537,29 @@ impl NodeBehavior for PiiMaskerNode {
     }
 }
 
+
+fn pii_mode_schema(mode: &PiiMode) -> SchemaRef {
+    match mode {
+        PiiMode::Detect => Arc::new(Schema::new(vec![
+            Field::new("text", DataType::Utf8, true),
+            Field::new("match_count", DataType::UInt32, true),
+            Field::new("matches_json", DataType::Utf8, true),
+        ])),
+        PiiMode::Mask => Arc::new(Schema::new(vec![
+            Field::new("text", DataType::Utf8, true),
+            Field::new("masked_text", DataType::Utf8, true),
+            Field::new("replacements_json", DataType::Utf8, true),
+        ])),
+        PiiMode::Gate(..) => Arc::new(Schema::new(vec![
+            Field::new("text", DataType::Utf8, true),
+            Field::new("has_pii", DataType::UInt32, true),
+            Field::new("allow", DataType::UInt32, true),
+            Field::new("reason", DataType::Utf8, true),
+            Field::new("requires_approval", DataType::UInt32, true),
+        ])),
+    }
+}
+
 pub struct PiiExec {
     input: Arc<dyn ExecutionPlan>,
     column: String,
@@ -523,20 +571,9 @@ impl PiiExec {
     pub fn new(input: Arc<dyn ExecutionPlan>, column: String, mode: PiiMode) -> Self {
         let input: Arc<dyn ExecutionPlan> =
             Arc::new(CoalescePartitionsExec::new(input));
-        let schema = match mode {
-            PiiMode::Detect => Schema::new(vec![
-                Field::new("text", DataType::Utf8, true),
-                Field::new("match_count", DataType::UInt32, true),
-                Field::new("matches_json", DataType::Utf8, true),
-            ]),
-            PiiMode::Mask => Schema::new(vec![
-                Field::new("text", DataType::Utf8, true),
-                Field::new("masked_text", DataType::Utf8, true),
-                Field::new("replacements_json", DataType::Utf8, true),
-            ]),
-        };
+        let schema = pii_mode_schema(&mode);
         let cache = PlanProperties::new(
-            EquivalenceProperties::new(Arc::new(schema)),
+            EquivalenceProperties::new(schema),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
             datafusion::physical_plan::execution_plan::EmissionType::Incremental,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
@@ -549,18 +586,7 @@ impl PiiExec {
         }
     }
     fn out_schema(&self) -> SchemaRef {
-        match self.mode {
-            PiiMode::Detect => Arc::new(Schema::new(vec![
-                Field::new("text", DataType::Utf8, true),
-                Field::new("match_count", DataType::UInt32, true),
-                Field::new("matches_json", DataType::Utf8, true),
-            ])),
-            PiiMode::Mask => Arc::new(Schema::new(vec![
-                Field::new("text", DataType::Utf8, true),
-                Field::new("masked_text", DataType::Utf8, true),
-                Field::new("replacements_json", DataType::Utf8, true),
-            ])),
-        }
+        pii_mode_schema(&self.mode)
     }
 }
 
@@ -596,7 +622,7 @@ impl ExecutionPlan for PiiExec {
         Ok(Arc::new(Self::new(
             children[0].clone(),
             self.column.clone(),
-            self.mode,
+            self.mode.clone(),
         )))
     }
     fn execute(
@@ -608,7 +634,7 @@ impl ExecutionPlan for PiiExec {
         Ok(Box::pin(PiiStream {
             input,
             column: self.column.clone(),
-            mode: self.mode,
+            mode: self.mode.clone(),
             state: PiiStreamState::PollingInput,
         }))
     }
@@ -664,10 +690,14 @@ impl Stream for PiiStream {
                     let mut mjson_b = StringBuilder::new();
                     let mut masked_b = StringBuilder::new();
                     let mut rjson_b = StringBuilder::new();
+                    let mut haspii_b = UInt32Builder::new();
+                    let mut allow_b = UInt32Builder::new();
+                    let mut reason_b = StringBuilder::new();
+                    let mut appr_b = UInt32Builder::new();
                     for i in 0..n {
                         let text = texts.value(i);
                         text_b.append_value(text);
-                        match self.mode {
+                        match &self.mode {
                             PiiMode::Detect => {
                                 let det = detector.detect_pii(text, &serde_json::json!({}))
                                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
@@ -681,21 +711,21 @@ impl Stream for PiiStream {
                                 masked_b.append_value(m.masked_text);
                                 rjson_b.append_value(serde_json::to_string(&m.replacements).unwrap_or_default());
                             }
+                            PiiMode::Gate(action, cfg) => {
+                                let det = detector.detect_pii(text, &serde_json::json!({}))
+                                    .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                                let gate = PolicyPrivacyGateNode;
+                                let decision = gate.evaluate_policy(action, !det.matches.is_empty(), cfg)
+                                    .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                                haspii_b.append_value(!det.matches.is_empty() as u32);
+                                allow_b.append_value(decision.allow as u32);
+                                reason_b.append_value(&decision.reason);
+                                appr_b.append_value(decision.requires_approval as u32);
+                            }
                         }
                     }
-                    let schema = match self.mode {
-                        PiiMode::Detect => Arc::new(Schema::new(vec![
-                            Field::new("text", DataType::Utf8, true),
-                            Field::new("match_count", DataType::UInt32, true),
-                            Field::new("matches_json", DataType::Utf8, true),
-                        ])),
-                        PiiMode::Mask => Arc::new(Schema::new(vec![
-                            Field::new("text", DataType::Utf8, true),
-                            Field::new("masked_text", DataType::Utf8, true),
-                            Field::new("replacements_json", DataType::Utf8, true),
-                        ])),
-                    };
-                    let batch_out = match self.mode {
+                    let schema = pii_mode_schema(&self.mode);
+                    let batch_out = match &self.mode {
                         PiiMode::Detect => RecordBatch::try_new(
                             schema,
                             vec![
@@ -710,6 +740,16 @@ impl Stream for PiiStream {
                                 Arc::new(text_b.finish()),
                                 Arc::new(masked_b.finish()),
                                 Arc::new(rjson_b.finish()),
+                            ],
+                        ),
+                        PiiMode::Gate(..) => RecordBatch::try_new(
+                            schema,
+                            vec![
+                                Arc::new(text_b.finish()),
+                                Arc::new(haspii_b.finish()),
+                                Arc::new(allow_b.finish()),
+                                Arc::new(reason_b.finish()),
+                                Arc::new(appr_b.finish()),
                             ],
                         ),
                     }
@@ -730,18 +770,7 @@ impl Stream for PiiStream {
 
 impl datafusion::physical_plan::RecordBatchStream for PiiStream {
     fn schema(&self) -> SchemaRef {
-        match self.mode {
-            PiiMode::Detect => Arc::new(Schema::new(vec![
-                Field::new("text", DataType::Utf8, true),
-                Field::new("match_count", DataType::UInt32, true),
-                Field::new("matches_json", DataType::Utf8, true),
-            ])),
-            PiiMode::Mask => Arc::new(Schema::new(vec![
-                Field::new("text", DataType::Utf8, true),
-                Field::new("masked_text", DataType::Utf8, true),
-                Field::new("replacements_json", DataType::Utf8, true),
-            ])),
-        }
+        pii_mode_schema(&self.mode)
     }
 }
 
@@ -864,12 +893,30 @@ impl NodeBehavior for PolicyPrivacyGateNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
             return Err(anyhow!("Policy & Privacy Gate requires one input plan"));
         }
-        Ok(vec![inputs[0].clone()])
+        let column = config
+            .get("column")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text")
+            .to_string();
+        let action = config
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .to_string();
+        let cfg = config.clone();
+        let node = Arc::new(PiiLogical {
+            input: inputs[0].clone(),
+            column,
+            mode: PiiMode::Gate(action, cfg),
+        });
+        Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
+            node,
+        })])
     }
 }
 
