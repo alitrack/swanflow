@@ -287,10 +287,53 @@ impl McpServer {
     }
 
     /// Run the MCP server loop on stdin/stdout.
+    ///
+    /// fd 1 (stdout) is the JSON-RPC frame channel. The engine and nodes emit
+    /// progress via `println!`, which would corrupt the frames. So we first
+    /// clone the real stdout for the transport, then redirect fd 1 to fd 2
+    /// (stderr) for the lifetime of the process — every stray `println!`
+    /// lands on stderr where it cannot break the protocol.
     pub async fn run(&self) -> anyhow::Result<()> {
-        let stdin = io::stdin();
-        let stdout = io::stdout();
-        let mut transport = ContentLengthTransport::new(stdin, stdout);
+        #[cfg(unix)]
+        {
+            extern "C" {
+                fn dup2(oldfd: i32, newfd: i32) -> i32;
+            }
+            // Clone the REAL stdout (fd 1) before redirecting, so the frame
+            // writer keeps a private handle while fd 1 goes to stderr.
+            extern "C" {
+                fn dup(oldfd: i32) -> i32;
+            }
+            use std::os::unix::io::FromRawFd;
+            use std::io::Write as _;
+            std::io::stdout().flush().ok();
+            let saved_fd = unsafe { dup(1) };
+            if saved_fd < 0 {
+                anyhow::bail!("dup(stdout) failed");
+            }
+            let cloned = unsafe { std::fs::File::from_raw_fd(saved_fd) };
+            unsafe {
+                dup2(2, 1); // fd 1 now aliases stderr — stray println! is harmless
+            }
+            let cloned = tokio::io::BufWriter::new(tokio::fs::File::from_std(cloned));
+            let stdin = io::stdin();
+            let mut transport = ContentLengthTransport::new(stdin, cloned);
+            return self.serve_loop(&mut transport).await;
+        }
+        #[cfg(not(unix))]
+        {
+            let stdin = io::stdin();
+            let stdout = io::stdout();
+            let mut transport = ContentLengthTransport::new(stdin, stdout);
+            self.serve_loop(&mut transport).await
+        }
+    }
+
+    async fn serve_loop<R, W>(&self, transport: &mut ContentLengthTransport<R, W>) -> anyhow::Result<()>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
 
         loop {
             let request = match transport.read_request().await {
