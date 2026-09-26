@@ -486,7 +486,24 @@ pub(crate) fn discover_schema(query: &str, extensions: &[String]) -> Result<DFSc
 
 fn map_duckdb_type(col_type: &str) -> datafusion::arrow::datatypes::DataType {
     use datafusion::arrow::datatypes::DataType;
-    match col_type.to_uppercase().as_str() {
+    let upper = col_type.to_uppercase();
+    // Decimal (incl. HUGEINT results which duckdb reports as DECIMAL(38,0),
+    // Debug-formatted "Decimal(38, 0)" / "Decimal128(38, 0)"): scale 0 ->
+    // Int64, else Float64. Mirrors map_duck_type in sql_duckdb.rs; without
+    // this branch sum()/window sums over integers silently become Utf8.
+    if upper.starts_with("DECIMAL") {
+        let scale = upper
+            .rsplit(',')
+            .next()
+            .and_then(|s| s.trim_end_matches(')').trim().parse::<i32>().ok())
+            .unwrap_or(0);
+        return if scale == 0 {
+            DataType::Int64
+        } else {
+            DataType::Float64
+        };
+    }
+    match upper.as_str() {
         "BOOLEAN" => DataType::Boolean,
         "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "INT8" | "INT16" | "INT32"
         | "INT64" | "UINT8" | "UINT16" | "UINT32" | "UINT64" => DataType::Int64,
@@ -522,6 +539,17 @@ mod tests {
         assert_eq!(nodes[1].spec().type_id, "luajit.dirscan");
         // non-action libs have no args template
         assert!(nodes[0].action_args.is_none());
+    }
+
+    #[test]
+    fn test_luajit_map_duckdb_type() {
+        use datafusion::arrow::datatypes::DataType;
+        assert_eq!(map_duckdb_type("BIGINT"), DataType::Int64);
+        assert_eq!(map_duckdb_type("DOUBLE"), DataType::Float64);
+        assert_eq!(map_duckdb_type("VARCHAR"), DataType::Utf8);
+        // HUGEINT/Decimal family: scale 0 -> Int64, fractional -> Float64
+        assert_eq!(map_duckdb_type("Decimal(38, 0)"), DataType::Int64);
+        assert_eq!(map_duckdb_type("Decimal128(38, 3)"), DataType::Float64);
     }
 
     #[test]
