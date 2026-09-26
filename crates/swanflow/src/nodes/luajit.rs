@@ -102,6 +102,7 @@ impl NodeBehavior for LuaJitNode {
         // Single-quote escaping for embedding Lua source into SQL.
         let esc = source.replace('\'', "''");
 
+        let mut attach_sql: Option<String> = None;
         let query = match mode {
             "table" => {
                 // luajit_table('lua source') — table generator, no inputs.
@@ -137,35 +138,75 @@ impl NodeBehavior for LuaJitNode {
                         format!("luajit_s('{}', \"{}\") AS \"{}\"", esc, c, c)
                     })
                     .collect();
-                // Preserve the full input row plus computed columns. This
-                // keeps the node a pure transform (output schema = input + results).
-                let all_input_cols: Vec<String> = input
+                // Replace-in-place semantics: a transformed column REPLACES
+                // its original in the select list. Appending a duplicate
+                // alias (DuckDB renames it qty_1) made the extra column get
+                // silently dropped by the schema cast back in DuckDBScanExec
+                // (bug #10, wf78: output looked like plain passthrough).
+                let mut seen = std::collections::HashSet::new();
+                let select_all = input
                     .schema()
                     .fields()
                     .iter()
-                    .map(|f| format!("\"{}\"", f.name()))
+                    .map(|f| {
+                        let name = f.name();
+                        if cols.iter().any(|c| c == name) {
+                            seen.insert(name.clone());
+                            format!("luajit_s('{}', \"{}\") AS \"{}\"", esc, name, name)
+                        } else {
+                            format!("\"{}\"", name)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                // columns that aren't in the input schema get appended
+                let extras: Vec<String> = cols
+                    .iter()
+                    .filter(|c| !seen.contains(c.as_str()))
+                    .map(|c| format!("luajit_s('{}', \"{}\") AS \"{}\"", esc, c, c))
                     .collect();
-                let select_all = if all_input_cols.is_empty() {
-                    selects.join(", ")
+                let select_all = if extras.is_empty() {
+                    select_all
+                } else if select_all.is_empty() {
+                    extras.join(", ")
                 } else {
-                    let mut parts = all_input_cols;
-                    parts.extend(selects);
-                    parts.join(", ")
+                    format!("{}, {}", select_all, extras.join(", "))
                 };
+                // Lib-name detection: a bare word (no spaces, not Lua source
+                // — no 'return'/'function' keywords) is a registered lib name
+                // (luajit.<lib> nodes pre-fill source with the lib name).
+                // Libs must be installed BEFORE the main query binds (see
+                // action-mode note); route the install through attach_sql.
+                let is_lib_name = !source.contains(' ')
+                    && !source.contains("return")
+                    && !source.contains("function")
+                    && !source.is_empty();
+                if is_lib_name {
+                    attach_sql = Some(format!(
+                        "SELECT * FROM luajit_module(mode:='install', sql_name:='{}')",
+                        esc
+                    ));
+                }
                 format!(
                     "SELECT * FROM (SELECT {select_all} FROM input_0) AS _luajit_transform"
                 )
             }
             "action" => {
                 // Module-table libs: install registers the lib (cached
-                // source), then luajit_s resolves the table's .run method
-                // (luajit extension v0.32+). CTE form keeps it one statement.
+                // source), then luajit_s resolves the table's .run method.
+                // NOTE: install must run as a SEPARATE statement BEFORE the
+                // main query — inside a single CTE the binder resolves
+                // luajit_s before the install side effect executes, so the
+                // lib is unregistered at bind time and the call returns NULL
+                // (found by wf79, 2026-09-27). attach_sql runs first in
+                // DuckDBScanExec, exactly the ordering we need.
                 let args = config.get("args").cloned().unwrap_or(JsonValue::Null);
                 let args_sql = struct_literal(&args)?;
-                format!(
-                    "WITH _reg AS (SELECT * FROM luajit_module(mode:='install', sql_name:='{}')) SELECT luajit_s('{}', {}) AS result FROM _reg",
-                    esc, esc, args_sql
-                )
+                attach_sql = Some(format!(
+                    "SELECT * FROM luajit_module(mode:='install', sql_name:='{}')",
+                    esc
+                ));
+                format!("SELECT luajit_s('{}', {}) AS result", esc, args_sql)
             }
             _ => unreachable!("validated above"),
         };
@@ -173,7 +214,15 @@ impl NodeBehavior for LuaJitNode {
         // Early schema discovery: run the query against a scratch DuckDB
         // connection with the luajit extension loaded, so the logical schema
         // is accurate (planner needs it before physical execution).
-        let schema: DFSchemaRef = discover_schema(&query, &luajit_extension_paths()).unwrap_or_else(|_| {
+        // For action mode the query CALLS the lib (linalg GPU probe etc.) —
+        // guard with WHERE 1=0 so discovery never executes the UDF body
+        // (full-suite parallel runs hung on linalg CUDA probing, 2026-09-27).
+        let discovery_query = if mode == "action" {
+            format!("SELECT * FROM ({query}) AS _disc WHERE 1=0")
+        } else {
+            query.clone()
+        };
+        let schema: DFSchemaRef = discover_schema(&discovery_query, &luajit_extension_paths()).unwrap_or_else(|_| {
             if !inputs.is_empty() {
                 inputs[0].schema().clone()
             } else {
@@ -184,7 +233,7 @@ impl NodeBehavior for LuaJitNode {
         let node = DuckDBScanLogical {
             connection_path: ":memory:".to_string(),
             extensions: luajit_extension_paths(),
-            attach_sql: None,
+            attach_sql,
             query,
             schema,
             // Scalar mode queries `FROM input_0` — the upstream plan MUST be
@@ -711,9 +760,15 @@ mod tests {
                     .downcast_ref::<DuckDBScanLogical>()
                     .expect("should be DuckDBScanLogical");
                 assert!(
-                    scan.query.contains("WITH _reg AS (SELECT * FROM luajit_module(mode:='install', sql_name:='incremental')) SELECT luajit_s('incremental', {'op':'run', 'target':'tgt', 'source':'src', 'ts_col':'ts', 'mode':'ts'}) AS result FROM _reg"),
+                    scan.query.contains("SELECT luajit_s('incremental', {'op':'run', 'target':'tgt', 'source':'src', 'ts_col':'ts', 'mode':'ts'}) AS result"),
                     "unexpected action SQL: {}",
                     scan.query
+                );
+                assert_eq!(
+                    scan.attach_sql.as_deref(),
+                    Some("SELECT * FROM luajit_module(mode:='install', sql_name:='incremental')"),
+                    "install must run via attach_sql (before binder sees luajit_s): {:?}",
+                    scan.attach_sql
                 );
             } else {
                 panic!("expected Extension plan");
