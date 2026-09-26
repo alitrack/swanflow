@@ -103,6 +103,23 @@ impl NodeBehavior for LuaJitNode {
         let esc = source.replace('\'', "''");
 
         let mut attach_sql: Option<String> = None;
+        // Column list for scalar fallback schema (transformed -> Utf8).
+        let cols_for_fallback: Vec<String> = if mode == "scalar" {
+            if let Some(c) = config["columns"].as_array() {
+                c.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+            } else if !inputs.is_empty() {
+                inputs[0]
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
         let query = match mode {
             "table" => {
                 // luajit_table('lua source') — table generator, no inputs.
@@ -143,6 +160,40 @@ impl NodeBehavior for LuaJitNode {
                 // alias (DuckDB renames it qty_1) made the extra column get
                 // silently dropped by the schema cast back in DuckDBScanExec
                 // (bug #10, wf78: output looked like plain passthrough).
+                //
+                // args template (wf81+): when config.args is an object, each
+                // selected column is transformed by calling the lib with the
+                // template MERGED with {'v': <col>} — enables struct-opts libs
+                // (privacy.mask etc.) per-row. A bare source stays body-style.
+                let args_tpl = config.get("args").filter(|a| a.is_object());
+                let col_expr = |c: &str| -> String {
+                    match args_tpl {
+                        Some(tpl) => {
+                            // Build the struct literal by hand: template values
+                            // via struct_literal (quoted), but 'v' must be a RAW
+                            // column reference, not a string literal.
+                            let mut parts: Vec<String> = tpl
+                                .as_object()
+                                .map(|o| {
+                                    o.iter()
+                                        .filter(|(k, _)| k.as_str() != "v")
+                                        .map(|(k, val)| {
+                                            Ok(format!(
+                                                "'{}':{}",
+                                                k.replace('\'', "''"),
+                                                struct_literal(val)?
+                                            ))
+                                        })
+                                        .collect::<Result<Vec<_>>>()
+                                        .unwrap_or_default()
+                                })
+                                .unwrap_or_default();
+                            parts.push(format!("'v':\"{}\"", c));
+                            format!("luajit_s('{}', {{{}}}) AS \"{}\"", esc, parts.join(", "), c)
+                        }
+                        None => format!("luajit_s('{}', \"{}\") AS \"{}\"", esc, c, c),
+                    }
+                };
                 let mut seen = std::collections::HashSet::new();
                 let select_all = input
                     .schema()
@@ -152,7 +203,7 @@ impl NodeBehavior for LuaJitNode {
                         let name = f.name();
                         if cols.iter().any(|c| c == name) {
                             seen.insert(name.clone());
-                            format!("luajit_s('{}', \"{}\") AS \"{}\"", esc, name, name)
+                            col_expr(name)
                         } else {
                             format!("\"{}\"", name)
                         }
@@ -163,7 +214,7 @@ impl NodeBehavior for LuaJitNode {
                 let extras: Vec<String> = cols
                     .iter()
                     .filter(|c| !seen.contains(c.as_str()))
-                    .map(|c| format!("luajit_s('{}', \"{}\") AS \"{}\"", esc, c, c))
+                    .map(|c| col_expr(c))
                     .collect();
                 let select_all = if extras.is_empty() {
                     select_all
@@ -224,7 +275,35 @@ impl NodeBehavior for LuaJitNode {
         };
         let schema: DFSchemaRef = discover_schema(&discovery_query, &luajit_extension_paths()).unwrap_or_else(|_| {
             if !inputs.is_empty() {
-                inputs[0].schema().clone()
+                // Fallback: input schema, but scalar-transformed columns are
+                // overwritten as Utf8 — luajit_s ALWAYS returns VARCHAR, and
+                // the exec's schema cast turns BIGINT phone + VARCHAR result
+                // into NULL (found by wf81 probe: name survived, phone NULL).
+                if mode == "scalar" {
+                    let base = inputs[0].schema();
+                    let fields: Vec<datafusion::arrow::datatypes::Field> = base
+                        .fields()
+                        .iter()
+                        .map(|f| {
+                            let name = f.name();
+                            if cols_for_fallback.iter().any(|c| c == name) {
+                                datafusion::arrow::datatypes::Field::new(
+                                    name.clone(),
+                                    datafusion::arrow::datatypes::DataType::Utf8,
+                                    true,
+                                )
+                            } else {
+                                f.as_ref().clone()
+                            }
+                        })
+                        .collect();
+                    match DFSchema::from_unqualified_fields(fields.into(), base.metadata().clone()) {
+                        Ok(s) => Arc::new(s),
+                        Err(_) => inputs[0].schema().clone(),
+                    }
+                } else {
+                    inputs[0].schema().clone()
+                }
             } else {
                 Arc::new(DFSchema::empty())
             }
