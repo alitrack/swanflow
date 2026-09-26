@@ -25,6 +25,7 @@ pub mod registry;
 pub mod middleware;
 pub mod script;
 pub mod sql;
+pub mod sql_duckdb;
 pub mod transform;
 pub mod wasm;
 

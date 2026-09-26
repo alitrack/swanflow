@@ -214,7 +214,8 @@ impl NodeRegistry {
             self.nodes.insert("core.io.parquet".to_string(), parquet);
         }
 
-        // Register EntityExtractor if environment variables are set
+        // Register the DuckDB-dialect SQL node (json/icu/fuzzy/lists/PIVOT).
+        self.register_node(Arc::new(crate::nodes::sql_duckdb::DuckSqlNode));
         if let Ok(model) = std::env::var("LLM_MODEL") {
             eprintln!("[DEBUG] Found LLM_MODEL: {}", model);
             let config = LlmConfig {

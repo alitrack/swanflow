@@ -279,14 +279,29 @@ impl ExtensionPlanner for SwanFlowPlanner {
 
             let logical_plan = df.into_optimized_plan()?;
             // We MUST use the latest session state from our context which now has the tables!
+            // Check if schema matches logical proxy schema
+            let logical_schema = proxy.schema.clone();
             let physical_plan = _planner
                 .create_physical_plan(&logical_plan, &self.ctx.state())
                 .await?;
+
 
             // Check if schema matches logical proxy schema
             let logical_schema = proxy.schema.clone();
             let physical_plan = self.align_schemas(physical_plan, logical_schema.as_ref())?;
             return Ok(Some(physical_plan));
+        }
+        if let Some(ducksql) = node.as_any().downcast_ref::<crate::nodes::sql_duckdb::DuckSqlLogical>() {
+            // physical_inputs are already the physical children of this node
+            // (engine resolves LogicalPlan::inputs() before calling us).
+            // DuckSqlExec::new wraps each in CoalescePartitionsExec itself.
+            let exec = crate::nodes::sql_duckdb::DuckSqlExec::new(
+                ducksql.query.clone(),
+                physical_inputs[0].clone(),
+                physical_inputs[1..].to_vec(),
+                Arc::new(ducksql.schema.as_arrow().clone()),
+            );
+            return Ok(Some(Arc::new(exec)));
         }
         if let Some(pivot) = node.as_any().downcast_ref::<PivotProxyLogical>() {
             // The pivot's result was COMPUTED at plan time (data-dependent
