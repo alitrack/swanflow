@@ -399,11 +399,23 @@ impl Stream for EntityExtractionStream {
                             let mut edge_type_builder = StringBuilder::new();
                             let mut edge_weight_builder = Float64Builder::new();
 
+                            // The extractor reads the FIRST column as text.
+                            // Historically this was an .unwrap() that panicked
+                            // inside a tokio task ("Join Error / task panicked")
+                            // whenever column 0 was not a string (e.g. an id
+                            // column first). Fail with a clear message instead.
                             let text_col = batch
                                 .column(0)
                                 .as_any()
                                 .downcast_ref::<datafusion::arrow::array::StringArray>()
-                                .unwrap();
+                                .ok_or_else(|| {
+                                    let schema = batch.schema();
+                                    let f = schema.field(0);
+                                    DataFusionError::Execution(format!(
+                                        "ai.entity_extractor expects column 0 to be Utf8, got {} ({:?}). Put the text column first.",
+                                        f.data_type(), f.name()
+                                    ))
+                                })?;
 
                             for i in 0..batch.num_rows() {
                                 let text = text_col.value(i);
