@@ -91,6 +91,40 @@ impl WorkflowCompiler {
             let node = workflow.graph.node_weight(node_idx).unwrap();
             let mut is_placeholder = false;
 
+            // ── Loop mode: embed sub_workflow as nested stages ──────────
+            // The loop node's own compiled output is the parent feed; the
+            // sub_workflow's terminal outputs are appended at deeper levels.
+            if node.mode == crate::core::graph::StepMode::Loop {
+                if let Some(sub) = &node.sub_workflow {
+                    let inner_levels = self
+                        .compile_inner(sub, registry, Some(&node.id.to_string()))
+                        .await;
+                    if let Ok(inner) = inner_levels {
+                        let base = stages.len();
+                        for (offset, inner_stage) in inner.into_iter().enumerate() {
+                            let lvl = base + offset;
+                            while stages.len() <= lvl {
+                                stages.push(Vec::new());
+                            }
+                            stages[lvl].extend(inner_stage);
+                        }
+                        // record inner terminal outputs under the loop node id
+                        if let Some(last) = stages.last() {
+                            let mut outs: HashMap<usize, LogicalPlan> = HashMap::new();
+                            for sp in last {
+                                if sp.node_type != "core.placeholder" {
+                                    outs.insert(sp.port, sp.plan.clone());
+                                }
+                            }
+                            if !outs.is_empty() {
+                                self.compiled_outputs
+                                    .insert(node.id, outs);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Calculate level
             let mut level = 0;
             for edge in workflow
@@ -233,6 +267,22 @@ impl WorkflowCompiler {
         }
 
         Ok(stages)
+    }
+
+
+    /// Compile a sub_workflow's own graph into stages (used by loop mode).
+    /// Recursion is boxed to satisfy the async recursion rule.
+    async fn compile_inner(
+        &mut self,
+        sub: &crate::core::graph::Workflow,
+        registry: &crate::nodes::registry::NodeRegistry,
+        _tag: Option<&str>,
+    ) -> Result<Vec<Vec<CompiledStagePlan>>> {
+        let sub_clone = sub.clone();
+        let mut inner_stages = Box::pin(self.compile(&sub_clone, registry, None)).await?;
+        // Prefix inner node ids' stage entries are appended as-is; caller merges.
+        let _ = &mut inner_stages;
+        Ok(inner_stages)
     }
 
     pub async fn execute_plan(

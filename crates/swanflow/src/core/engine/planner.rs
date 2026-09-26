@@ -286,14 +286,21 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 let table_name = format!("input_{}", i);
                 let df = datafusion::prelude::DataFrame::new(self.ctx.state(), input_plan.clone());
                 let _ = self.ctx.deregister_table(&table_name);
-                self.ctx
-                    .register_table(&table_name, df.into_view())
-                    .map_err(|e| {
-                        datafusion::error::DataFusionError::Plan(format!(
-                            "Failed to register input_{}: {}",
-                            i, e
-                        ))
-                    })?;
+                if let Err(first) = self.ctx.register_table(&table_name, df.into_view()) {
+                    // Concurrent fan_out children share this context and may race on
+                    // the same alias (identical parent output). Deregister + retry once.
+                    let _ = self.ctx.deregister_table(&table_name);
+                    let df2 =
+                        datafusion::prelude::DataFrame::new(self.ctx.state(), input_plan.clone());
+                    self.ctx
+                        .register_table(&table_name, df2.into_view())
+                        .map_err(|e| {
+                            datafusion::error::DataFusionError::Plan(format!(
+                                "Failed to register input_{}: {} (first: {})",
+                                i, e, first
+                            ))
+                        })?;
+                }
             }
 
             // WORKAROUND for DataFusion 52.1.0 sql() limitation with $1 placeholders

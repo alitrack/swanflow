@@ -615,22 +615,27 @@ impl SwanFlowEngine {
         let df_cache_dir = self.cache_dir.clone();
         let df_run_id = Uuid::new_v4().to_string();
         let df_wf_name = workflow.name.clone();
-        // Predecessor map for staged conditional evaluation (node_id -> [pred ids])
-        let mut wf_pred_map: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-        for node_idx in workflow.graph.node_indices() {
-            let nid = workflow.graph[node_idx].id;
-            let preds: Vec<Uuid> = workflow
-                .graph
-                .edges_directed(node_idx, petgraph::Direction::Incoming)
-                .filter_map(|e| {
-                    workflow
-                        .graph
-                        .node_weight(e.source())
-                        .map(|n| n.id)
-                })
-                .collect();
-            wf_pred_map.insert(nid, preds);
+        // Predecessor map for staged conditional evaluation (node_id -> [pred ids]).
+        // Recurses into sub_workflows so inner conditional nodes can find their preds.
+        fn collect_preds(
+            wf: &crate::core::graph::Workflow,
+            map: &mut HashMap<Uuid, Vec<Uuid>>,
+        ) {
+            for node_idx in wf.graph.node_indices() {
+                let node = &wf.graph[node_idx];
+                let preds: Vec<Uuid> = wf
+                    .graph
+                    .edges_directed(node_idx, petgraph::Direction::Incoming)
+                    .filter_map(|e| wf.graph.node_weight(e.source()).map(|n| n.id))
+                    .collect();
+                map.insert(node.id, preds);
+                if let Some(sub) = &node.sub_workflow {
+                    collect_preds(sub, map);
+                }
+            }
         }
+        let mut wf_pred_map: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        collect_preds(workflow, &mut wf_pred_map);
         let workflow_pred_ids = Arc::new(wf_pred_map);
         let df_total_levels = stages.len();
         let df_max_cache = self.max_cache_size_mb;
