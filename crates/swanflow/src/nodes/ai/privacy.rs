@@ -1,6 +1,24 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use datafusion::arrow::array::{StringArray, StringBuilder, UInt32Builder};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::error::{DataFusionError, Result as DFResult};
+use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::LogicalPlan;
+use datafusion::physical_plan::{
+    coalesce_partitions::CoalescePartitionsExec, DisplayAs, DisplayFormatType,
+    ExecutionPlan, PlanProperties,
+};
+use datafusion::physical_expr::EquivalenceProperties;
+use futures::stream::Stream;
+use futures::StreamExt;
+use std::any::Any;
+use std::fmt;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -239,12 +257,121 @@ impl NodeBehavior for PiiDetectorNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
             return Err(anyhow!("PII Detector requires one input plan"));
         }
-        Ok(vec![inputs[0].clone()])
+        let column = config
+            .get("column")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text")
+            .to_string();
+        let node = Arc::new(PiiLogical {
+            input: inputs[0].clone(),
+            column,
+            mode: PiiMode::Detect,
+        });
+        Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
+            node,
+        })])
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum PiiMode {
+    Detect,
+    Mask,
+}
+
+#[derive(Clone)]
+pub struct PiiLogical {
+    pub input: LogicalPlan,
+    pub column: String,
+    pub mode: PiiMode,
+}
+
+impl fmt::Debug for PiiLogical {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PiiLogical")
+            .field("column", &self.column)
+            .field("mode", &self.mode)
+            .finish()
+    }
+}
+
+impl PartialEq for PiiLogical {
+    fn eq(&self, other: &Self) -> bool {
+        self.column == other.column && self.mode == other.mode
+    }
+}
+impl Eq for PiiLogical {}
+impl std::hash::Hash for PiiLogical {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.column.hash(state);
+        format!("{:?}", self.mode).hash(state);
+    }
+}
+impl PartialOrd for PiiLogical {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for PiiLogical {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.column.clone(), format!("{:?}", self.mode))
+            .cmp(&(other.column.clone(), format!("{:?}", other.mode)))
+    }
+}
+
+impl datafusion::logical_expr::UserDefinedLogicalNodeCore for PiiLogical {
+    fn name(&self) -> &str {
+        "PiiLogical"
+    }
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![&self.input]
+    }
+    fn schema(&self) -> &DFSchemaRef {
+        lazy_static::lazy_static! {
+            static ref DETECT_SCHEMA: DFSchemaRef = Arc::new(
+                DFSchema::try_from(Schema::new(vec![
+                    Field::new("text", DataType::Utf8, true),
+                    Field::new("match_count", DataType::UInt32, true),
+                    Field::new("matches_json", DataType::Utf8, true),
+                ]))
+                .unwrap(),
+            );
+            static ref MASK_SCHEMA: DFSchemaRef = Arc::new(
+                DFSchema::try_from(Schema::new(vec![
+                    Field::new("text", DataType::Utf8, true),
+                    Field::new("masked_text", DataType::Utf8, true),
+                    Field::new("replacements_json", DataType::Utf8, true),
+                ]))
+                .unwrap(),
+            );
+        }
+        if self.mode == PiiMode::Detect {
+            &DETECT_SCHEMA
+        } else {
+            &MASK_SCHEMA
+        }
+    }
+    fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
+        vec![]
+    }
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "PiiLogical(column={}, mode={:?})", self.column, self.mode)
+    }
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<datafusion::logical_expr::Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> std::result::Result<Self, DataFusionError> {
+        Ok(Self {
+            input: inputs[0].clone(),
+            column: self.column.clone(),
+            mode: self.mode,
+        })
     }
 }
 
@@ -364,13 +491,263 @@ impl NodeBehavior for PiiMaskerNode {
     async fn propose_plan(
         &self,
         inputs: Vec<LogicalPlan>,
-        _config: &JsonValue,
+        config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
             return Err(anyhow!("PII Masker requires one input plan"));
         }
-        Ok(vec![inputs[0].clone()])
+        let column = config
+            .get("column")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text")
+            .to_string();
+        let node = Arc::new(PiiLogical {
+            input: inputs[0].clone(),
+            column,
+            mode: PiiMode::Mask,
+        });
+        Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
+            node,
+        })])
     }
+}
+
+pub struct PiiExec {
+    input: Arc<dyn ExecutionPlan>,
+    column: String,
+    mode: PiiMode,
+    cache: PlanProperties,
+}
+
+impl PiiExec {
+    pub fn new(input: Arc<dyn ExecutionPlan>, column: String, mode: PiiMode) -> Self {
+        let input: Arc<dyn ExecutionPlan> =
+            Arc::new(CoalescePartitionsExec::new(input));
+        let schema = match mode {
+            PiiMode::Detect => Schema::new(vec![
+                Field::new("text", DataType::Utf8, true),
+                Field::new("match_count", DataType::UInt32, true),
+                Field::new("matches_json", DataType::Utf8, true),
+            ]),
+            PiiMode::Mask => Schema::new(vec![
+                Field::new("text", DataType::Utf8, true),
+                Field::new("masked_text", DataType::Utf8, true),
+                Field::new("replacements_json", DataType::Utf8, true),
+            ]),
+        };
+        let cache = PlanProperties::new(
+            EquivalenceProperties::new(Arc::new(schema)),
+            datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
+            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
+            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
+        );
+        Self {
+            input,
+            column,
+            mode,
+            cache,
+        }
+    }
+    fn out_schema(&self) -> SchemaRef {
+        match self.mode {
+            PiiMode::Detect => Arc::new(Schema::new(vec![
+                Field::new("text", DataType::Utf8, true),
+                Field::new("match_count", DataType::UInt32, true),
+                Field::new("matches_json", DataType::Utf8, true),
+            ])),
+            PiiMode::Mask => Arc::new(Schema::new(vec![
+                Field::new("text", DataType::Utf8, true),
+                Field::new("masked_text", DataType::Utf8, true),
+                Field::new("replacements_json", DataType::Utf8, true),
+            ])),
+        }
+    }
+}
+
+impl fmt::Debug for PiiExec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PiiExec")
+            .field("column", &self.column)
+            .field("mode", &self.mode)
+            .finish()
+    }
+}
+
+impl DisplayAs for PiiExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "PiiExec(column={}, mode={:?})", self.column, self.mode)
+    }
+}
+
+impl ExecutionPlan for PiiExec {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn schema(&self) -> SchemaRef {
+        self.out_schema()
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        Ok(Arc::new(Self::new(
+            children[0].clone(),
+            self.column.clone(),
+            self.mode,
+        )))
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> std::result::Result<SendableRecordBatchStream, DataFusionError> {
+        let input = self.input.execute(partition, context)?;
+        Ok(Box::pin(PiiStream {
+            input,
+            column: self.column.clone(),
+            mode: self.mode,
+            state: PiiStreamState::PollingInput,
+        }))
+    }
+    fn properties(&self) -> &PlanProperties {
+        &self.cache
+    }
+    fn name(&self) -> &str {
+        "PiiExec"
+    }
+}
+
+enum PiiStreamState {
+    PollingInput,
+    Done,
+}
+
+struct PiiStream {
+    input: SendableRecordBatchStream,
+    column: String,
+    mode: PiiMode,
+    state: PiiStreamState,
+}
+
+impl Stream for PiiStream {
+    type Item = std::result::Result<RecordBatch, DataFusionError>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match &mut self.state {
+            PiiStreamState::PollingInput => match self.input.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    // resolve column index by name (fallback: first column)
+                    let idx = batch
+                        .schema()
+                        .index_of(self.column.as_str())
+                        .unwrap_or(0);
+                    let col = batch.column(idx);
+                    let texts = col.as_any().downcast_ref::<StringArray>();
+                    let texts = match texts {
+                        Some(a) => a,
+                        None => {
+                            // cast non-string columns to string via display
+                            let n = batch.num_rows();
+                            let owned: Vec<String> = (0..n)
+                                .map(|i| arrow_scalar_to_string(col, i))
+                                .collect();
+                            &StringArray::from(owned)
+                        }
+                    };
+                    let detector = PiiDetectorNode;
+                    let masker = PiiMaskerNode;
+                    let n = batch.num_rows();
+                    let mut text_b = StringBuilder::new();
+                    let mut count_b = UInt32Builder::new();
+                    let mut mjson_b = StringBuilder::new();
+                    let mut masked_b = StringBuilder::new();
+                    let mut rjson_b = StringBuilder::new();
+                    for i in 0..n {
+                        let text = texts.value(i);
+                        text_b.append_value(text);
+                        match self.mode {
+                            PiiMode::Detect => {
+                                let det = detector.detect_pii(text, &serde_json::json!({}))
+                                    .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                                count_b.append_value(det.matches.len() as u32);
+                                mjson_b.append_value(serde_json::to_string(&det.matches).unwrap_or_default());
+                            }
+                            PiiMode::Mask => {
+                                let mask_cfg = serde_json::json!({});
+                                let m = masker.mask_pii(text, &mask_cfg)
+                                    .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                                masked_b.append_value(m.masked_text);
+                                rjson_b.append_value(serde_json::to_string(&m.replacements).unwrap_or_default());
+                            }
+                        }
+                    }
+                    let schema = match self.mode {
+                        PiiMode::Detect => Arc::new(Schema::new(vec![
+                            Field::new("text", DataType::Utf8, true),
+                            Field::new("match_count", DataType::UInt32, true),
+                            Field::new("matches_json", DataType::Utf8, true),
+                        ])),
+                        PiiMode::Mask => Arc::new(Schema::new(vec![
+                            Field::new("text", DataType::Utf8, true),
+                            Field::new("masked_text", DataType::Utf8, true),
+                            Field::new("replacements_json", DataType::Utf8, true),
+                        ])),
+                    };
+                    let batch_out = match self.mode {
+                        PiiMode::Detect => RecordBatch::try_new(
+                            schema,
+                            vec![
+                                Arc::new(text_b.finish()),
+                                Arc::new(count_b.finish()),
+                                Arc::new(mjson_b.finish()),
+                            ],
+                        ),
+                        PiiMode::Mask => RecordBatch::try_new(
+                            schema,
+                            vec![
+                                Arc::new(text_b.finish()),
+                                Arc::new(masked_b.finish()),
+                                Arc::new(rjson_b.finish()),
+                            ],
+                        ),
+                    }
+                    .map_err(|e| DataFusionError::Execution(format!("pii batch build: {}", e)))?;
+                    Poll::Ready(Some(Ok(batch_out)))
+                }
+                Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+                Poll::Ready(None) => {
+                    self.state = PiiStreamState::Done;
+                    Poll::Ready(None)
+                }
+                Poll::Pending => Poll::Pending,
+            },
+            PiiStreamState::Done => Poll::Ready(None),
+        }
+    }
+}
+
+impl datafusion::physical_plan::RecordBatchStream for PiiStream {
+    fn schema(&self) -> SchemaRef {
+        match self.mode {
+            PiiMode::Detect => Arc::new(Schema::new(vec![
+                Field::new("text", DataType::Utf8, true),
+                Field::new("match_count", DataType::UInt32, true),
+                Field::new("matches_json", DataType::Utf8, true),
+            ])),
+            PiiMode::Mask => Arc::new(Schema::new(vec![
+                Field::new("text", DataType::Utf8, true),
+                Field::new("masked_text", DataType::Utf8, true),
+                Field::new("replacements_json", DataType::Utf8, true),
+            ])),
+        }
+    }
+}
+
+fn arrow_scalar_to_string(col: &dyn datafusion::arrow::array::Array, i: usize) -> String {
+    use datafusion::arrow::util::display::array_value_to_string;
+    array_value_to_string(col, i).unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -493,5 +870,62 @@ impl NodeBehavior for PolicyPrivacyGateNode {
             return Err(anyhow!("Policy & Privacy Gate requires one input plan"));
         }
         Ok(vec![inputs[0].clone()])
+    }
+}
+
+#[cfg(test)]
+mod exec_tests {
+    use super::*;
+
+    #[test]
+    fn test_pii_logical_hash_eq() {
+        let a = PiiLogical {
+            input: LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(DFSchema::empty()),
+            }),
+            column: "text".to_string(),
+            mode: PiiMode::Detect,
+        };
+        let b = PiiLogical {
+            input: a.input.clone(),
+            column: "text".to_string(),
+            mode: PiiMode::Detect,
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_pii_mode_schemas_differ() {
+        let det = PiiLogical {
+            input: LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(DFSchema::empty()),
+            }),
+            column: "t".into(),
+            mode: PiiMode::Detect,
+        };
+        let msk = PiiLogical {
+            input: det.input.clone(),
+            column: "t".into(),
+            mode: PiiMode::Mask,
+        };
+        use datafusion::logical_expr::UserDefinedLogicalNodeCore;
+        assert_ne!(det.schema(), msk.schema());
+        assert_eq!(det.schema().fields().len(), 3);
+    }
+
+    #[test]
+    fn test_detect_mask_roundtrip_semantics() {
+        let det = PiiDetectorNode;
+        let msk = PiiMaskerNode;
+        let text = "mail bob@x.io or 415-555-1234";
+        let d = det.detect_pii(text, &serde_json::json!({})).unwrap();
+        assert_eq!(d.matches.len(), 2);
+        let m = msk.mask_pii(text, &serde_json::json!({})).unwrap();
+        assert!(m.masked_text.contains("<PII_001>"));
+        assert!(!m.masked_text.contains("bob@x.io"));
+        let restored = msk.demask_pii(&m.masked_text, &m.replacements);
+        assert_eq!(restored, text);
     }
 }

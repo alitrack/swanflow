@@ -73,6 +73,18 @@ impl ExtensionPlanner for SwanFlowPlanner {
         if let Some(missing) = node.as_any().downcast_ref::<MissingNodeLogical>() {
             return Ok(Some(Arc::new(MissingNodeExec::new(missing))));
         }
+        if let Some(pii) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::privacy::PiiLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::privacy::PiiExec::new(
+                    physical_inputs[0].clone(),
+                    pii.column.clone(),
+                    pii.mode,
+                ),
+            )));
+        }
         if let Some(entity_port) = node
             .as_any()
             .downcast_ref::<crate::nodes::ai::graph::EntityPortLogical>()
