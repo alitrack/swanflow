@@ -615,7 +615,24 @@ fn write_sample_parquet(path: &std::path::Path, batch: &RecordBatch) -> Result<(
 
 fn map_duck_type(col_type: &str) -> datafusion::arrow::datatypes::DataType {
     use datafusion::arrow::datatypes::DataType;
-    match col_type.to_uppercase().as_str() {
+    let upper = col_type.to_uppercase();
+    // Decimal (incl. HUGEINT results which duckdb COPYs to parquet as
+    // DECIMAL(38,x), Debug-formatted "Decimal(38, 0)" / "Decimal128(38, 0)"):
+    // scale 0 -> Int64, else Float64. Without this branch sum()/window sums
+    // silently became Utf8 columns ('10.0') — wf43/wf48 first E2E caught it.
+    if upper.starts_with("DECIMAL") {
+        let scale = upper
+            .rsplit(',')
+            .next()
+            .and_then(|s| s.trim_end_matches(')').trim().parse::<i32>().ok())
+            .unwrap_or(0);
+        return if scale == 0 {
+            DataType::Int64
+        } else {
+            DataType::Float64
+        };
+    }
+    match upper.as_str() {
         "BOOLEAN" => DataType::Boolean,
         "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "INT8" | "INT16" | "INT32"
         | "INT64" | "UINT8" | "UINT16" | "UINT32" | "UINT64" => DataType::Int64,
@@ -672,8 +689,12 @@ mod tests {
 
     #[test]
     fn test_map_duck_type() {
-        assert_eq!(map_duck_type("BIGINT"), datafusion::arrow::datatypes::DataType::Int64);
-        assert_eq!(map_duck_type("DOUBLE"), datafusion::arrow::datatypes::DataType::Float64);
-        assert_eq!(map_duck_type("VARCHAR"), datafusion::arrow::datatypes::DataType::Utf8);
+        use datafusion::arrow::datatypes::DataType;
+        assert_eq!(map_duck_type("BIGINT"), DataType::Int64);
+        assert_eq!(map_duck_type("DOUBLE"), DataType::Float64);
+        assert_eq!(map_duck_type("VARCHAR"), DataType::Utf8);
+        // HUGEINT/Decimal family: scale 0 -> Int64, fractional -> Float64
+        assert_eq!(map_duck_type("Decimal(38, 0)"), DataType::Int64);
+        assert_eq!(map_duck_type("Decimal128(38, 3)"), DataType::Float64);
     }
 }
