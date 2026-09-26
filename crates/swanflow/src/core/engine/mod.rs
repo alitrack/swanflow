@@ -38,6 +38,7 @@ use crate::core::observer::{
     MaterializerExec, MaterializerLogical, StateProbeExec, StateProbeLogical,
 };
 use crate::nodes::missing::{MissingNodeExec, MissingNodeLogical};
+use petgraph::visit::EdgeRef;
 use crate::nodes::registry::NodeRegistry;
 use crate::nodes::script::python::{PythonExec, PythonLogical};
 use crate::nodes::sql::SqlProxyLogical;
@@ -614,6 +615,23 @@ impl SwanFlowEngine {
         let df_cache_dir = self.cache_dir.clone();
         let df_run_id = Uuid::new_v4().to_string();
         let df_wf_name = workflow.name.clone();
+        // Predecessor map for staged conditional evaluation (node_id -> [pred ids])
+        let mut wf_pred_map: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        for node_idx in workflow.graph.node_indices() {
+            let nid = workflow.graph[node_idx].id;
+            let preds: Vec<Uuid> = workflow
+                .graph
+                .edges_directed(node_idx, petgraph::Direction::Incoming)
+                .filter_map(|e| {
+                    workflow
+                        .graph
+                        .node_weight(e.source())
+                        .map(|n| n.id)
+                })
+                .collect();
+            wf_pred_map.insert(nid, preds);
+        }
+        let workflow_pred_ids = Arc::new(wf_pred_map);
         let df_total_levels = stages.len();
         let df_max_cache = self.max_cache_size_mb;
 
@@ -654,6 +672,66 @@ impl SwanFlowEngine {
                     let node_type = stage_plan.node_type.clone();
                     let port = stage_plan.port;
                     let logical_plan = stage_plan.plan;
+                    let conditional_when = stage_plan.conditional_when.clone();
+                    let error_mode = stage_plan.error_mode.clone();
+
+                    // ── Conditional mode (staged path) ─────────────────────
+                    // Skip this stage unless some predecessor materialized
+                    // cell contains the `when` substring.
+                    if let Some(when) = &conditional_when {
+                        // evaluate against workflow graph predecessors
+                        let mut matched = false;
+                        {
+                            let map = &workflow_pred_ids;
+                            {
+                                let mut found = false;
+                                if let Some(preds) = map.get(&node_id) {
+                                    for pid in preds {
+                                        let t = format!("node_{}", &pid.to_string()[..8]);
+                                        if let Ok(df) =
+                                            ctx_shared.sql(&format!("SELECT * FROM \"{}\"", t)).await
+                                        {
+                                            if let Ok(batches) = df.collect().await {
+                                                use datafusion::arrow::util::display::{
+                                                    ArrayFormatter, FormatOptions,
+                                                };
+                                                let opts = FormatOptions::default();
+                                                'outer: for b in &batches {
+                                                    for c in 0..b.num_columns() {
+                                                        if let Ok(fmt) =
+                                                            ArrayFormatter::try_new(b.column(c), &opts)
+                                                        {
+                                                            for r in 0..b.num_rows() {
+                                                                if fmt.value(r).to_string().contains(when.as_str()) {
+                                                                    found = true;
+                                                                    break 'outer;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if found {
+                                            break;
+                                        }
+                                    }
+                                }
+                                matched = found;
+                            }
+                        }
+                        if !matched {
+                            println!(
+                                "DEBUG: Conditional stage {} skipped (condition not met)",
+                                node_id
+                            );
+                            let _ = tx.send(NodeEvent::StateChanged {
+                                node_id,
+                                state: crate::nodes::NodeState::Executed,
+                            });
+                            continue;
+                        }
+                    }
                     println!(
                         "DEBUG: Stage Execution for level {}, node {}, port {}",
                         level, node_id, port
@@ -745,10 +823,30 @@ impl SwanFlowEngine {
                                         }
                                     }
                                     if !handled {
-                                        let _ = tx.send(NodeEvent::Error {
-                                            node_id,
-                                            message: diagnostic.to_event_message(),
-                                        });
+                                        match &error_mode {
+                                            crate::core::graph::ErrorMode::Skip => {
+                                                println!(
+                                                    "DEBUG: node {} error swallowed (error_mode=skip)",
+                                                    node_id
+                                                );
+                                            }
+                                            crate::core::graph::ErrorMode::Retry(max) => {
+                                                println!(
+                                                    "DEBUG: node {} retry exhausted ({}), surfacing error",
+                                                    node_id, max
+                                                );
+                                                let _ = tx.send(NodeEvent::Error {
+                                                    node_id,
+                                                    message: diagnostic.to_event_message(),
+                                                });
+                                            }
+                                            crate::core::graph::ErrorMode::Fail => {
+                                                let _ = tx.send(NodeEvent::Error {
+                                                    node_id,
+                                                    message: diagnostic.to_event_message(),
+                                                });
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -846,10 +944,30 @@ impl SwanFlowEngine {
                                         }
                                     }
                                     if !handled {
-                                        let _ = tx.send(NodeEvent::Error {
-                                            node_id,
-                                            message: diagnostic.to_event_message(),
-                                        });
+                                        match &error_mode {
+                                            crate::core::graph::ErrorMode::Skip => {
+                                                println!(
+                                                    "DEBUG: node {} error swallowed (error_mode=skip)",
+                                                    node_id
+                                                );
+                                            }
+                                            crate::core::graph::ErrorMode::Retry(max) => {
+                                                println!(
+                                                    "DEBUG: node {} retry exhausted ({}), surfacing error",
+                                                    node_id, max
+                                                );
+                                                let _ = tx.send(NodeEvent::Error {
+                                                    node_id,
+                                                    message: diagnostic.to_event_message(),
+                                                });
+                                            }
+                                            crate::core::graph::ErrorMode::Fail => {
+                                                let _ = tx.send(NodeEvent::Error {
+                                                    node_id,
+                                                    message: diagnostic.to_event_message(),
+                                                });
+                                            }
+                                        }
                                     }
                                 }
                             }

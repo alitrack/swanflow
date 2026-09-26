@@ -24,6 +24,11 @@ pub struct CompiledStagePlan {
     pub node_type: String,
     pub port: usize,
     pub plan: LogicalPlan,
+    /// Conditional mode: run this stage only if any predecessor cell
+    /// contains this substring. None = unconditional.
+    pub conditional_when: Option<String>,
+    /// Error handling for this stage: fail / skip / retry(n).
+    pub error_mode: crate::core::graph::ErrorMode,
 }
 
 pub struct WorkflowCompiler {
@@ -215,6 +220,14 @@ impl WorkflowCompiler {
                     node_type: node.type_id.clone(),
                     port,
                     plan,
+                    conditional_when: if node.mode
+                        == crate::core::graph::StepMode::Conditional
+                    {
+                        node.when.clone()
+                    } else {
+                        None
+                    },
+                    error_mode: node.error_mode.clone(),
                 });
             }
         }
