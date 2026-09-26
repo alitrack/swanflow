@@ -521,15 +521,28 @@ impl NodeBehavior for VariableCreatorNode {
             anyhow::bail!("VariableCreatorNode requires at least one variable definition");
         }
 
-        // Build a SQL SELECT with literal values for each key/value pair
+        // Build a SQL SELECT with literal values for each key/value pair.
+        // NOTE: the compiler injects reserved metadata keys (e.g. impl_version)
+        // into the config object before it reaches the node — skip anything
+        // that is not a string-valued user variable instead of erroring.
+        // Caught by wf64 E2E (Variable 'impl_version' must be a string).
+        const RESERVED: &[&str] = &["impl_version", "config_version"];
         let mut select_parts = Vec::new();
+        let mut user_vars = 0usize;
         for (key, value) in obj {
+            if RESERVED.contains(&key.as_str()) {
+                continue;
+            }
             let val_str = value
                 .as_str()
                 .ok_or_else(|| anyhow!("Variable '{}' must be a string", key))?;
+            user_vars += 1;
             // Escape single quotes in the value by doubling them
             let escaped = val_str.replace('\'', "''");
             select_parts.push(format!("'{}' as \"{}\"", escaped, key));
+        }
+        if user_vars == 0 {
+            anyhow::bail!("VariableCreatorNode requires at least one string-valued variable");
         }
 
         let ctx = SessionContext::new();
