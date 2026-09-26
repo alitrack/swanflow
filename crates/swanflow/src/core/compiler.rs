@@ -29,6 +29,8 @@ pub struct CompiledStagePlan {
     pub conditional_when: Option<String>,
     /// Error handling for this stage: fail / skip / retry(n).
     pub error_mode: crate::core::graph::ErrorMode,
+    /// Step mode carried through for engine-side handling (e.g. Collect).
+    pub mode: crate::core::graph::StepMode,
 }
 
 pub struct WorkflowCompiler {
@@ -262,6 +264,7 @@ impl WorkflowCompiler {
                         None
                     },
                     error_mode: node.error_mode.clone(),
+                    mode: node.mode.clone(),
                 });
             }
         }

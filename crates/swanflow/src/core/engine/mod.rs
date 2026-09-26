@@ -679,6 +679,7 @@ impl SwanFlowEngine {
                     let logical_plan = stage_plan.plan;
                     let conditional_when = stage_plan.conditional_when.clone();
                     let error_mode = stage_plan.error_mode.clone();
+                    let sp_mode = stage_plan.mode.clone();
 
                     // ── Conditional mode (staged path) ─────────────────────
                     // Skip this stage unless some predecessor materialized
@@ -741,6 +742,74 @@ impl SwanFlowEngine {
                         "DEBUG: Stage Execution for level {}, node {}, port {}",
                         level, node_id, port
                     );
+
+                    // ── Collect mode: materialize a single-row/single-column table
+                    // concatenating all predecessor cell values (data-semantics
+                    // counterpart of the legacy step-context "input" variable).
+                    if sp_mode == crate::core::graph::StepMode::Collect {
+                        use datafusion::arrow::util::display::{
+                            ArrayFormatter, FormatOptions,
+                        };
+                        use datafusion::arrow::array::StringArray;
+                        use datafusion::arrow::record_batch::RecordBatch;
+                        let mut collected: Vec<String> = Vec::new();
+                        if let Some(preds) = workflow_pred_ids.get(&node_id) {
+                            for pid in preds {
+                                let tname = format!("node_{}", &pid.to_string()[..8]);
+                                if let Ok(df) = ctx_shared
+                                    .sql(&format!("SELECT * FROM \"{}\"", tname))
+                                    .await
+                                {
+                                    if let Ok(batches) = df.collect().await {
+                                        let opts = FormatOptions::default();
+                                        'col_outer: for b in &batches {
+                                            for c in 0..b.num_columns() {
+                                                if let Ok(fmt) =
+                                                    ArrayFormatter::try_new(b.column(c), &opts)
+                                                {
+                                                    for r in 0..b.num_rows() {
+                                                        collected.push(
+                                                            fmt.value(r).to_string(),
+                                                        );
+                                                        if collected.len() > 100_000 {
+                                                            break 'col_outer;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let joined = collected.join("\n---\n");
+                        let batch = RecordBatch::try_from_iter_with_nullable(vec![(
+                            "collected".to_string(),
+                            std::sync::Arc::new(StringArray::from(vec![joined.clone()]))
+                                as std::sync::Arc<dyn datafusion::arrow::array::Array>,
+                            true,
+                        )])
+                        .expect("collect batch build");
+                        let table_name = format!("node_{}", &node_id.to_string()[..8]);
+                        if let Ok(df) = ctx_shared.read_batches(vec![batch]) {
+                            let _ = ctx_shared.register_table(&table_name, df.into_view());
+                            let _ = tx.send(NodeEvent::Materialized {
+                                node_id,
+                                table_name,
+                                parquet_path: "".to_string(),
+                            });
+                        }
+                        println!(
+                            "DEBUG: Collect stage {} gathered {} cells",
+                            node_id,
+                            collected.len()
+                        );
+                        let _ = tx.send(NodeEvent::StateChanged {
+                            node_id,
+                            state: crate::nodes::NodeState::Executed,
+                        });
+                        continue;
+                    }
 
                     // Emit Running (StateProbeExec also sends this during stream, but
                     // emit early here for immediate feedback before planning starts)
