@@ -148,6 +148,22 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 Arc::new(mcp.schema.as_arrow().clone()),
             ))));
         }
+        // core.ai.fact_claim_verifier: real implementation since 2026-09-28
+        // (was a pass-through shell; see swanflow-workflows/docs/shell_nodes_audit.md).
+        // Scores claim tokens against the evidence corpus of the input batch.
+        if let Some(fv) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::verification::FactVerifyLogical>()
+        {
+            return Ok(Some(Arc::new(crate::nodes::ai::verification::FactVerifyExec::new(
+                f32::from_bits(fv.threshold_bits),
+                fv.require_evidence,
+                "claim".to_string(),
+                "evidence".to_string(),
+                Arc::new(fv.schema.as_arrow().clone()),
+                physical_inputs[0].clone(),
+            ))));
+        }
         // core.ai.mcp_tool: the logical node was registered and planned by
         // McpToolNode::propose_plan but never lowered here — every workflow
         // using it failed physical planning with "No physical plan found for

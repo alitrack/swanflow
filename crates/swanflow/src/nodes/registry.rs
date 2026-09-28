@@ -284,7 +284,6 @@ mod shell_marker_tests {
             "core.ai.run_state_store",
             "core.ai.observability_audit_ledger",
             "core.ai.citation_tracker",
-            "core.ai.fact_claim_verifier",
             "core.ai.query_planning",
             "core.ai.structured_io_contract",
         ];
