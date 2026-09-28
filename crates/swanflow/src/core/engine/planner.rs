@@ -148,6 +148,25 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 Arc::new(mcp.schema.as_arrow().clone()),
             ))));
         }
+        // core.ai.mcp_tool: the logical node was registered and planned by
+        // McpToolNode::propose_plan but never lowered here — every workflow
+        // using it failed physical planning with "No physical plan found for
+        // user defined logical node: McpTool" (McpToolExec was unreachable
+        // dead code). Caught by wf163 E2E design audit 2026-09-28.
+        if let Some(mcp) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::mcp::McpToolLogical>()
+        {
+            let tool_args =
+                serde_json::from_str(&mcp.tool_args).unwrap_or(serde_json::Value::Null);
+            return Ok(Some(Arc::new(crate::nodes::mcp::McpToolExec::new(
+                mcp.server_command.clone(),
+                mcp.server_args.clone(),
+                mcp.tool_name.clone(),
+                tool_args,
+                Arc::new(mcp.schema.as_arrow().clone()),
+            ))));
+        }
         if let Some(gap) = node
             .as_any()
             .downcast_ref::<crate::nodes::ai::graph::InformationGapLogical>()
