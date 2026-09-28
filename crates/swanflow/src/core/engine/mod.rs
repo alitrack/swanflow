@@ -927,9 +927,15 @@ impl SwanFlowEngine {
                         }
                         Err(e) => {
                             // RETRY after Sync
-                            println!("DEBUG: Level {} node {} port {} planning failed, retrying after sync...", level, node_id, port);
+                            // Unified retry policy (core/retry.rs): fixed 500ms
+                            // sleep replaced by the shared exponential backoff.
+                            let retry_delay_ms = crate::core::retry::backoff_delay_ms(
+                                crate::core::retry::DEFAULT_BASE_DELAY_MS,
+                                0,
+                            );
+                            println!("DEBUG: Level {} node {} port {} planning failed, retrying after sync (backoff {}ms)...", level, node_id, port, retry_delay_ms);
                             sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
 
                             let state = ctx_shared.state();
                             let state = SessionStateBuilder::new_from_existing(state)
@@ -1268,12 +1274,20 @@ impl SwanFlowEngine {
                         crate::core::graph::ErrorMode::Fail => true,
                         crate::core::graph::ErrorMode::Skip => false,
                         crate::core::graph::ErrorMode::Retry(max_retries) => {
+                            // Unified retry policy (core/retry.rs): exponential
+                            // backoff instead of the old zero-delay tight loop.
                             let mut retried = false;
                             for attempt in 1..=*max_retries {
-                                println!(
-                                    "DEBUG: Retrying node {} (attempt {}/{})",
-                                    node.id, attempt, max_retries
+                                let delay_ms = crate::core::retry::backoff_delay_ms(
+                                    crate::core::retry::DEFAULT_BASE_DELAY_MS,
+                                    u64::from(attempt - 1),
                                 );
+                                println!(
+                                    "DEBUG: Retrying node {} (attempt {}/{}, backoff {}ms)",
+                                    node.id, attempt, max_retries, delay_ms
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                    .await;
                                 let retry_result = Self::execute_node_with_mode(
                                     &node,
                                     &node_map,

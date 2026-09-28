@@ -642,7 +642,8 @@ impl RerankerNode {
             }
 
             if attempt < max_retries {
-                let sleep_ms = 100u64.saturating_mul(2u64.pow((attempt as u32).min(4)));
+                // Unified retry policy (core/retry.rs)
+                let sleep_ms = crate::core::retry::backoff_delay_ms(100, attempt);
                 std::thread::sleep(Duration::from_millis(sleep_ms));
             }
         }
@@ -768,7 +769,8 @@ impl RerankerNode {
             }
 
             if attempt < max_retries {
-                let sleep_ms = 100u64.saturating_mul(2u64.pow((attempt as u32).min(4)));
+                // Unified retry policy (core/retry.rs)
+                let sleep_ms = crate::core::retry::backoff_delay_ms(100, attempt);
                 std::thread::sleep(Duration::from_millis(sleep_ms));
             }
         }

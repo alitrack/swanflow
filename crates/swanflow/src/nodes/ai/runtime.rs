@@ -39,11 +39,9 @@ impl RetryBackoffGuardNode {
         }
         seen_keys.insert(idempotency_key.clone());
 
-        let mut delays = Vec::with_capacity(max_retries as usize);
-        for n in 0..max_retries {
-            let factor = 2u64.saturating_pow(n as u32);
-            delays.push(base_delay_ms.saturating_mul(factor));
-        }
+        // Delegate to the shared retry policy (core/retry.rs) so the node and
+        // the engine can never drift apart again.
+        let delays = crate::core::retry::backoff_schedule(base_delay_ms, max_retries);
 
         Ok(RetryPlan {
             idempotency_key,
