@@ -186,6 +186,40 @@ pub struct McpToolStream {
     done: bool,
 }
 
+
+/// Build the standard (content, error) RecordBatch from a tools/call result.
+/// Shared by McpToolStream and McpInvokeStream so the two MCP client paths
+/// (LSP Content-Length vs NDJSON stdio) cannot drift apart.
+pub(crate) fn mcp_result_to_batch(
+    val: &JsonValue,
+    schema: SchemaRef,
+) -> Result<RecordBatch, DataFusionError> {
+    let mut content_builder = StringBuilder::new();
+    let mut error_builder = BooleanBuilder::new();
+    if let Some(content_array) = val["content"].as_array() {
+        for block in content_array {
+            if let Some(text) = block["text"].as_str() {
+                content_builder.append_value(text);
+                error_builder.append_value(false);
+            } else {
+                content_builder.append_value(serde_json::to_string(block).unwrap_or_default());
+                error_builder.append_value(false);
+            }
+        }
+    } else {
+        content_builder.append_value(serde_json::to_string(val).unwrap_or_default());
+        error_builder.append_value(val["isError"].as_bool().unwrap_or(false));
+    }
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(content_builder.finish()),
+            Arc::new(error_builder.finish()),
+        ],
+    )
+    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+}
+
 impl Stream for McpToolStream {
     type Item = Result<RecordBatch, DataFusionError>;
 
@@ -218,31 +252,7 @@ impl Stream for McpToolStream {
 
         match res {
             Ok(val) => {
-                let mut content_builder = StringBuilder::new();
-                let mut error_builder = BooleanBuilder::new();
-                if let Some(content_array) = val["content"].as_array() {
-                    for block in content_array {
-                        if let Some(text) = block["text"].as_str() {
-                            content_builder.append_value(text);
-                            error_builder.append_value(false);
-                        } else {
-                            content_builder
-                                .append_value(serde_json::to_string(block).unwrap_or_default());
-                            error_builder.append_value(false);
-                        }
-                    }
-                } else {
-                    content_builder.append_value(serde_json::to_string(&val).unwrap_or_default());
-                    error_builder.append_value(val["isError"].as_bool().unwrap_or(false));
-                }
-                let batch = RecordBatch::try_new(
-                    self.schema.clone(),
-                    vec![
-                        Arc::new(content_builder.finish()),
-                        Arc::new(error_builder.finish()),
-                    ],
-                )
-                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                let batch = crate::nodes::mcp::mcp_result_to_batch(&val, self.schema.clone())?;
                 Poll::Ready(Some(Ok(batch)))
             }
             Err(e) => Poll::Ready(Some(Err(DataFusionError::Execution(format!(
