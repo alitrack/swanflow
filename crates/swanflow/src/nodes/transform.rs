@@ -465,7 +465,28 @@ impl NodeBehavior for ProfilerNode {
                 "CAST(SUM(CASE WHEN \"{0}\" IS NULL THEN 1 ELSE 0 END) AS DOUBLE) / COUNT(*) as \"{0}_null_ratio\"",
                 col
             ));
-            select_parts.push(format!("AVG(\"{0}\") as \"{0}_avg\"", col));
+            // AVG only for numeric columns: DataFusion has no implicit
+            // Utf8->Float64 coercion for avg (caught by wf157 E2E:
+            // profiler on a schema with string columns failed planning).
+            let is_numeric = matches!(
+                field.data_type(),
+                datafusion::arrow::datatypes::DataType::Int8
+                    | datafusion::arrow::datatypes::DataType::Int16
+                    | datafusion::arrow::datatypes::DataType::Int32
+                    | datafusion::arrow::datatypes::DataType::Int64
+                    | datafusion::arrow::datatypes::DataType::UInt8
+                    | datafusion::arrow::datatypes::DataType::UInt16
+                    | datafusion::arrow::datatypes::DataType::UInt32
+                    | datafusion::arrow::datatypes::DataType::UInt64
+                    | datafusion::arrow::datatypes::DataType::Float16
+                    | datafusion::arrow::datatypes::DataType::Float32
+                    | datafusion::arrow::datatypes::DataType::Float64
+                    | datafusion::arrow::datatypes::DataType::Decimal128(_, _)
+                    | datafusion::arrow::datatypes::DataType::Decimal256(_, _)
+            );
+            if is_numeric {
+                select_parts.push(format!("AVG(\"{0}\") as \"{0}_avg\"", col));
+            }
         }
 
         ctx.register_table("profile_input", df.into_view())?;
