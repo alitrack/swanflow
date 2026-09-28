@@ -141,7 +141,7 @@ impl NodeBehavior for CheckpointResumeControllerNode {
         NodeSpec {
             type_id: "core.ai.checkpoint_resume_controller".to_string(),
             display_name: "Checkpoint/Resume Controller".to_string(),
-            description: "[SHELL NODE — no runtime behavior] Save and recover deterministic run checkpoints.".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Save and recover deterministic run checkpoints. Deprecated: duplicates the engine's real CheckpointManager (core/engine/checkpoint.rs); this in-memory map is unreachable from the DAG.".to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),
@@ -224,7 +224,7 @@ impl NodeBehavior for RunStateStoreNode {
         NodeSpec {
             type_id: "core.ai.run_state_store".to_string(),
             display_name: "Run-State Store".to_string(),
-            description: "[SHELL NODE — no runtime behavior] Persist deterministic run-scoped key-value state.".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Persist deterministic run-scoped key-value state. Deprecated: in-memory only, zero call sites; durable run state belongs in the engine (next to checkpoint.rs), not a pass-through DAG node.".to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),
@@ -399,7 +399,7 @@ impl NodeBehavior for AgentLoopOrchestratorNode {
         NodeSpec {
             type_id: "core.ai.agent_loop_orchestrator".to_string(),
             display_name: "Agent Loop Orchestrator".to_string(),
-            description: "[SHELL NODE — no runtime behavior] Coordinate bounded iterative agent loop execution.".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Coordinate bounded iterative agent loop execution. Deprecated: a real iterative-loop node exists (core.ai.research_loop); re-implement as an Extension plan if an LLM-agent loop is ever needed.".to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),

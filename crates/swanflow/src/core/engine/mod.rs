@@ -1536,13 +1536,21 @@ impl SwanFlowEngine {
                     // retry loop semantics).
                     let result = match &child_node.error_mode {
                         crate::core::graph::ErrorMode::Retry(max_retries) => {
+                            // Unified retry policy (core/retry.rs): exponential
+                            // backoff instead of the old zero-delay tight loop.
                             let mut last_err: Option<anyhow::Error> = None;
                             let mut ok_output: Option<String> = None;
                             for attempt in 1..=*max_retries {
-                                println!(
-                                    "DEBUG: Retrying node {} (attempt {}/{})",
-                                    child_node.id, attempt, max_retries
+                                let delay_ms = crate::core::retry::backoff_delay_ms(
+                                    crate::core::retry::DEFAULT_BASE_DELAY_MS,
+                                    u64::from(attempt - 1),
                                 );
+                                println!(
+                                    "DEBUG: Retrying node {} (attempt {}/{}, backoff {}ms)",
+                                    child_node.id, attempt, max_retries, delay_ms
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                    .await;
                                 match Self::compile_and_execute_node(
                                     &child_node,
                                     &child_workflow,

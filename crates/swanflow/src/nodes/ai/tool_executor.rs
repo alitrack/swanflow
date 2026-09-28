@@ -54,7 +54,7 @@ impl NodeBehavior for ToolExecutorNode {
         NodeSpec {
             type_id: "core.ai.tool_executor".to_string(),
             display_name: "Tool Executor".to_string(),
-            description: "Wrapper node that normalizes MCP tool invocation output.".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Wrapper node that normalizes MCP tool invocation output. Redundant with core.ai.mcp_invoke / core.ai.mcp_tool (real implementations); Deprecated — prefer those.".to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),

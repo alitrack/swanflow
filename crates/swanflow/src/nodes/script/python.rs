@@ -595,7 +595,7 @@ impl NodeBehavior for PythonUdfNode {
         NodeSpec {
             type_id: "core.flow.python_udf".to_string(),
             display_name: "Register Python UDF".to_string(),
-            description: "Register a custom Python function as a DataFusion UDF".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Register a custom Python function as a DataFusion UDF. Stub: propose_plan returns an empty plan; pending real Extension-based implementation.".to_string(),
             input_ports: vec![],
             output_ports: vec![],
             config_schema: serde_json::json!({

@@ -285,6 +285,8 @@ mod shell_marker_tests {
             "core.ai.observability_audit_ledger",
             "core.ai.query_planning",
             "core.ai.structured_io_contract",
+            "core.ai.tool_executor",
+            "core.flow.python_udf",
         ];
         for type_id in shells {
             let spec = registry
@@ -312,5 +314,32 @@ mod shell_marker_tests {
         assert!(!sql.description.starts_with("[SHELL NODE"));
         let excel = registry.get_node("core.io.excel_read").unwrap().spec();
         assert!(!excel.description.starts_with("[SHELL NODE"));
+    }
+
+    #[test]
+    fn deprecated_shells_carry_disposition_guidance() {
+        // M2 audit disposition: these shells duplicate real engine machinery
+        // or a real sibling node and must say so in their description.
+        let registry = NodeRegistry::default();
+        let deprecated = [
+            ("core.ai.checkpoint_resume_controller", "CheckpointManager"),
+            ("core.ai.run_state_store", "engine"),
+            (
+                "core.ai.agent_loop_orchestrator",
+                "research_loop",
+            ),
+            ("core.ai.tool_executor", "mcp_invoke"),
+        ];
+        for (type_id, hint) in deprecated {
+            let spec = registry.get_node(type_id).unwrap().spec();
+            assert!(
+                spec.description.contains("Deprecated"),
+                "{type_id} description must carry deprecation guidance"
+            );
+            assert!(
+                spec.description.contains(hint),
+                "{type_id} description must point at the real alternative ({hint})"
+            );
+        }
     }
 }
