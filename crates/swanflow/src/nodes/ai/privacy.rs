@@ -271,6 +271,8 @@ impl NodeBehavior for PiiDetectorNode {
             input: inputs[0].clone(),
             column,
             mode: PiiMode::Detect,
+            detect_config: config.clone(),
+            mask_config: serde_json::json!({}),
         });
         Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
             node,
@@ -290,6 +292,12 @@ pub struct PiiLogical {
     pub input: LogicalPlan,
     pub column: String,
     pub mode: PiiMode,
+    /// Real node config for the detector/masker (min_confidence, categories,
+    /// token_prefix). Previously dropped here — the exec passed an empty
+    /// object, so these settings were silently ignored at runtime (sigil
+    /// contracts71 report, finding #1).
+    pub detect_config: JsonValue,
+    pub mask_config: JsonValue,
 }
 
 impl fmt::Debug for PiiLogical {
@@ -297,6 +305,8 @@ impl fmt::Debug for PiiLogical {
         f.debug_struct("PiiLogical")
             .field("column", &self.column)
             .field("mode", &self.mode)
+            .field("detect_config", &self.detect_config)
+            .field("mask_config", &self.mask_config)
             .finish()
     }
 }
@@ -396,6 +406,8 @@ impl datafusion::logical_expr::UserDefinedLogicalNodeCore for PiiLogical {
             input: inputs[0].clone(),
             column: self.column.clone(),
             mode: self.mode.clone(),
+            detect_config: self.detect_config.clone(),
+            mask_config: self.mask_config.clone(),
         })
     }
 }
@@ -530,6 +542,8 @@ impl NodeBehavior for PiiMaskerNode {
             input: inputs[0].clone(),
             column,
             mode: PiiMode::Mask,
+            detect_config: config.clone(),
+            mask_config: config.clone(),
         });
         Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
             node,
@@ -564,11 +578,19 @@ pub struct PiiExec {
     input: Arc<dyn ExecutionPlan>,
     column: String,
     mode: PiiMode,
+    detect_config: JsonValue,
+    mask_config: JsonValue,
     cache: PlanProperties,
 }
 
 impl PiiExec {
-    pub fn new(input: Arc<dyn ExecutionPlan>, column: String, mode: PiiMode) -> Self {
+    pub fn new(
+        input: Arc<dyn ExecutionPlan>,
+        column: String,
+        mode: PiiMode,
+        detect_config: JsonValue,
+        mask_config: JsonValue,
+    ) -> Self {
         let input: Arc<dyn ExecutionPlan> =
             Arc::new(CoalescePartitionsExec::new(input));
         let schema = pii_mode_schema(&mode);
@@ -582,6 +604,8 @@ impl PiiExec {
             input,
             column,
             mode,
+            detect_config,
+            mask_config,
             cache,
         }
     }
@@ -623,6 +647,8 @@ impl ExecutionPlan for PiiExec {
             children[0].clone(),
             self.column.clone(),
             self.mode.clone(),
+            self.detect_config.clone(),
+            self.mask_config.clone(),
         )))
     }
     fn execute(
@@ -635,6 +661,8 @@ impl ExecutionPlan for PiiExec {
             input,
             column: self.column.clone(),
             mode: self.mode.clone(),
+            detect_config: self.detect_config.clone(),
+            mask_config: self.mask_config.clone(),
             state: PiiStreamState::PollingInput,
         }))
     }
@@ -651,10 +679,13 @@ enum PiiStreamState {
     Done,
 }
 
+
 struct PiiStream {
     input: SendableRecordBatchStream,
     column: String,
     mode: PiiMode,
+    detect_config: JsonValue,
+    mask_config: JsonValue,
     state: PiiStreamState,
 }
 
@@ -699,20 +730,19 @@ impl Stream for PiiStream {
                         text_b.append_value(text);
                         match &self.mode {
                             PiiMode::Detect => {
-                                let det = detector.detect_pii(text, &serde_json::json!({}))
+                                let det = detector.detect_pii(text, &self.detect_config)
                                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
                                 count_b.append_value(det.matches.len() as u32);
                                 mjson_b.append_value(serde_json::to_string(&det.matches).unwrap_or_default());
                             }
                             PiiMode::Mask => {
-                                let mask_cfg = serde_json::json!({});
-                                let m = masker.mask_pii(text, &mask_cfg)
+                                let m = masker.mask_pii(text, &self.mask_config)
                                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
                                 masked_b.append_value(m.masked_text);
                                 rjson_b.append_value(serde_json::to_string(&m.replacements).unwrap_or_default());
                             }
                             PiiMode::Gate(action, cfg) => {
-                                let det = detector.detect_pii(text, &serde_json::json!({}))
+                                let det = detector.detect_pii(text, &self.detect_config)
                                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
                                 let gate = PolicyPrivacyGateNode;
                                 let decision = gate.evaluate_policy(action, !det.matches.is_empty(), cfg)
@@ -912,7 +942,9 @@ impl NodeBehavior for PolicyPrivacyGateNode {
         let node = Arc::new(PiiLogical {
             input: inputs[0].clone(),
             column,
-            mode: PiiMode::Gate(action, cfg),
+            mode: PiiMode::Gate(action, cfg.clone()),
+            detect_config: cfg.clone(),
+            mask_config: serde_json::json!({}),
         });
         Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
             node,
@@ -927,6 +959,8 @@ mod exec_tests {
     #[test]
     fn test_pii_logical_hash_eq() {
         let a = PiiLogical {
+            detect_config: serde_json::json!({}),
+            mask_config: serde_json::json!({}),
             input: LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
                 produce_one_row: false,
                 schema: Arc::new(DFSchema::empty()),
@@ -935,6 +969,8 @@ mod exec_tests {
             mode: PiiMode::Detect,
         };
         let b = PiiLogical {
+            detect_config: serde_json::json!({}),
+            mask_config: serde_json::json!({}),
             input: a.input.clone(),
             column: "text".to_string(),
             mode: PiiMode::Detect,
@@ -945,6 +981,8 @@ mod exec_tests {
     #[test]
     fn test_pii_mode_schemas_differ() {
         let det = PiiLogical {
+            detect_config: serde_json::json!({}),
+            mask_config: serde_json::json!({}),
             input: LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
                 produce_one_row: false,
                 schema: Arc::new(DFSchema::empty()),
@@ -953,6 +991,8 @@ mod exec_tests {
             mode: PiiMode::Detect,
         };
         let msk = PiiLogical {
+            detect_config: serde_json::json!({}),
+            mask_config: serde_json::json!({}),
             input: det.input.clone(),
             column: "t".into(),
             mode: PiiMode::Mask,

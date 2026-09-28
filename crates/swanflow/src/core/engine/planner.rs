@@ -95,6 +95,8 @@ impl ExtensionPlanner for SwanFlowPlanner {
                     physical_inputs[0].clone(),
                     pii.column.clone(),
                     pii.mode.clone(),
+                    pii.detect_config.clone(),
+                    pii.mask_config.clone(),
                 ),
             )));
         }
