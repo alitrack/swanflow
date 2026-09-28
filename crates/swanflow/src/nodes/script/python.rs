@@ -262,11 +262,29 @@ def make_restricted_import(original_import):
             sandbox_builtins.set_item("__import__", restricted_import_py)?;
             let locals: PyObject = sandbox_builtins.into_any().into();
 
+            // Two bridge modes for handing `batch` to the script:
+            //  - arro3 (pyo3-arrow's Python side) present: pass the zero-copy
+            //    PyRecordBatch directly (fast path, unchanged).
+            //  - arro3 missing: serialize to Arrow IPC bytes and rebind `batch`
+            //    to a pure-pyarrow RecordBatch. This keeps core.script.python
+            //    working on interpreters that only have pyarrow installed —
+            //    previously ANY batch.column(i) access raised
+            //    "ModuleNotFoundError: No module named 'arro3'" because
+            //    pyo3-arrow 0.14's Arro3Array conversion imports arro3.core
+            //    (caught by wf160 E2E; forensic: 2026-09-28).
+            let arro3_available = py.import("arro3.core").is_ok();
+            let bridge_prologue = if arro3_available {
+                ""
+            } else {
+                "    batch = pa.ipc.open_stream(_swanflow_ipc).read_all()\n"
+            };
+
             let full_script = format!(
                 "import pyarrow as pa\n\
                  def transform(batch):\n\
-                 {}\n\
-                 ",
+                 {}\
+                 {}",
+                bridge_prologue,
                 script
                     .lines()
                     .map(|l| format!("    {}", l))
@@ -378,8 +396,37 @@ impl Stream for PythonStream {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let _ = tokio::task::spawn_blocking(move || {
                     let result = Python::attach(|py| -> Result<RecordBatch> {
-                        let py_batch = PyRecordBatch::from(batch);
-                        let result_py_obj = compiled_fn_clone.call1(py, (py_batch,))?;
+                        // Bridge mode selection must match the script template:
+                        // if arro3 is unavailable the script's prologue reads
+                        // `batch` from `_swanflow_ipc` (Arrow IPC bytes).
+                        let arro3_available = py.import("arro3.core").is_ok();
+                        let call_result: PyResult<Py<PyAny>> = if arro3_available {
+                            let py_batch = PyRecordBatch::from(batch);
+                            compiled_fn_clone.call1(py, (py_batch,))
+                        } else {
+                            // Serialize to Arrow IPC stream bytes and hand a
+                            // Python bytes object to the script; its prologue
+                            // rebinds `batch` via pa.ipc.open_stream.
+                            let mut ipc_buf: Vec<u8> = Vec::new();
+                            {
+                                use datafusion::arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+                                let options = IpcWriteOptions::default();
+                                let mut writer = StreamWriter::try_new_with_options(
+                                    &mut ipc_buf,
+                                    batch.schema().as_ref(),
+                                    options,
+                                )?;
+                                writer.write(&batch)?;
+                                writer.finish()?;
+                            }
+                            let py_bytes = pyo3::types::PyBytes::new(py, &ipc_buf);
+                            // stash where the prologue can read it
+                            let builtins = pyo3::types::PyModule::import(py, "builtins")?;
+                            builtins.set_item("_swanflow_ipc", py_bytes)?;
+                            compiled_fn_clone.call1(py, (Option::<PyObject>::None,))
+                        };
+
+                        let result_py_obj = call_result?;
 
                         if result_py_obj.is_none(py) {
                             anyhow::bail!("Python transform function must return a PyRecordBatch, but returned None");
