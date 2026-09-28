@@ -148,6 +148,21 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 Arc::new(mcp.schema.as_arrow().clone()),
             ))));
         }
+        // core.ai.citation_tracker: real implementation since 2026-09-28
+        // (was a pass-through shell): ranks citation rows by score desc,
+        // tie-breaks source_id/start, truncates to max_citations.
+        if let Some(cr) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::contracts::CitationRankLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::contracts::CitationRankExec::new(
+                    cr.max_citations,
+                    Arc::new(cr.schema.as_arrow().clone()),
+                    physical_inputs[0].clone(),
+                ),
+            )));
+        }
         // core.ai.fact_claim_verifier: real implementation since 2026-09-28
         // (was a pass-through shell; see swanflow-workflows/docs/shell_nodes_audit.md).
         // Scores claim tokens against the evidence corpus of the input batch.
