@@ -765,6 +765,7 @@ impl ExecutionPlan for GraphRetrieverExec {
             entity_name: self.entity_name.clone(),
             cache_dir: self.cache_dir.clone(),
             state: StreamState::PollingInput,
+             ran_config_retrieval: false,
         }))
     }
     fn properties(&self) -> &PlanProperties {
@@ -780,7 +781,7 @@ struct GraphRetrievalStream {
     depth: u64,
     entity_name: Option<String>,
     cache_dir: String,
-    state: StreamState,
+    state: StreamState,    ran_config_retrieval: bool,
 }
 
 impl Stream for GraphRetrievalStream {
@@ -913,6 +914,119 @@ impl Stream for GraphRetrievalStream {
                     }
                     Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
                     Poll::Ready(None) => {
+                        // Config-anchored retrieval (entity_name) does not need input
+                        // rows: upstream is typically GraphIndexWriter whose output is
+                        // an EMPTY stream. Run the retrieval exactly once instead of
+                        // short-circuiting to Done (which silently returned 0 rows).
+                        if self.entity_name.is_some() && !self.ran_config_retrieval {
+                            self.ran_config_retrieval = true;
+                            let cache_dir = self.cache_dir.clone();
+                            let depth = self.depth;
+                            let entity_name = self.entity_name.clone();
+                            let fut = async move {
+                                let mut context_builder = StringBuilder::new();
+                                let metadata_path =
+                                    format!("{}/metadata.duckdb", cache_dir);
+                                let anchors: Vec<String> = if let Some(name) = &entity_name {
+                                    vec![format!(
+                                        "SELECT id, 0 FROM meta.__graph_nodes WHERE name = '{}'",
+                                        name.replace('\'', "''")
+                                    )]
+                                } else {
+                                    vec![]
+                                };
+                                for anchor in anchors {
+                                    let query = format!(
+                                        "WITH RECURSIVE walk(entity_id, hop) AS (
+                                            {anchor}
+                                            UNION
+                                            SELECT CASE WHEN e.source_id = w.entity_id THEN e.target_id ELSE e.source_id END, w.hop + 1
+                                            FROM walk w
+                                            JOIN meta.__graph_edges e
+                                              ON e.source_id = w.entity_id OR e.target_id = w.entity_id
+                                            WHERE w.hop < {depth}
+                                         )
+                                         SELECT n.name, n.label, n.properties
+                                         FROM walk w JOIN meta.__graph_nodes n ON n.id = w.entity_id"
+                                    );
+                                    let batches =
+                                        crate::nodes::io::DuckDBHelper::query_arrow(
+                                            ":memory:",
+                                            &query,
+                                            &[],
+                                            &Some(format!(
+                                                "ATTACH '{}' AS meta (READ_ONLY, TYPE duckdb);",
+                                                metadata_path
+                                            )),
+                                        )
+                                        .await
+                                        .map_err(|e| {
+                                            DataFusionError::Execution(format!(
+                                                "Graph retrieval query failed: {e}"
+                                            ))
+                                        })?;
+                                    for b in batches {
+                                        let names_col =
+                                            datafusion::arrow::compute::cast(
+                                                b.column(0),
+                                                &DataType::Utf8,
+                                            )
+                                            .map_err(|e| {
+                                                DataFusionError::Execution(format!(
+                                                    "Graph retrieval: cast name column failed: {e}"
+                                                ))
+                                            })?;
+                                        let labels_col =
+                                            datafusion::arrow::compute::cast(
+                                                b.column(1),
+                                                &DataType::Utf8,
+                                            )
+                                            .map_err(|e| {
+                                                DataFusionError::Execution(format!(
+                                                    "Graph retrieval: cast label column failed: {e}"
+                                                ))
+                                            })?;
+                                        let names = names_col
+                                            .as_any()
+                                            .downcast_ref::<StringArray>()
+                                            .ok_or_else(|| {
+                                                DataFusionError::Execution(
+                                                    "Graph retrieval: name column not string".into(),
+                                                )
+                                            })?;
+                                        let labels = labels_col
+                                            .as_any()
+                                            .downcast_ref::<StringArray>()
+                                            .ok_or_else(|| {
+                                                DataFusionError::Execution(
+                                                    "Graph retrieval: label column not string".into(),
+                                                )
+                                            })?;
+                                        for j in 0..b.num_rows() {
+                                            context_builder.append_value(format!(
+                                                "Entity: {} ({})",
+                                                names.value(j),
+                                                labels.value(j)
+                                            ));
+                                        }
+                                    }
+                                }
+                                let batch = RecordBatch::try_new(
+                                    Arc::new(Schema::new(vec![Field::new(
+                                        "context",
+                                        DataType::Utf8,
+                                        true,
+                                    )])),
+                                    vec![Arc::new(context_builder.finish())],
+                                )
+                                .map_err(|e| {
+                                    DataFusionError::ArrowError(Box::new(e), None)
+                                })?;
+                                Ok(batch)
+                            };
+                            self.state = StreamState::Processing(Box::pin(fut));
+                            continue;
+                        }
                         self.state = StreamState::Done;
                         return Poll::Ready(None);
                     }
@@ -920,7 +1034,11 @@ impl Stream for GraphRetrievalStream {
                 },
                 StreamState::Processing(fut) => match fut.as_mut().poll(cx) {
                     Poll::Ready(result) => {
-                        self.state = StreamState::PollingInput;
+                        if self.entity_name.is_some() && self.ran_config_retrieval {
+                            self.state = StreamState::Done;
+                        } else {
+                            self.state = StreamState::PollingInput;
+                        }
                         return Poll::Ready(Some(result));
                     }
                     Poll::Pending => return Poll::Pending,

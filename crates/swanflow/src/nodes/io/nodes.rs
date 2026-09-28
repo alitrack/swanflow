@@ -1475,6 +1475,16 @@ impl Stream for GraphIndexingStream {
                                     })?;
                                 }
                             }
+                            // Explicit checkpoint: read-only consumers (e.g.
+                            // GraphRetrieverExec ATTACHes this file read-only)
+                            // cannot replay the WAL. Without a checkpoint the
+                            // just-inserted rows are invisible to them (observed:
+                            // same-process write-then-retrieve returned 0 rows).
+                            conn.execute("CHECKPOINT", []).map_err(|e| {
+                                DataFusionError::Execution(format!(
+                                    "GraphIndexWriter failed to checkpoint: {e}"
+                                ))
+                            })?;
                             Ok::<(), DataFusionError>(())
                         }).await.map_err(|e| DataFusionError::Execution(format!("Spawn blocking error: {}", e)))??;
                         Ok(())
