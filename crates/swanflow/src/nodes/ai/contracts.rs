@@ -48,7 +48,7 @@ impl NodeBehavior for StructuredIoContractNode {
         NodeSpec {
             type_id: "core.ai.structured_io_contract".to_string(),
             display_name: "Structured IO Contract".to_string(),
-            description: "Validate structured output contract requirements.".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Validate structured output contract requirements.".to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),
@@ -107,7 +107,7 @@ impl NodeBehavior for CitationTrackerNode {
         NodeSpec {
             type_id: "core.ai.citation_tracker".to_string(),
             display_name: "Citation Tracker".to_string(),
-            description: "Rank and normalize citations for traceable outputs.".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Rank and normalize citations for traceable outputs.".to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),

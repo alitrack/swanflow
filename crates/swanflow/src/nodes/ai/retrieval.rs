@@ -84,7 +84,7 @@ impl NodeBehavior for QueryPlanningNode {
         NodeSpec {
             type_id: "core.ai.query_planning".to_string(),
             display_name: "Query Planning".to_string(),
-            description: "Split a research goal into ranked sub-queries.".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Split a research goal into ranked sub-queries.".to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),

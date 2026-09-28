@@ -263,3 +263,56 @@ impl Default for NodeRegistry {
         registry
     }
 }
+
+#[cfg(test)]
+mod shell_marker_tests {
+    use super::*;
+
+    /// The 9 AI governance nodes audited 2026-09-28 as pure pass-through shells
+    /// (propose_plan == identity clone; helpers dead code — see
+    /// swanflow-workflows/docs/shell_nodes_audit.md). Their spec descriptions
+    /// must carry the shell prefix so registry consumers can flag them.
+    const SHELL_PREFIX: &str = "[SHELL NODE — no runtime behavior] ";
+
+    #[test]
+    fn shell_node_descriptions_carry_marker() {
+        let registry = NodeRegistry::default();
+        let shells = [
+            "core.ai.agent_loop_orchestrator",
+            "core.ai.retry_backoff_idempotency_guard",
+            "core.ai.checkpoint_resume_controller",
+            "core.ai.run_state_store",
+            "core.ai.observability_audit_ledger",
+            "core.ai.citation_tracker",
+            "core.ai.fact_claim_verifier",
+            "core.ai.query_planning",
+            "core.ai.structured_io_contract",
+        ];
+        for type_id in shells {
+            let spec = registry
+                .get_node(type_id)
+                .unwrap_or_else(|e| panic!("{type_id} not registered: {e}"))
+                .spec();
+            assert!(
+                spec.description.starts_with(SHELL_PREFIX),
+                "{type_id} description must start with shell marker, got: {}",
+                spec.description
+            );
+        }
+    }
+
+    #[test]
+    fn real_nodes_do_not_carry_shell_marker() {
+        let registry = NodeRegistry::default();
+        for spec in registry.list_specs() {
+            if spec.description.starts_with("[SHELL NODE") {
+                continue; // shells are asserted by the other test
+            }
+            // spot-check a few known-real nodes are NOT marked
+        }
+        let sql = registry.get_node("core.sql").unwrap().spec();
+        assert!(!sql.description.starts_with("[SHELL NODE"));
+        let excel = registry.get_node("core.io.excel_read").unwrap().spec();
+        assert!(!excel.description.starts_with("[SHELL NODE"));
+    }
+}

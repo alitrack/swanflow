@@ -59,7 +59,7 @@ impl NodeBehavior for RetryBackoffGuardNode {
         NodeSpec {
             type_id: "core.ai.retry_backoff_idempotency_guard".to_string(),
             display_name: "Retry/Backoff + Idempotency Guard".to_string(),
-            description: "Plan deterministic retry delays and suppress duplicate executions."
+            description: "[SHELL NODE — no runtime behavior] Plan deterministic retry delays and suppress duplicate executions."
                 .to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
@@ -143,7 +143,7 @@ impl NodeBehavior for CheckpointResumeControllerNode {
         NodeSpec {
             type_id: "core.ai.checkpoint_resume_controller".to_string(),
             display_name: "Checkpoint/Resume Controller".to_string(),
-            description: "Save and recover deterministic run checkpoints.".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Save and recover deterministic run checkpoints.".to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),
@@ -226,7 +226,7 @@ impl NodeBehavior for RunStateStoreNode {
         NodeSpec {
             type_id: "core.ai.run_state_store".to_string(),
             display_name: "Run-State Store".to_string(),
-            description: "Persist deterministic run-scoped key-value state.".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Persist deterministic run-scoped key-value state.".to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),
@@ -312,7 +312,7 @@ impl NodeBehavior for ObservabilityAuditLedgerNode {
         NodeSpec {
             type_id: "core.ai.observability_audit_ledger".to_string(),
             display_name: "Observability & Audit Ledger".to_string(),
-            description: "Record append-only audit events for run observability.".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Record append-only audit events for run observability.".to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),
@@ -401,7 +401,7 @@ impl NodeBehavior for AgentLoopOrchestratorNode {
         NodeSpec {
             type_id: "core.ai.agent_loop_orchestrator".to_string(),
             display_name: "Agent Loop Orchestrator".to_string(),
-            description: "Coordinate bounded iterative agent loop execution.".to_string(),
+            description: "[SHELL NODE — no runtime behavior] Coordinate bounded iterative agent loop execution.".to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),

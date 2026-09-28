@@ -112,7 +112,7 @@ impl NodeBehavior for FactClaimVerifierNode {
         NodeSpec {
             type_id: "core.ai.fact_claim_verifier".to_string(),
             display_name: "Fact & Claim Verifier".to_string(),
-            description: "Verify claim support scores against provided evidence snippets."
+            description: "[SHELL NODE — no runtime behavior] Verify claim support scores against provided evidence snippets."
                 .to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
