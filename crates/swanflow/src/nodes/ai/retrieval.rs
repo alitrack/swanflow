@@ -1272,7 +1272,9 @@ impl XformMode {
                 Field::new("rank", DataType::UInt32, true),
                 Field::new("source_id", DataType::Utf8, true),
                 Field::new("content", DataType::Utf8, true),
-                Field::new("score", DataType::Utf8, true),
+                // Numeric since 2026-09-28 (was Utf8 "{:.4}" — sigil finding #3);
+                // downcasts must use Float64Array now.
+                Field::new("score", DataType::Float64, true),
             ],
         }
     }
@@ -1551,7 +1553,12 @@ fn build_xform_batch(
         XformMode::Embed => {
             // Deterministic hashing embedding (no external service): FNV-1a
             // token hashing into a fixed-width vector, L2-normalized.
-            let dim = config["dim"].as_u64().unwrap_or(64) as usize;
+            // Spec advertises 'embedding_dim' (default 384); the legacy exec key
+            // was 'dim' (default 64). Accept both, spec key wins.
+            let dim = config["embedding_dim"]
+                .as_u64()
+                .or_else(|| config["dim"].as_u64())
+                .unwrap_or(384) as usize;
             let mut rid = UInt32Builder::new();
             let mut norm = StringBuilder::new();
             let mut js = StringBuilder::new();
@@ -1597,7 +1604,10 @@ fn build_xform_batch(
                 .collect();
             let ranked = if mode == XformMode::Rerank {
                 let top_k = config["top_k"].as_u64().unwrap_or(10) as usize;
-                let term_boost = config["term_boost"].as_f64().unwrap_or(0.1) as f32;
+                let term_boost = config["query_term_boost"]
+                    .as_f64()
+                    .or_else(|| config["term_boost"].as_f64())
+                    .unwrap_or(0.1) as f32;
                 RerankerNode.rerank_with_overlap_pub(&query, candidates, top_k, term_boost)
             } else {
                 // Hybrid: treat candidates as the sparse leg; semantic leg
@@ -1616,12 +1626,12 @@ fn build_xform_batch(
             let mut rank = UInt32Builder::new();
             let mut sid = StringBuilder::new();
             let mut content = StringBuilder::new();
-            let mut score = StringBuilder::new();
+            let mut score = datafusion::arrow::array::Float64Builder::new();
             for (i, c) in ranked.iter().enumerate() {
                 rank.append_value(i as u32);
                 sid.append_value(&c.source_id);
                 content.append_value(&c.content);
-                score.append_value(format!("{:.4}", c.score));
+                score.append_value(c.score as f64);
             }
             Ok(RecordBatch::try_new(
                 schema,
