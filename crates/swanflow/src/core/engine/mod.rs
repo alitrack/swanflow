@@ -31,7 +31,6 @@ use crate::core::compiler::WorkflowCompiler;
 use crate::core::datasource::{
     DuckDBScanExec, DuckDBScanLogical, ExcelReportExec, ExcelReportSinkLogical, ExcelScanExec,
     ExcelScanLogical, ExcelSinkExec, ExcelSinkLogical, ExcelTemplateExec, ExcelTemplateSinkLogical,
-    SqlxScanExec, SqlxScanLogical,
 };
 use crate::core::graph::Workflow;
 use crate::core::observer::{
@@ -204,7 +203,8 @@ fn is_external_io_node(node_type: &str) -> bool {
     node_type.contains("python")
         || node_type.contains("ai.")
         || node_type.contains("llm")
-        || node_type.contains("sqlx_scan")
+        || node_type.contains("duckdb_scan")
+        || node_type.contains("clickhouse_scan")
         || node_type.contains("mcp.")
         || node_type.contains("wasm")
 }
@@ -349,7 +349,7 @@ impl SwanFlowEngine {
         for node_idx in workflow.graph.node_indices() {
             if let Some(node) = workflow.graph.node_weight(node_idx) {
                 let tid = &node.type_id;
-                if tid.contains("python") || tid.contains("wasm") || tid.contains("sqlx_scan") {
+                if tid.contains("python") || tid.contains("wasm") || tid.contains("duckdb_scan") {
                     self.engine_mode = EngineMode::DataFusion;
                     return EngineMode::DataFusion;
                 }

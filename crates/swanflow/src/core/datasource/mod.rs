@@ -28,26 +28,7 @@ use futures::Stream;
 use futures::StreamExt;
 use rust_xlsxwriter::{Chart, ChartType, Color, Format, Workbook};
 use serde_json::Value as JsonValue;
-use sqlx::any::AnyTypeInfo;
 use std::collections::HashMap;
-
-pub fn sqlx_type_to_arrow(ti: &AnyTypeInfo) -> DataType {
-    use sqlx::TypeInfo;
-    let name = ti.name().to_uppercase();
-    match name.as_str() {
-        "BOOLEAN" | "BOOL" | "TINYINT(1)" => DataType::Boolean,
-        "SMALLINT" | "INT2" | "INT" | "INTEGER" | "INT4" | "BIGINT" | "INT8" | "INT64" => {
-            DataType::Int64
-        }
-        "FLOAT" | "REAL" | "FLOAT4" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT8" | "NUMERIC"
-        | "DECIMAL" => DataType::Float64,
-        "TIMESTAMP" | "TIMESTAMPTZ" | "DATETIME" => {
-            DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Nanosecond, None)
-        }
-        "DATE" => DataType::Date32,
-        _ => DataType::Utf8,
-    }
-}
 
 #[non_exhaustive]
 pub enum DynamicArrayBuilder {
@@ -68,41 +49,6 @@ impl DynamicArrayBuilder {
                 Self::Timestamp(TimestampNanosecondBuilder::with_capacity(capacity))
             }
             _ => Self::Utf8(StringBuilder::with_capacity(capacity, capacity * 32)),
-        }
-    }
-
-    pub fn append_from_row(&mut self, row: &sqlx::any::AnyRow, index: usize) {
-        use sqlx::Row;
-        match self {
-            Self::Int64(b) => {
-                let val: Option<i64> = row.try_get(index).ok();
-                b.append_option(val);
-            }
-            Self::Float64(b) => {
-                let val: Option<f64> = row.try_get(index).ok();
-                b.append_option(val);
-            }
-            Self::Boolean(b) => {
-                let val: Option<bool> = row.try_get(index).ok();
-                b.append_option(val);
-            }
-            Self::Timestamp(b) => {
-                if let Ok(s) = row.try_get::<String, _>(index) {
-                    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S") {
-                        b.append_value(dt.and_utc().timestamp_nanos_opt().unwrap_or(0));
-                    } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s) {
-                        b.append_value(dt.timestamp_nanos_opt().unwrap_or(0));
-                    } else {
-                        b.append_null();
-                    }
-                } else {
-                    b.append_null();
-                }
-            }
-            Self::Utf8(b) => {
-                let val: Option<String> = row.try_get(index).ok();
-                b.append_option(val);
-            }
         }
     }
 
@@ -191,24 +137,23 @@ impl DynamicArrayBuilder {
     }
 }
 
-/// Logical node for SQLx-based generic database scanning.
+/// Logical node for ClickHouse scanning over HTTP (Arrow stream format).
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct SqlxScanLogical {
+pub struct ClickHouseScanLogical {
     pub url: String,
     pub query: String,
     pub schema: DFSchemaRef,
-    pub params: Vec<ScalarValue>,
 }
 
-impl PartialOrd for SqlxScanLogical {
+impl PartialOrd for ClickHouseScanLogical {
     fn partial_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
         None
     }
 }
 
-impl UserDefinedLogicalNodeCore for SqlxScanLogical {
+impl UserDefinedLogicalNodeCore for ClickHouseScanLogical {
     fn name(&self) -> &str {
-        "SqlxScan"
+        "ClickHouseScan"
     }
     fn inputs(&self) -> Vec<&LogicalPlan> {
         vec![]
@@ -220,7 +165,7 @@ impl UserDefinedLogicalNodeCore for SqlxScanLogical {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SqlxScan(query={})", self.query)
+        write!(f, "ClickHouseScan(query={})", self.query)
     }
     fn with_exprs_and_inputs(
         &self,
@@ -231,23 +176,17 @@ impl UserDefinedLogicalNodeCore for SqlxScanLogical {
     }
 }
 
-/// Physical execution plan for SQLx generic database scanning.
+/// Physical execution plan for ClickHouse HTTP scanning (Arrow stream).
 #[derive(Debug)]
-pub struct SqlxScanExec {
+pub struct ClickHouseScanExec {
     pub url: String,
     pub query: String,
     pub project_schema: SchemaRef,
-    pub params: Vec<ScalarValue>,
     cache: PlanProperties,
 }
 
-impl SqlxScanExec {
-    pub fn new(
-        url: String,
-        query: String,
-        project_schema: SchemaRef,
-        params: Vec<ScalarValue>,
-    ) -> Self {
+impl ClickHouseScanExec {
+    pub fn new(url: String, query: String, project_schema: SchemaRef) -> Self {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(project_schema.clone()),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
@@ -258,24 +197,23 @@ impl SqlxScanExec {
             url,
             query,
             project_schema,
-            params,
             cache,
         }
     }
 }
 
-impl DisplayAs for SqlxScanExec {
+impl DisplayAs for ClickHouseScanExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "SqlxScanExec(query={})", self.query)
+        write!(f, "ClickHouseScanExec(query={})", self.query)
     }
 }
 
-impl ExecutionPlan for SqlxScanExec {
+impl ExecutionPlan for ClickHouseScanExec {
+    fn name(&self) -> &'static str {
+        "ClickHouseScanExec"
+    }
     fn as_any(&self) -> &dyn Any {
         self
-    }
-    fn name(&self) -> &str {
-        "SqlxScanExec"
     }
     fn schema(&self) -> SchemaRef {
         self.project_schema.clone()
@@ -295,7 +233,6 @@ impl ExecutionPlan for SqlxScanExec {
             self.url.clone(),
             self.query.clone(),
             self.project_schema.clone(),
-            self.params.clone(),
         )))
     }
 
@@ -307,73 +244,66 @@ impl ExecutionPlan for SqlxScanExec {
         let url = self.url.clone();
         let query = self.query.clone();
         let schema = self.project_schema.clone();
-        let params = self.params.clone();
 
         let mut builder = RecordBatchReceiverStream::builder(schema.clone(), 1);
         let tx = builder.tx();
 
         builder.spawn(async move {
-            sqlx::any::install_default_drivers();
-            let pool = sqlx::AnyPool::connect(&url)
+            use datafusion::arrow::ipc::reader::StreamReader;
+            let client = reqwest::Client::new();
+            let arrow_url = format!(
+                "{}/?query={}&format=Arrow",
+                url.trim_end_matches('/'),
+                urlencode_for_ch(&query)
+            );
+            let resp = client
+                .get(&arrow_url)
+                .send()
                 .await
                 .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-
-            let mut query_obj = sqlx::query(&query);
-            for param in &params {
-                match param {
-                    ScalarValue::Int64(Some(i)) => query_obj = query_obj.bind(*i),
-                    ScalarValue::Float64(Some(f)) => query_obj = query_obj.bind(*f),
-                    ScalarValue::Boolean(Some(b)) => query_obj = query_obj.bind(*b),
-                    ScalarValue::Utf8(Some(s)) => query_obj = query_obj.bind(s.clone()),
-                    _ => {
-                        let s = format!("{}", param);
-                        query_obj = query_obj.bind(s);
-                    }
-                }
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(datafusion::error::DataFusionError::Execution(format!(
+                    "ClickHouse HTTP {} : {}",
+                    status, body
+                )));
             }
-            let mut rows = query_obj.fetch(&pool);
-
-            let mut builders: Vec<DynamicArrayBuilder> = schema
-                .fields()
-                .iter()
-                .map(|f| DynamicArrayBuilder::new(f.data_type(), 1000))
-                .collect();
-
-            let mut count = 0;
-            while let Some(row_res) = rows.next().await {
-                let row = row_res
-                    .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
-                for (i, builder) in builders.iter_mut().enumerate() {
-                    builder.append_from_row(&row, i);
-                }
-                count += 1;
-                if count >= 1000 {
-                    let columns: Vec<ArrayRef> = builders.iter_mut().map(|b| b.finish()).collect();
-                    let batch = RecordBatch::try_new(schema.clone(), columns).map_err(|e| {
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+            if !bytes.is_empty() {
+                let reader =
+                    StreamReader::try_new(bytes.as_ref(), None).map_err(|e| {
+                        datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                    })?;
+                for batch in reader {
+                    let batch = batch.map_err(|e| {
                         datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
                     })?;
                     let _ = tx.send(Ok(batch)).await;
-                    builders = schema
-                        .fields()
-                        .iter()
-                        .map(|f| DynamicArrayBuilder::new(f.data_type(), 1000))
-                        .collect();
-                    count = 0;
                 }
-            }
-
-            if count > 0 {
-                let columns: Vec<ArrayRef> = builders.into_iter().map(|mut b| b.finish()).collect();
-                let batch = RecordBatch::try_new(schema.clone(), columns).map_err(|e| {
-                    datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
-                })?;
-                let _ = tx.send(Ok(batch)).await;
             }
             Ok(())
         });
 
         Ok(builder.build())
     }
+}
+
+/// Minimal percent-encoding for ClickHouse query strings (unreserved set).
+fn urlencode_for_ch(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 /// Logical node for DuckDB-based external scanning (Postgres, SQLite).

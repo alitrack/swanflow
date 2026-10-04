@@ -24,7 +24,6 @@ use futures::Stream;
 use futures::StreamExt;
 use serde_json::json;
 use serde_json::Value as JsonValue;
-use sqlx::{Column, Row};
 use std::fmt;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -34,8 +33,6 @@ use std::task::{Context, Poll};
 use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
 use crate::nodes::config as cfg;
 use crate::nodes::connectors::clickhouse::ClickHouseConnector;
-use crate::nodes::connectors::mysql::MySqlConnector;
-use crate::nodes::connectors::postgres::PostgresConnector;
 use crate::nodes::connectors::{ConnConfig, Connector};
 use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec, TypedNodeBehavior};
 
@@ -896,22 +893,21 @@ enum DbDriver {
     DuckDBPostgres,
     DuckDBSqlite,
     DuckDBMysql,
-    SqlxAny,
-    PostgresConnector,
-    MySqlConnector,
     ClickHouseConnector,
 }
 
 impl DbConnectorNode {
-    fn select_driver(url: &str) -> DbDriver {
+    fn select_driver(url: &str) -> Option<DbDriver> {
         if url.starts_with("postgres://") || url.starts_with("postgresql://") {
-            DbDriver::DuckDBPostgres
-        } else if url.starts_with("sqlite://") {
-            DbDriver::DuckDBSqlite
+            Some(DbDriver::DuckDBPostgres)
         } else if url.starts_with("mysql://") || url.starts_with("mariadb://") {
-            DbDriver::DuckDBMysql
+            Some(DbDriver::DuckDBMysql)
+        } else if url.starts_with("sqlite://") || url.starts_with("sqlite3://") {
+            Some(DbDriver::DuckDBSqlite)
+        } else if url.starts_with("http://") || url.starts_with("https://") {
+            Some(DbDriver::ClickHouseConnector)
         } else {
-            DbDriver::SqlxAny
+            None
         }
     }
 
@@ -962,44 +958,6 @@ impl DbConnectorNode {
             },
         )])
     }
-
-    async fn build_sqlx_any_plan(expanded_url: &str, query: &str) -> Result<Vec<LogicalPlan>> {
-        sqlx::any::install_default_drivers();
-        let normalized_url = if expanded_url.starts_with("sqlite3://") {
-            expanded_url.replace("sqlite3://", "sqlite://")
-        } else {
-            expanded_url.to_string()
-        };
-        let pool = sqlx::AnyPool::connect(&normalized_url)
-            .await
-            .map_err(|e| anyhow!("SQLx connection failed: {}", e))?;
-
-        let query_obj = sqlx::query(query);
-        let first_row = query_obj
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| anyhow!("SQLx query failed for schema inference: {}", e))?;
-
-        let mut fields = Vec::new();
-        for col in first_row.columns() {
-            let arrow_type = crate::core::datasource::sqlx_type_to_arrow(col.type_info());
-            fields.push(Field::new(col.name().to_string(), arrow_type, true));
-        }
-
-        let schema = Arc::new(Schema::new(fields));
-        let df_schema = datafusion::common::DFSchema::try_from(schema)?;
-
-        Ok(vec![LogicalPlan::Extension(
-            datafusion::logical_expr::Extension {
-                node: Arc::new(crate::core::datasource::SqlxScanLogical {
-                    url: normalized_url,
-                    query: query.to_string(),
-                    schema: Arc::new(df_schema),
-                    params: vec![],
-                }),
-            },
-        )])
-    }
 }
 
 #[async_trait]
@@ -1023,7 +981,7 @@ impl NodeBehavior for DbConnectorNode {
                     "table": { "type": "string", "description": "Table name (alternative to query)" },
                     "driver": {
                         "type": "string",
-                        "enum": ["auto", "postgres", "mysql", "clickhouse", "duckdb_postgres", "duckdb_sqlite", "duckdb_mysql", "sqlx_any"],
+                        "enum": ["auto", "postgres", "mysql", "clickhouse", "duckdb_postgres", "duckdb_sqlite", "duckdb_mysql"],
                         "default": "auto"
                     }
                 },
@@ -1081,16 +1039,19 @@ impl NodeBehavior for DbConnectorNode {
             Self::select_driver(&expanded_url)
         } else {
             match driver.as_str() {
-                "postgres" => DbDriver::PostgresConnector,
-                "mysql" => DbDriver::MySqlConnector,
-                "clickhouse" => DbDriver::ClickHouseConnector,
-                "duckdb_postgres" => DbDriver::DuckDBPostgres,
-                "duckdb_sqlite" => DbDriver::DuckDBSqlite,
-                "duckdb_mysql" => DbDriver::DuckDBMysql,
-                "sqlx_any" => DbDriver::SqlxAny,
-                _ => DbDriver::SqlxAny,
+                "postgres" | "duckdb_postgres" => Some(DbDriver::DuckDBPostgres),
+                "mysql" | "duckdb_mysql" => Some(DbDriver::DuckDBMysql),
+                "duckdb_sqlite" => Some(DbDriver::DuckDBSqlite),
+                "clickhouse" => Some(DbDriver::ClickHouseConnector),
+                _ => None,
             }
-        };
+        }
+        .ok_or_else(|| {
+            anyhow!(
+                "Unsupported database URL: {}. Supported schemes: postgres://, postgresql://, mysql://, mariadb://, sqlite://, http(s):// (ClickHouse)",
+                expanded_url
+            )
+        })?;
 
         // Build the effective query
         let effective_query = match (query, table) {
@@ -1104,62 +1065,9 @@ impl NodeBehavior for DbConnectorNode {
                 // DuckDB scanner path (postgres / sqlite / mysql ATTACH)
                 Self::build_duckdb_plan(&expanded_url, &effective_query, resolved_driver).await
             }
-            DbDriver::SqlxAny => {
-                // Keep existing SQLx Any path
-                Self::build_sqlx_any_plan(&expanded_url, &effective_query).await
-            }
-            DbDriver::PostgresConnector => {
-                // Use new PostgresConnector for schema discovery
-                let conn_config = ConnConfig {
-                    url: expanded_url.clone(),
-                    driver: "postgres".to_string(),
-                    max_connections: 10,
-                    timeout_secs: 30,
-                };
-                let connector = PostgresConnector::connect(conn_config).await?;
-                let schema = connector
-                    .get_schema(&effective_query.trim_start_matches("SELECT * FROM "))
-                    .await?;
-                let df_schema = Arc::new(datafusion::common::DFSchema::try_from(schema.clone())?);
-
-                Ok(vec![LogicalPlan::Extension(
-                    datafusion::logical_expr::Extension {
-                        node: Arc::new(crate::core::datasource::SqlxScanLogical {
-                            url: expanded_url,
-                            query: effective_query,
-                            schema: df_schema,
-                            params: vec![],
-                        }),
-                    },
-                )])
-            }
-            DbDriver::MySqlConnector => {
-                // Use new MySqlConnector for schema discovery
-                let conn_config = ConnConfig {
-                    url: expanded_url.clone(),
-                    driver: "mysql".to_string(),
-                    max_connections: 10,
-                    timeout_secs: 30,
-                };
-                let connector = MySqlConnector::connect(conn_config).await?;
-                let schema = connector
-                    .get_schema(&effective_query.trim_start_matches("SELECT * FROM "))
-                    .await?;
-                let df_schema = Arc::new(datafusion::common::DFSchema::try_from(schema.clone())?);
-
-                Ok(vec![LogicalPlan::Extension(
-                    datafusion::logical_expr::Extension {
-                        node: Arc::new(crate::core::datasource::SqlxScanLogical {
-                            url: expanded_url,
-                            query: effective_query,
-                            schema: df_schema,
-                            params: vec![],
-                        }),
-                    },
-                )])
-            }
             DbDriver::ClickHouseConnector => {
-                // Use new ClickHouseConnector for schema discovery
+                // Schema discovery via ClickHouseConnector (HTTP), execution
+                // via dedicated ClickHouseScanExec (Arrow stream over HTTP).
                 let conn_config = ConnConfig {
                     url: expanded_url.clone(),
                     driver: "clickhouse".to_string(),
@@ -1174,11 +1082,10 @@ impl NodeBehavior for DbConnectorNode {
 
                 Ok(vec![LogicalPlan::Extension(
                     datafusion::logical_expr::Extension {
-                        node: Arc::new(crate::core::datasource::SqlxScanLogical {
+                        node: Arc::new(crate::core::datasource::ClickHouseScanLogical {
                             url: expanded_url,
                             query: effective_query,
                             schema: df_schema,
-                            params: vec![],
                         }),
                     },
                 )])

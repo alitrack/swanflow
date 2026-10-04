@@ -59,7 +59,7 @@ tiberius = { version = "0.12.3", optional = true, default-features = false, feat
 mongodb = { version = "3.2.5", optional = true }
 bson = { version = "2", optional = true, features = ["chrono-0_4"] }
 wasmtime = "28.0.0"
-sqlx = { version = "0.8", features = ["runtime-tokio", "any", "postgres", "mysql", "sqlite", "chrono", "uuid"] }
+# sqlx removed: postgres/mysql/sqlite access now goes through DuckDB scanners (ATTACH)
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15.7"
 lazy_static = "1.5.0"

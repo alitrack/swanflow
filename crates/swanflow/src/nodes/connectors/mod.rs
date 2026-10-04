@@ -7,10 +7,6 @@
 pub mod clickhouse;
 pub mod mock;
 #[cfg(feature = "extended-connectors")]
-pub mod mongodb;
-pub mod mysql;
-pub mod postgres;
-#[cfg(feature = "extended-connectors")]
 pub mod redis;
 #[cfg(feature = "extended-connectors")]
 pub mod sqlserver;

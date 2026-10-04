@@ -15,9 +15,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use crate::core::datasource::{
-    DuckDBScanExec, DuckDBScanLogical, DuckDBWriteSinkExec, DuckDBWriteSinkLogical,
-    ExcelReportExec, ExcelReportSinkLogical, ExcelScanExec, ExcelScanLogical, ExcelSinkExec,
-    ExcelSinkLogical, ExcelTemplateExec, ExcelTemplateSinkLogical, SqlxScanExec, SqlxScanLogical,
+    ClickHouseScanExec, ClickHouseScanLogical, DuckDBScanExec, DuckDBScanLogical, DuckDBWriteSinkExec,
+    DuckDBWriteSinkLogical, ExcelReportExec, ExcelReportSinkLogical, ExcelScanExec,
+    ExcelScanLogical, ExcelSinkExec, ExcelSinkLogical, ExcelTemplateExec, ExcelTemplateSinkLogical,
 };
 use crate::core::engine::sync_metadata_to_context;
 use crate::core::observer::{
@@ -483,8 +483,8 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 physical_inputs.to_vec(),
             ))));
         }
-        if let Some(sqlx_scan) = node.as_any().downcast_ref::<SqlxScanLogical>() {
-            let fields = sqlx_scan
+        if let Some(ch_scan) = node.as_any().downcast_ref::<ClickHouseScanLogical>() {
+            let fields = ch_scan
                 .schema
                 .fields()
                 .iter()
@@ -497,11 +497,10 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 })
                 .collect::<Vec<_>>();
             let arrow_schema = datafusion::arrow::datatypes::Schema::new(fields);
-            return Ok(Some(Arc::new(SqlxScanExec::new(
-                sqlx_scan.url.clone(),
-                sqlx_scan.query.clone(),
+            return Ok(Some(Arc::new(ClickHouseScanExec::new(
+                ch_scan.url.clone(),
+                ch_scan.query.clone(),
                 Arc::new(arrow_schema),
-                sqlx_scan.params.clone(),
             ))));
         }
         Ok(None)
