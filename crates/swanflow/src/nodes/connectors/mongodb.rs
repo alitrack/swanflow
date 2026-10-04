@@ -432,7 +432,7 @@ fn bson_val_to_string(val: &Bson) -> String {
 /// Extract the database name from a MongoDB connection URL.
 ///
 /// URL format: mongodb://[user:pass@]host[:port][/db][?options]
-fn extract_db_name(url: &str) -> Result<String> {
+fn extract_db_name(url: &str) -> CoreResult<String> {
     // Remove scheme
     let rest = url
         .strip_prefix("mongodb://")

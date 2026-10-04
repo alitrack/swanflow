@@ -36,7 +36,7 @@ impl SqlServerConnector {
     /// mssql://username:password@host:port/database
     /// or
     /// Server=host,port;Database=db;User Id=user;Password=pass;
-    fn parse_url(url: &str) -> Result<(String, u16, String, String, String)> {
+    fn parse_url(url: &str) -> CoreResult<(String, u16, String, String, String)> {
         if url.starts_with("mssql://") || url.starts_with("sqlserver://") {
             Self::parse_jdbc_url(url)
         } else {
@@ -44,7 +44,7 @@ impl SqlServerConnector {
         }
     }
 
-    fn parse_jdbc_url(url: &str) -> Result<(String, u16, String, String, String)> {
+    fn parse_jdbc_url(url: &str) -> CoreResult<(String, u16, String, String, String)> {
         let without_scheme = url
             .strip_prefix("mssql://")
             .or_else(|| url.strip_prefix("sqlserver://"))
@@ -80,7 +80,7 @@ impl SqlServerConnector {
         ))
     }
 
-    fn parse_odbc_url(url: &str) -> Result<(String, u16, String, String, String)> {
+    fn parse_odbc_url(url: &str) -> CoreResult<(String, u16, String, String, String)> {
         let mut server = String::new();
         let mut port = 1433u16;
         let mut database = String::new();
@@ -117,7 +117,7 @@ impl SqlServerConnector {
     }
 
     /// Create a tiberius client connection.
-    async fn connect_client(&self) -> Result<Client<tokio_util::compat::Compat<TcpStream>>> {
+    async fn connect_client(&self) -> CoreResult<Client<tokio_util::compat::Compat<TcpStream>>> {
         let mut config = Config::new();
         config.host(&self.server);
         config.port(self.port);
