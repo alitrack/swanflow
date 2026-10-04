@@ -6,10 +6,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use aws_sdk_s3::presigning::PresigningConfig;
-use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::Client as S3Client;
-
 use calamine::{open_workbook, Data, Reader, Xlsx};
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder,
@@ -721,60 +717,6 @@ pub trait Connector: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-pub struct S3Manager {
-    client: S3Client,
-    bucket: String,
-}
-
-impl S3Manager {
-    pub async fn new(bucket: String) -> anyhow::Result<Self> {
-        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-        let client = S3Client::new(&config);
-        Ok(Self { client, bucket })
-    }
-
-    pub async fn upload_file(&self, key: &str, path: &str) -> anyhow::Result<()> {
-        let body = ByteStream::from_path(std::path::Path::new(path)).await?;
-        self.client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .body(body)
-            .send()
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_presigned_url(
-        &self,
-        key: &str,
-        expires_in: Duration,
-    ) -> anyhow::Result<String> {
-        let presigned = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .presigned(PresigningConfig::expires_in(expires_in)?)
-            .await?;
-        Ok(presigned.uri().to_string())
-    }
-
-    pub async fn put_presigned_url(
-        &self,
-        key: &str,
-        expires_in: Duration,
-    ) -> anyhow::Result<String> {
-        let presigned = self
-            .client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .presigned(PresigningConfig::expires_in(expires_in)?)
-            .await?;
-        Ok(presigned.uri().to_string())
-    }
-}
 
 pub mod excel;
 pub use excel::*;

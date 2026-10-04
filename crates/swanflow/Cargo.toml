@@ -54,7 +54,7 @@ pyo3-arrow = "0.14"
 parquet = { version = "57.0", features = ["arrow"] }
 calamine = "0.33.0"
 rust_xlsxwriter = "0.93.0"
-duckdb = { version = "1.10505", features = ["bundled"] }
+duckdb = { version = "1.10506", features = ["bundled"] }
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls", "tokio-util"] }
 mongodb = "3.2.5"
 bson = { version = "2", features = ["chrono-0_4"] }
@@ -66,8 +66,6 @@ lazy_static = "1.5.0"
 hex = "0.4"
 redis = "0.24"
 tokio-util = { version = "0.7.18", features = ["codec", "compat"] }
-aws-config = "1.8.14"
-aws-sdk-s3 = "1.124.0"
 swanflow-ai = { path = "../swanflow-ai", optional = true }
 
 [features]
