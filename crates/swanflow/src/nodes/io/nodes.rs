@@ -895,6 +895,7 @@ pub struct DbConnectorNode;
 enum DbDriver {
     DuckDBPostgres,
     DuckDBSqlite,
+    DuckDBMysql,
     SqlxAny,
     PostgresConnector,
     MySqlConnector,
@@ -907,6 +908,8 @@ impl DbConnectorNode {
             DbDriver::DuckDBPostgres
         } else if url.starts_with("sqlite://") {
             DbDriver::DuckDBSqlite
+        } else if url.starts_with("mysql://") || url.starts_with("mariadb://") {
+            DbDriver::DuckDBMysql
         } else {
             DbDriver::SqlxAny
         }
@@ -917,30 +920,29 @@ impl DbConnectorNode {
         query: &str,
         driver: DbDriver,
     ) -> Result<Vec<LogicalPlan>> {
-        let ext = if driver == DbDriver::DuckDBPostgres {
-            "postgres"
-        } else {
-            "sqlite"
+        let ext = match driver {
+            DbDriver::DuckDBPostgres => "postgres",
+            DbDriver::DuckDBMysql => "mysql",
+            _ => "sqlite",
         };
 
-        let (path, attach_sql) = if driver == DbDriver::DuckDBPostgres {
-            (
-                ":memory:".to_string(),
-                Some(format!(
-                    "ATTACH '{}' AS ext_db (TYPE postgres);",
-                    expanded_url
-                )),
-            )
-        } else {
-            let db_path = expanded_url.trim_start_matches("sqlite://");
-            (
-                ":memory:".to_string(),
-                Some(format!("ATTACH '{}' AS ext_db (TYPE sqlite);", db_path)),
-            )
+        let attach_sql = match driver {
+            DbDriver::DuckDBPostgres => Some(format!(
+                "ATTACH '{}' AS ext_db (TYPE postgres);",
+                expanded_url
+            )),
+            DbDriver::DuckDBMysql => Some(format!(
+                "ATTACH '{}' AS ext_db (TYPE mysql);",
+                expanded_url
+            )),
+            _ => {
+                let db_path = expanded_url.trim_start_matches("sqlite://");
+                Some(format!("ATTACH '{}' AS ext_db (TYPE sqlite);", db_path))
+            }
         };
 
         let batches =
-            DuckDBHelper::query_arrow(&path, query, &[ext.to_string()], &attach_sql).await?;
+            DuckDBHelper::query_arrow(":memory:", query, &[ext.to_string()], &attach_sql).await?;
         if batches.is_empty() {
             return Err(anyhow!("Query returned no data for schema inference"));
         }
@@ -950,7 +952,7 @@ impl DbConnectorNode {
         Ok(vec![LogicalPlan::Extension(
             datafusion::logical_expr::Extension {
                 node: Arc::new(crate::core::datasource::DuckDBScanLogical {
-                    connection_path: path,
+                    connection_path: ":memory:".to_string(),
                     extensions: vec![ext.to_string()],
                     attach_sql,
                     query: query.to_string(),
@@ -1021,7 +1023,7 @@ impl NodeBehavior for DbConnectorNode {
                     "table": { "type": "string", "description": "Table name (alternative to query)" },
                     "driver": {
                         "type": "string",
-                        "enum": ["auto", "postgres", "mysql", "clickhouse", "duckdb_postgres", "duckdb_sqlite", "sqlx_any"],
+                        "enum": ["auto", "postgres", "mysql", "clickhouse", "duckdb_postgres", "duckdb_sqlite", "duckdb_mysql", "sqlx_any"],
                         "default": "auto"
                     }
                 },
@@ -1084,6 +1086,7 @@ impl NodeBehavior for DbConnectorNode {
                 "clickhouse" => DbDriver::ClickHouseConnector,
                 "duckdb_postgres" => DbDriver::DuckDBPostgres,
                 "duckdb_sqlite" => DbDriver::DuckDBSqlite,
+                "duckdb_mysql" => DbDriver::DuckDBMysql,
                 "sqlx_any" => DbDriver::SqlxAny,
                 _ => DbDriver::SqlxAny,
             }
@@ -1097,8 +1100,8 @@ impl NodeBehavior for DbConnectorNode {
         };
 
         match resolved_driver {
-            DbDriver::DuckDBPostgres | DbDriver::DuckDBSqlite => {
-                // Keep existing DuckDB path
+            DbDriver::DuckDBPostgres | DbDriver::DuckDBSqlite | DbDriver::DuckDBMysql => {
+                // DuckDB scanner path (postgres / sqlite / mysql ATTACH)
                 Self::build_duckdb_plan(&expanded_url, &effective_query, resolved_driver).await
             }
             DbDriver::SqlxAny => {

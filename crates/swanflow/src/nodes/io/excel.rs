@@ -24,7 +24,6 @@ use futures::Stream;
 use futures::StreamExt;
 use serde_json::json;
 use serde_json::Value as JsonValue;
-use sqlx::{Column, Row};
 use std::fmt;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -33,10 +32,6 @@ use std::task::{Context, Poll};
 
 use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
 use crate::nodes::config as cfg;
-use crate::nodes::connectors::clickhouse::ClickHouseConnector;
-use crate::nodes::connectors::mysql::MySqlConnector;
-use crate::nodes::connectors::postgres::PostgresConnector;
-use crate::nodes::connectors::{ConnConfig, Connector};
 use crate::nodes::{InferredMetadata, NodeBehavior, NodeSpec, PortSpec};
 
 pub struct ExcelReadNode;
