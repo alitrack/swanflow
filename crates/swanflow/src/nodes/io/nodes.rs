@@ -47,13 +47,21 @@ impl DuckDBHelper {
         // filesystem. In-memory databases can't be read-only, so they
         // keep the default (read-write) config.
         let conn = if path == ":memory:" {
-            Connection::open(path).map_err(|e| anyhow!("Failed to open DuckDB: {}", e))?
+            // allow_unsigned_extensions: locally-built extension binaries
+            // (turbovec/luajit/etc.) cannot be LOADed without it. Signed
+            // registry extensions are unaffected.
+            let config = duckdb::Config::default()
+                .allow_unsigned_extensions()
+                .map_err(|e| anyhow!("Failed to build DuckDB config: {}", e))?;
+            Connection::open_with_flags(path, config)
+                .map_err(|e| anyhow!("Failed to open DuckDB: {}", e))?
         } else {
             if !std::path::Path::new(path).is_file() {
                 return Err(anyhow!("DuckDB database file does not exist: {}", path));
             }
             let config = duckdb::Config::default()
-                .access_mode(duckdb::AccessMode::ReadOnly)
+                .allow_unsigned_extensions()
+                .and_then(|c| c.access_mode(duckdb::AccessMode::ReadOnly))
                 .map_err(|e| anyhow!("Failed to build DuckDB config: {}", e))?;
             Connection::open_with_flags(path, config)
                 .map_err(|e| anyhow!("Failed to open DuckDB read-only: {}", e))?
@@ -149,13 +157,18 @@ impl NodeBehavior for DuckDBReadNode {
     ) -> Result<Vec<LogicalPlan>> {
         let path = cfg::optional_string(config, "path").unwrap_or_else(|| ":memory:".to_string());
         let query = cfg::required_string(config, "query")?;
+        // extensions the user declared in config must flow into BOTH the
+        // schema-inference probe and the runtime DuckDBScanLogical — the old
+        // code hardcoded `&[]`/`vec![]` here, silently dropping the config so
+        // LOADed table functions vanished at COPY time.
+        let extensions = cfg::optional_string_array(config, "extensions")?;
 
         // Infer the REAL schema by running the query once (temp-parquet bridge).
         // Previously this returned an EmptyRelation (0 rows) — the data was
         // never actually emitted, only the schema. Now we return a real
         // DuckDBScan that re-runs the query at execution time and streams the
         // rows downstream.
-        let batches = DuckDBHelper::query_arrow(&path, &query, &[], &None).await?;
+        let batches = DuckDBHelper::query_arrow(&path, &query, &extensions, &None).await?;
         if batches.is_empty() {
             return Err(anyhow!("Query returned no data for schema inference"));
         }
@@ -166,7 +179,7 @@ impl NodeBehavior for DuckDBReadNode {
         Ok(vec![LogicalPlan::Extension(Extension {
             node: Arc::new(crate::core::datasource::DuckDBScanLogical {
                 connection_path: path,
-                extensions: vec![],
+                extensions,
                 attach_sql: None,
                 query,
                 schema: Arc::new(df_schema),
