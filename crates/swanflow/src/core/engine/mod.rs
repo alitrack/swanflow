@@ -710,6 +710,12 @@ impl SwanFlowEngine {
             })
             .collect();
 
+        // Digest chain state for this run (skip-if-fresh bookkeeping):
+        // node_id -> digest, filled as nodes execute or are skipped.
+        let df_digest_map = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::<Uuid, assets::UpstreamDigest>::new(),
+        ));
+
         tokio::spawn(async move {
             let cm = checkpoint::CheckpointManager::new(&df_cache_dir);
 
@@ -881,6 +887,94 @@ impl SwanFlowEngine {
                         continue;
                     }
 
+                    // ── ADR-014 Stage 1: skip-if-fresh ─────────────────────
+                    // When the node's digest chain is unchanged AND a cached
+                    // parquet materialization exists, reuse it instead of
+                    // re-executing. Only enabled via SWANFLOW_SKIP_FRESH=1
+                    // (opt-in until proven in the wild).
+                    if std::env::var("SWANFLOW_SKIP_FRESH")
+                        .map(|v| v == "1")
+                        .unwrap_or(false)
+                    {
+                        let empty_cfg = String::new();
+                        let empty_ups: Vec<(Uuid, String, String)> = Vec::new();
+                        let (cfg, ups): (&String, &Vec<(Uuid, String, String)>) =
+                            match df_level_upstreams.get(&node_id) {
+                                Some((c, u)) => (c, u),
+                                None => (&empty_cfg, &empty_ups),
+                            };
+                        let upstream_digests: Vec<(Uuid, assets::UpstreamDigest)> = ups
+                            .iter()
+                            .filter_map(|(uid, _uty, _ucfg)| {
+                                df_digest_map
+                                    .lock()
+                                    .ok()?
+                                    .get(uid)
+                                    .cloned()
+                                    .map(|d| (*uid, d))
+                            })
+                            .collect();
+                        let skip_result = assets::try_skip_fresh(
+                            &df_cache_dir,
+                            node_id,
+                            &node_type,
+                            cfg,
+                            ups,
+                            &upstream_digests,
+                        );
+                        if let Some(parquet_path) = skip_result {
+                            let table_name = format!("node_{}", &node_id.to_string()[..8]);
+                            // sync_metadata_to_context may have registered this
+                            // table at startup — replace it with our parquet view.
+                            let _ = ctx_shared.deregister_table(&table_name);
+                            let register = ctx_shared
+                                .register_parquet(
+                                    &table_name,
+                                    &parquet_path,
+                                    ParquetReadOptions::default(),
+                                )
+                                .await;
+                            match register {
+                                Ok(_) => {
+                                    println!(
+                                        "DEBUG: Skip-if-fresh: node {} reused {}",
+                                        node_id, parquet_path
+                                    );
+                                    let _ = tx.send(NodeEvent::Materialized {
+                                        node_id,
+                                        table_name,
+                                        parquet_path,
+                                    });
+                                    let _ = tx.send(NodeEvent::StateChanged {
+                                        node_id,
+                                        state: crate::nodes::NodeState::Executed,
+                                    });
+                                    // Keep the digest available for downstream
+                                    // skip decisions (chain continuity).
+                                    if let Some(d) = assets::recompute_digest(
+                                        node_id,
+                                        &node_type,
+                                        cfg,
+                                        &upstream_digests,
+                                    ) {
+                                        if let Ok(mut m) = df_digest_map.lock() {
+                                            m.insert(node_id, d);
+                                        }
+                                    }
+                                    continue;
+                                }
+                                Err(e) => {
+                                    // Degrade to normal execution, but leave
+                                    // a trace for debugging.
+                                    eprintln!(
+                                        "[assets] skip-if-fresh register failed for {}: {e}",
+                                        node_id
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     // Emit Running (StateProbeExec also sends this during stream, but
                     // emit early here for immediate feedback before planning starts)
                     let _ = tx.send(NodeEvent::StateChanged {
@@ -950,6 +1044,32 @@ impl SwanFlowEngine {
                                             cfg,
                                             ups,
                                         );
+                                        // Chain bookkeeping for downstream
+                                        // skip-if-fresh decisions.
+                                        let upstream_digests: Vec<(
+                                            Uuid,
+                                            assets::UpstreamDigest,
+                                        )> = ups
+                                            .iter()
+                                            .filter_map(|(uid, _uty, _ucfg)| {
+                                                df_digest_map
+                                                    .lock()
+                                                    .ok()?
+                                                    .get(uid)
+                                                    .cloned()
+                                                    .map(|d| (*uid, d))
+                                            })
+                                            .collect();
+                                        if let Some(d) = assets::recompute_digest(
+                                            node_id,
+                                            &node_type,
+                                            cfg,
+                                            &upstream_digests,
+                                        ) {
+                                            if let Ok(mut m) = df_digest_map.lock() {
+                                                m.insert(node_id, d);
+                                            }
+                                        }
                                     }
                                 }
                                 Err(e) => {

@@ -211,6 +211,69 @@ pub fn record_asset_run(
     }
 }
 
+/// Try to skip a fresh node: returns the parquet path when the node's
+/// recorded digest matches the freshly recomputed one AND a cached
+/// materialization (flow_metadata row + parquet file) exists.
+///
+/// `None` means "execute normally". Best-effort like the write side:
+/// ledger/duckdb errors degrade to executing the node.
+pub fn try_skip_fresh(
+    cache_dir: &str,
+    node_id: Uuid,
+    type_id: &str,
+    node_config_json: &str,
+    upstream: &[(Uuid, String, String)],
+    upstream_digests: &[(Uuid, UpstreamDigest)],
+) -> Option<String> {
+    let path = std::path::Path::new(cache_dir).join("assets.duckdb");
+    if !path.exists() {
+        return None;
+    }
+    let conn = match duckdb::Connection::open(&path) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    let ledger = AssetLedger { conn };
+    let refs: Vec<(Uuid, &UpstreamDigest)> = upstream_digests
+        .iter()
+        .map(|(id, d)| (*id, d))
+        .collect();
+    let recomputed = compute_digest(node_id, type_id, node_config_json, &refs);
+    let recorded = ledger.recorded_digest(node_id).ok()??;
+    if recorded != recomputed.hex() {
+        return None;
+    }
+    // Digest matches — is there a cached materialization to reuse?
+    let metadata_path = std::path::Path::new(cache_dir).join("metadata.duckdb");
+    let conn = duckdb::Connection::open(&metadata_path).ok()?;
+    let parquet_path: Option<String> = conn
+        .query_row(
+            "SELECT parquet_path FROM flow_metadata WHERE node_id = ? AND parquet_path != ''",
+            [&node_id.to_string()],
+            |row| row.get(0),
+        )
+        .ok();
+    let parquet_path = parquet_path?;
+    if !std::path::Path::new(&parquet_path).exists() {
+        return None;
+    }
+    Some(parquet_path)
+}
+
+/// Pure digest computation helper for chain bookkeeping (no ledger).
+pub fn recompute_digest(
+    node_id: Uuid,
+    type_id: &str,
+    node_config_json: &str,
+    upstream_digests: &[(Uuid, UpstreamDigest)],
+) -> Option<UpstreamDigest> {
+    let refs: Vec<(Uuid, &UpstreamDigest)> = upstream_digests
+        .iter()
+        .map(|(id, d)| (*id, d))
+        .collect();
+    Some(compute_digest(node_id, type_id, node_config_json, &refs))
+}
+
 /// Per-node staleness verdict for `assets status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetVerdict {
@@ -316,6 +379,45 @@ mod tests {
 
     fn d(bytes: u8) -> UpstreamDigest {
         UpstreamDigest { bytes: [bytes; 32] }
+    }
+
+    #[test]
+    fn try_skip_fresh_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("swanflow_skip_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_s = dir.to_str().unwrap().to_string();
+
+        // No ledger yet -> no skip
+        assert!(try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", &[], &[]).is_none());
+
+        // Record a run, then skip should find a matching parquet.
+        let ledger = AssetLedger::open(std::path::Path::new(&dir_s)).unwrap();
+        ledger.record_asset_run_for(Uuid::nil(), "t", "{}", &[]).unwrap();
+        let parquet = dir.join("dummy.parquet");
+        std::fs::write(&parquet, b"x").unwrap();
+        let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
+        meta.execute_batch(
+            "CREATE TABLE IF NOT EXISTS flow_metadata (node_id TEXT PRIMARY KEY, table_name TEXT, parquet_path TEXT, schema_json TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+             INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES ('00000000-0000-0000-0000-000000000000', 't', 'dummy.parquet', '{}');",
+        ).unwrap();
+        let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", &[], &[]);
+        assert!(got.is_none(), "relative parquet_path must not skip: {:?}", got);
+
+        // Absolute path (as MaterializingStream records) -> skip
+        let abs = parquet.to_str().unwrap().to_string();
+        meta.execute_batch(&format!(
+            "UPDATE flow_metadata SET parquet_path = '{}';", abs
+        ))
+        .unwrap();
+        drop(meta); // release the file lock before re-opening inside try_skip_fresh
+        let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", &[], &[]);
+        assert_eq!(got.as_deref(), Some(abs.as_str()));
+
+        // Changed config -> no skip
+        assert!(try_skip_fresh(&dir_s, Uuid::nil(), "t", "{\"a\":1}", &[], &[]).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
