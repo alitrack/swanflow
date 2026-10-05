@@ -138,6 +138,20 @@ impl AssetLedger {
         Ok(())
     }
 
+    /// Last successful materialization time for a node (None = never).
+    pub fn last_materialized_at(&self, node_id: Uuid) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT last_run_at FROM asset_runs WHERE node_id = ?1")?;
+        let mut rows = stmt.query([node_id.to_string()])?;
+        Ok(rows
+            .next()?
+            .map(|r| r.get::<_, String>(0))
+            .transpose()?
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+            .map(|t| t.with_timezone(&chrono::Utc)))
+    }
+
     /// All recorded rows (for `assets list`).
     pub fn all(&self) -> anyhow::Result<Vec<(String, String, String)>> {
         let mut stmt = self

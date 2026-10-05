@@ -683,6 +683,31 @@ async fn main() -> anyhow::Result<()> {
                 if !ledger_path.exists() {
                     println!("📭 No materialization ledger yet ({} absent).", ledger_path.display());
                     println!("   Every node would be: never-run.");
+                    // Still show automation readiness — never-materialized
+                    // means freshness_violated fires (maximally stale).
+                    let now = chrono::Utc::now();
+                    for idx in workflow.graph.node_indices() {
+                        let node = &workflow.graph[idx];
+                        let Some(dsl) = node.config.get("automation").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let label = match swanflow::core::engine::automation::parse_automation(dsl) {
+                            Err(e) => format!("❌ parse error: {e}"),
+                            Ok(cond) => {
+                                let ctx = swanflow::core::engine::automation::EvalContext {
+                                    now,
+                                    last_materialized_at: None,
+                                    last_eval_ready_at: Some(now),
+                                };
+                                if swanflow::core::engine::automation::evaluate(&cond, &ctx) {
+                                    "🟢 ready".to_string()
+                                } else {
+                                    "⏸ hold".to_string()
+                                }
+                            }
+                        };
+                        println!("  ⚙️  {} automation: {dsl} — {label} (never materialized)", node.id);
+                    }
                     return Ok(());
                 }
                 let ledger = AssetLedger::open(&cache_dir)?;
@@ -696,6 +721,44 @@ async fn main() -> anyhow::Result<()> {
                         _ => "⚠️ ",
                     };
                     println!("  {} {} [{}] {}", marker, node_id, verdict.label(), type_id);
+                }
+                // ADR-014 Stage 3: automation conditions. Nodes whose config
+                // carries an `automation` string get a stateless readiness
+                // evaluation against the ledger (freshness inputs).
+                let now = chrono::Utc::now();
+                let mut any_automation = false;
+                for idx in workflow.graph.node_indices() {
+                    let node = &workflow.graph[idx];
+                    let Some(dsl) = node.config.get("automation").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    any_automation = true;
+                    let (label, detail) = match swanflow::core::engine::automation::parse_automation(dsl) {
+                        Err(e) => (format!("❌ parse error: {e}"), String::new()),
+                        Ok(cond) => {
+                            let mat = ledger.last_materialized_at(node.id).ok().flatten();
+                            let ctx = swanflow::core::engine::automation::EvalContext {
+                                now,
+                                last_materialized_at: mat,
+                                // last_eval_ready_at unknown for a fresh CLI
+                                // process — the daemon owns that state; for
+                                // status display treat cron gating as open
+                                // since the daemon's last tick.
+                                last_eval_ready_at: Some(now),
+                            };
+                            let lag = mat.map(|t| (now - t).num_minutes()).unwrap_or(i64::MAX);
+                            let lag_s = if lag == i64::MAX { "never".into() } else { format!("{lag}m ago") };
+                            let ready = swanflow::core::engine::automation::evaluate(&cond, &ctx);
+                            (
+                                if ready { "🟢 ready".to_string() } else { "⏸ hold".to_string() },
+                                format!("(materialized {lag_s})"),
+                            )
+                        }
+                    };
+                    println!("  ⚙️  {} automation: {dsl} — {label} {detail}", node.id);
+                }
+                if any_automation {
+                    println!("\n  (readiness shown for now={}; the daemon sensor re-evaluates every tick)", now.format("%Y-%m-%d %H:%M UTC"));
                 }
             }
             AssetsCommands::Backfill {

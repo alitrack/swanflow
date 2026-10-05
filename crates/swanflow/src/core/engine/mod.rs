@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod assets;
+pub mod automation;
 pub mod cache;
 pub mod checkpoint;
 pub mod daemon;
