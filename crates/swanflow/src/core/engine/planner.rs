@@ -322,6 +322,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
             return Ok(Some(Arc::new(DuckDBWriteSinkExec::new(
                 duckdb_write.db_path.clone(),
                 duckdb_write.table.clone(),
+                duckdb_write.write_mode.clone(),
                 physical_inputs.to_vec(),
                 physical_inputs
                     .first()

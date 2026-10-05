@@ -216,7 +216,11 @@ impl NodeBehavior for DuckDBWriteNode {
                     "path": { "type": "string", "default": "data.db",
                                "description": "DuckDB database file (created if missing). Use ':memory:' to discard after the run." },
                     "table": { "type": "string",
-                               "description": "Target table name; replaced on each run." }
+                               "description": "Target table name; replaced on each run." },
+                    "mode": { "type": "string", "enum": ["replace", "append"], "default": "replace",
+                               "description": "replace = CREATE OR REPLACE whole table each run; append = INSERT, accumulating across runs (for partitioned backfills)." },
+                    "partition_by": { "type": "string",
+                               "description": "Column for append mode idempotency: rows whose partition value matches incoming data are deleted before insert (re-running an interval replaces exactly its own rows)." }
                 },
                 "required": ["table"]
             }),
@@ -236,10 +240,24 @@ impl NodeBehavior for DuckDBWriteNode {
         let table = cfg::required_string(config, "table")?;
         let path =
             cfg::optional_string(config, "path").unwrap_or_else(|| "data.db".to_string());
+        // mode: "replace" (default, historical) | "append" — with optional
+        // partition_by for idempotent per-interval backfills.
+        let write_mode = match cfg::optional_string(config, "mode").as_deref() {
+            None | Some("replace") => crate::core::datasource::WriteMode::Replace,
+            Some("append") => crate::core::datasource::WriteMode::Append {
+                partition_by: cfg::optional_string(config, "partition_by"),
+            },
+            Some(other) => {
+                return Err(anyhow::anyhow!(
+                    "invalid mode '{other}': expected \"replace\" or \"append\""
+                ))
+            }
+        };
         let sink = LogicalPlan::Extension(Extension {
             node: Arc::new(crate::core::datasource::DuckDBWriteSinkLogical {
                 db_path: path,
                 table,
+                write_mode,
                 inputs,
             }),
         });

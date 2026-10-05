@@ -661,11 +661,23 @@ pub use excel::*;
 // durable write with native type inference.
 // ---------------------------------------------------------------------------
 
+/// Write mode for `DuckDBWriteSink`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WriteMode {
+    /// `CREATE OR REPLACE TABLE` — each run replaces the whole table (default,
+    /// historical behavior).
+    Replace,
+    /// Append rows; when `partition_by` is set, rows of the same partition
+    /// value are deleted first, making per-interval backfills idempotent.
+    Append { partition_by: Option<String> },
+}
+
 /// Logical node for writing upstream data into a DuckDB table.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct DuckDBWriteSinkLogical {
     pub db_path: String,
     pub table: String,
+    pub write_mode: WriteMode,
     pub inputs: Vec<LogicalPlan>,
 }
 
@@ -702,6 +714,7 @@ impl UserDefinedLogicalNodeCore for DuckDBWriteSinkLogical {
         Ok(Self {
             db_path: self.db_path.clone(),
             table: self.table.clone(),
+            write_mode: self.write_mode.clone(),
             inputs,
         })
     }
@@ -714,6 +727,7 @@ impl UserDefinedLogicalNodeCore for DuckDBWriteSinkLogical {
 pub struct DuckDBWriteSinkExec {
     pub db_path: String,
     pub table: String,
+    pub write_mode: WriteMode,
     pub inputs: Vec<Arc<dyn ExecutionPlan>>,
     pub out_schema: SchemaRef,
     cache: PlanProperties,
@@ -723,6 +737,7 @@ impl DuckDBWriteSinkExec {
     pub fn new(
         db_path: String,
         table: String,
+        write_mode: WriteMode,
         inputs: Vec<Arc<dyn ExecutionPlan>>,
         out_schema: SchemaRef,
     ) -> Self {
@@ -735,6 +750,7 @@ impl DuckDBWriteSinkExec {
         Self {
             db_path,
             table,
+            write_mode,
             inputs,
             out_schema,
             cache,
@@ -747,7 +763,12 @@ impl DuckDBWriteSinkExec {
     /// the bundled libduckdb; `read_arrow` is an extension function and not
     /// guaranteed present. Exposed `pub` so unit tests verify the durable
     /// write without a full execution plan.
-    pub fn write_batches(db_path: &str, table: &str, batches: &[RecordBatch]) -> Result<usize> {
+    pub fn write_batches(
+        db_path: &str,
+        table: &str,
+        batches: &[RecordBatch],
+        write_mode: &WriteMode,
+    ) -> Result<usize> {
         use parquet::arrow::ArrowWriter;
 
         if batches.is_empty() {
@@ -781,23 +802,99 @@ impl DuckDBWriteSinkExec {
 
         // 2. Durable write via DuckDB. `CREATE OR REPLACE` makes re-runs
         //    idempotent; a subsequent run replaces the previous table.
+        //    Append mode INSERTs; with `partition_by`, rows sharing the
+        //    incoming partition values are deleted first (idempotent
+        //    per-interval backfills).
         let conn = duckdb::Connection::open_with_flags(db_path, duckdb::Config::default())
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
         let safe_table = table.replace('"', "\"\"");
-        let sql = format!(
-            "CREATE OR REPLACE TABLE \"{}\" AS SELECT * FROM read_parquet('{}')",
-            safe_table, tmp_path.replace('\'', "''")
-        );
-        let res = conn
-            .execute(&sql, [])
-            .map_err(|e| {
+        let tmp = tmp_path.replace('\'', "''");
+        match write_mode {
+            WriteMode::Replace => {
+                let sql = format!(
+                    "CREATE OR REPLACE TABLE \"{}\" AS SELECT * FROM read_parquet('{}')",
+                    safe_table, tmp
+                );
+                let res = conn
+                    .execute(&sql, [])
+                    .map_err(|e| {
+                        let _ = std::fs::remove_file(&tmp_file);
+                        datafusion::error::DataFusionError::External(Box::new(e))
+                    })
+                    .map(|_| total_rows);
                 let _ = std::fs::remove_file(&tmp_file);
-                datafusion::error::DataFusionError::External(Box::new(e))
-            })
-            .map(|_| total_rows);
-        let _ = std::fs::remove_file(&tmp_file);
-        res
+                res
+            }
+            WriteMode::Append { partition_by } => {
+                // Partition values present in this batch (NULLs excluded —
+                // SQL `IN` cannot express them; such rows always append).
+                let part_vals: Option<Vec<String>> = partition_by.as_ref().map(|col| {
+                    let col = col.replace('"', "\"\"");
+                    batches
+                        .iter()
+                        .flat_map(|b| {
+                            b.schema()
+                                .index_of(col.as_str())
+                                .ok()
+                                .and_then(|i| b.column(i).as_any().downcast_ref::<datafusion::arrow::array::StringArray>())
+                                .map(|a| (0..a.len()).filter(move |&i| !a.is_null(i)).map(move |i| a.value(i).replace('\'', "''")).collect::<Vec<_>>())
+                                .unwrap_or_default()
+                        })
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect()
+                });
+                conn.execute_batch(&format!(
+                    "BEGIN TRANSACTION;\n\
+                     CREATE TABLE IF NOT EXISTS \"{}\" AS \
+                     SELECT * FROM read_parquet('{}') LIMIT 0;\n\
+                     INSERT INTO \"{}\" SELECT * FROM read_parquet('{}');",
+                    safe_table, tmp, safe_table, tmp
+                ))
+                .and_then(|_| {
+                    // Idempotency for partitioned backfills: within the same
+                    // transaction, delete-then-insert for the partitions we
+                    // are about to write. The CREATE..AS..LIMIT 0 above only
+                    // fires on first creation; existing partitions are
+                    // pruned here so a re-run of the same interval replaces
+                    // exactly its own rows.
+                    if let (Some(col), Some(vals)) = (partition_by, part_vals) {
+                        if !vals.is_empty() {
+                            let col = col.replace('"', "\"\"");
+                            let list = vals
+                                .iter()
+                                .map(|v| format!("'{}'", v))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            // Re-order: DELETE must come BEFORE INSERT, so
+                            // undo the eager INSERT above and redo both in
+                            // the right order.
+                            return conn.execute_batch(&format!(
+                                "ROLLBACK;\n\
+                                 BEGIN TRANSACTION;\n\
+                                 CREATE TABLE IF NOT EXISTS \"{}\" AS \
+                                 SELECT * FROM read_parquet('{}') LIMIT 0;\n\
+                                 DELETE FROM \"{}\" WHERE \"{}\" IN ({});\n\
+                                 INSERT INTO \"{}\" SELECT * FROM read_parquet('{}');\n\
+                                 COMMIT;",
+                                safe_table, tmp, safe_table, col, list, safe_table, tmp
+                            ));
+                        }
+                    }
+                    conn.execute_batch("COMMIT;")
+                })
+                .map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp_file);
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    datafusion::error::DataFusionError::External(Box::new(e))
+                })
+                .map(|_| {
+                    let _ = std::fs::remove_file(&tmp_file);
+                    total_rows
+                })
+            }
+        }
     }
 }
 
@@ -831,6 +928,7 @@ impl ExecutionPlan for DuckDBWriteSinkExec {
         Ok(Arc::new(Self::new(
             self.db_path.clone(),
             self.table.clone(),
+            self.write_mode.clone(),
             children,
             self.out_schema.clone(),
         )))
@@ -849,6 +947,7 @@ impl ExecutionPlan for DuckDBWriteSinkExec {
         Ok(Box::pin(DuckDBWriteSinkStream {
             db_path: self.db_path.clone(),
             table: self.table.clone(),
+            write_mode: self.write_mode.clone(),
             inputs: streams,
             schema: self.out_schema.clone(),
             pending: Vec::new(),
@@ -861,6 +960,7 @@ impl ExecutionPlan for DuckDBWriteSinkExec {
 struct DuckDBWriteSinkStream {
     db_path: String,
     table: String,
+    write_mode: WriteMode,
     inputs: Vec<SendableRecordBatchStream>,
     schema: SchemaRef,
     pending: Vec<RecordBatch>,
@@ -909,8 +1009,9 @@ impl Stream for DuckDBWriteSinkStream {
                 // one expression.
                 let db_path = self.db_path.clone();
                 let table = self.table.clone();
+                let write_mode = self.write_mode.clone();
                 let batches = std::mem::take(&mut self.pending);
-                Self::flush(&db_path, &table, batches)?;
+                Self::flush(&db_path, &table, batches, &write_mode)?;
             }
             Poll::Ready(None)
         } else {
@@ -921,8 +1022,13 @@ impl Stream for DuckDBWriteSinkStream {
 }
 
 impl DuckDBWriteSinkStream {
-    fn flush(db_path: &str, table: &str, batches: Vec<RecordBatch>) -> Result<()> {
-        let rows = DuckDBWriteSinkExec::write_batches(db_path, table, &batches)?;
+    fn flush(
+        db_path: &str,
+        table: &str,
+        batches: Vec<RecordBatch>,
+        write_mode: &WriteMode,
+    ) -> Result<()> {
+        let rows = DuckDBWriteSinkExec::write_batches(db_path, table, &batches, write_mode)?;
         println!(
             "DuckDBWriteSink: persisted {} rows into {}::{}",
             rows, db_path, table
@@ -964,13 +1070,31 @@ mod duckdb_write_sink_tests {
         vec![b1, b2]
     }
 
+    /// One-row batch with the same schema as `sample_batches`.
+    fn sample_batches_named(name: &str, score: f64) -> Vec<RecordBatch> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("age", DataType::Int64, true),
+            Field::new("score", DataType::Float64, true),
+        ]));
+        vec![RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![name.to_string()])),
+                Arc::new(Int64Array::from(vec![30])),
+                Arc::new(Float64Array::from(vec![score])),
+            ],
+        )
+        .unwrap()]
+    }
+
     #[test]
     fn write_batches_persists_to_duckdb_and_reads_back() {
         let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
         let batches = sample_batches();
 
-        let rows = DuckDBWriteSinkExec::write_batches(&db_str, "people", &batches).unwrap();
+        let rows = DuckDBWriteSinkExec::write_batches(&db_str, "people", &batches, &WriteMode::Replace).unwrap();
         assert_eq!(rows, 3);
 
         // Durable: a FRESH connection must see the data.
@@ -1000,16 +1124,79 @@ mod duckdb_write_sink_tests {
         let db_str = db.to_str().unwrap().to_string();
         let batches = sample_batches();
 
-        DuckDBWriteSinkExec::write_batches(&db_str, "people", &batches).unwrap();
+        DuckDBWriteSinkExec::write_batches(&db_str, "people", &batches, &WriteMode::Replace).unwrap();
         // Second run with fewer rows must REPLACE, not append.
         let one = vec![batches[0].slice(0, 1)];
-        DuckDBWriteSinkExec::write_batches(&db_str, "people", &one).unwrap();
+        DuckDBWriteSinkExec::write_batches(&db_str, "people", &one, &WriteMode::Replace).unwrap();
 
         let conn = duckdb::Connection::open(&db).unwrap();
         let n: i64 = conn
             .query_row("SELECT count(*) FROM people", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn write_batches_append_accumulates() {
+        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let batches = sample_batches();
+
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "people", &batches,
+            &WriteMode::Append { partition_by: None },
+        )
+        .unwrap();
+        // Second run with a different single row must APPEND.
+        let other = sample_batches_named("dave", 77.5);
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "people", &other,
+            &WriteMode::Append { partition_by: None },
+        )
+        .unwrap();
+
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM people", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 4);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn write_batches_append_partition_is_idempotent() {
+        // The core backfill promise: re-writing the same partition replaces
+        // exactly its own rows, never duplicates, never touches siblings.
+        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let mode = WriteMode::Append { partition_by: Some("name".into()) };
+
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "people", &sample_batches(),
+            &mode,
+        )
+        .unwrap();
+        // Re-write alice's partition with a different score.
+        let alice_v2 = sample_batches_named("alice", 99.0);
+        DuckDBWriteSinkExec::write_batches(&db_str, "people", &alice_v2, &mode).unwrap();
+        // Re-write alice AGAIN — still exactly one alice row (double-run safe).
+        let alice_v3 = sample_batches_named("alice", 100.0);
+        DuckDBWriteSinkExec::write_batches(&db_str, "people", &alice_v3, &mode).unwrap();
+
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM people", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3, "3 original people, alice replaced in place");
+        let alice_score: f64 = conn
+            .query_row("SELECT score FROM people WHERE name='alice'", [], |r| r.get(0))
+            .unwrap();
+        assert!((alice_score - 100.0).abs() < 1e-9, "alice is the latest write");
+        let bob_score: f64 = conn
+            .query_row("SELECT score FROM people WHERE name='bob'", [], |r| r.get(0))
+            .unwrap();
+        assert!((bob_score - 77.0).abs() < 1e-9, "sibling partition untouched");
         std::fs::remove_file(&db).ok();
     }
 
