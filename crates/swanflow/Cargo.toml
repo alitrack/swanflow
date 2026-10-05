@@ -29,6 +29,7 @@ swanflow-core = { path = "../swanflow-core" }
 swanflow-knime = { path = "../swanflow-knime" }
 swanflow-plugin-sdk = { path = "../swanflow-plugin-sdk" }
 datafusion = "52.1.0"
+sqlparser = "0.59"
 arrow = { version = "57.0", features = ["ffi"] }
 tokio = { version = "1.0", features = ["full"] }
 async-trait = "0.1"

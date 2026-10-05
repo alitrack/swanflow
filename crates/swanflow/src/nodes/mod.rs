@@ -26,6 +26,7 @@ pub mod middleware;
 pub mod script;
 pub mod sql;
 pub mod sql_duckdb;
+pub mod sql_lineage;
 pub mod transform;
 pub mod wasm;
 
@@ -296,6 +297,14 @@ pub trait NodeBehavior: Send + Sync {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>>;
+
+    /// Static analysis hooks (planning-time, zero-execution). Returned
+    /// strings surface as node diagnostics (visible via `swanflow inspect`
+    /// and on the canvas). Default: no analysis. Implementations must be
+    /// cheap and never fail planning — lineage/limits hints are advisory.
+    fn analyze(&self, _config: &JsonValue) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Predict the output schema(s) and optionally provide a data sample.
     async fn infer_schema(

@@ -211,6 +211,13 @@ impl WorkflowCompiler {
                     datafusion::error::DataFusionError::Plan(diagnostic.to_event_message())
                 })?;
 
+            // Static analysis (SQL lineage etc.): advisory diagnostics, never
+            // fails planning. Surfaced via inspect output and the canvas
+            // diagnostics channel.
+            for hint in spec.analyze(&node.config) {
+                self.diagnostics.entry(node.id).or_default().push(hint);
+            }
+
             self.inferred_schemas.insert(
                 node.id,
                 compiled_vec.iter().map(|p| p.schema().clone()).collect(),
