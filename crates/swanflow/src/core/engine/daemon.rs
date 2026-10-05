@@ -163,6 +163,18 @@ pub struct Daemon {
     engine: Arc<SwanFlowEngine>,
     workflows: Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
     quack_config: Option<QuackConfig>,
+    /// ADR-014 Stage 3: workflows registered for automation sensor ticks.
+    watched: Arc<Mutex<Vec<WatchedWorkflow>>>,
+    /// Sensor tick period (default 30s). Exposed for tests.
+    tick_secs: u64,
+}
+
+/// A workflow registered with the daemon's automation sensor.
+pub struct WatchedWorkflow {
+    pub workflow: Workflow,
+    /// Per-node last-ready timestamps (gates on_cron / on_interval
+    /// re-firing); persisted nowhere yet — daemon lifetime only.
+    pub last_ready: HashMap<Uuid, chrono::DateTime<chrono::Utc>>,
 }
 
 impl Daemon {
@@ -172,7 +184,15 @@ impl Daemon {
             engine: Arc::new(engine),
             workflows: Arc::new(Mutex::new(HashMap::new())),
             quack_config: None,
+            watched: Arc::new(Mutex::new(Vec::new())),
+            tick_secs: 30,
         }
+    }
+
+    /// Override the sensor tick period (ADR-014 Stage 3).
+    pub fn with_tick_secs(mut self, secs: u64) -> Self {
+        self.tick_secs = secs;
+        self
     }
 
     pub fn with_socket_path(mut self, path: PathBuf) -> Self {
@@ -227,6 +247,24 @@ impl Daemon {
         let listener = UnixListener::bind(&self.socket_path)?;
         tracing::info!("SwanFlow daemon listening on {}", self.socket_path.display());
 
+        // ── ADR-014 Stage 3: automation sensor loop ──
+        // Every tick, evaluate registered workflows' automation conditions
+        // (stateless evaluator + daemon-owned last_ready state) and execute
+        // any workflow with a ready node. Runs in the daemon task — no new
+        // thread, per the ADR.
+        {
+            let engine = self.engine.clone();
+            let watched = self.watched.clone();
+            let tick = std::time::Duration::from_secs(self.tick_secs.max(1));
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tick);
+                loop {
+                    interval.tick().await;
+                    sensor_tick(&engine, &watched).await;
+                }
+            });
+        }
+
         loop {
             let (stream, addr) = listener.accept().await?;
             // P2-4: keep a peer label so write failures on a connection are identifiable.
@@ -236,11 +274,104 @@ impl Daemon {
                 .unwrap_or_else(|| "unnamed-client".to_string());
             let engine = self.engine.clone();
             let workflows = self.workflows.clone();
+            let watched = self.watched.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_client(stream, engine, workflows, peer).await {
+                if let Err(e) = handle_client(stream, engine, workflows, watched, peer).await {
                     tracing::warn!("Client error: {}", e);
                 }
             });
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ADR-014 Stage 3 — automation sensor
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// One sensor pass: for every watched workflow, find nodes whose
+/// `automation` condition evaluates ready; if any, execute the whole
+/// workflow (fresh engine run — same semantics as backfill) and stamp
+/// last_ready for the nodes that fired.
+async fn sensor_tick(
+    engine: &Arc<SwanFlowEngine>,
+    watched: &Arc<Mutex<Vec<WatchedWorkflow>>>,
+) {
+    use crate::core::engine::automation::{evaluate, parse_automation, EvalContext};
+    use chrono::Utc;
+
+    let now = Utc::now();
+    // Snapshot decisions under the lock, execute outside it (runs can be
+    // long; we must not block watch registration on an execution).
+    let mut to_run: Vec<(usize, Workflow, Vec<Uuid>)> = Vec::new();
+    {
+        let mut w = watched.lock().await;
+        for (i, ww) in w.iter_mut().enumerate() {
+            let mut ready_nodes = Vec::new();
+            for idx in ww.workflow.graph.node_indices() {
+                let node = &ww.workflow.graph[idx];
+                let Some(dsl) = node.config.get("automation").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let Ok(cond) = parse_automation(dsl) else {
+                    continue; // parse errors surface via `assets status`
+                };
+                // Freshness input from the ledger — open per tick (short
+                // lived; the engine's record hook owns the write window).
+                let mat = crate::core::engine::assets::AssetLedger::open(std::path::Path::new(
+                    &crate::core::engine::default_cache_dir(),
+                ))
+                .ok()
+                .and_then(|l| l.last_materialized_at(node.id).ok().flatten());
+
+                let ctx = EvalContext {
+                    now,
+                    last_materialized_at: mat,
+                    last_eval_ready_at: ww.last_ready.get(&node.id).copied(),
+                };
+                if evaluate(&cond, &ctx) {
+                    ready_nodes.push(node.id);
+                }
+            }
+            if !ready_nodes.is_empty() {
+                for id in &ready_nodes {
+                    ww.last_ready.insert(*id, now);
+                }
+                to_run.push((i, ww.workflow.clone(), ready_nodes));
+            }
+        }
+    }
+
+    for (_, workflow, ready_nodes) in to_run {
+        tracing::info!(
+            "automation sensor: {} node(s) ready in '{}' — executing",
+            ready_nodes.len(),
+            workflow.name
+        );
+        match engine.execute_workflow(&workflow).await {
+            Ok(rx) => {
+                let mut rx = rx;
+                let mut errs = 0usize;
+                let mut first_err = String::new();
+                while let Some(ev) = rx.recv().await {
+                    if let crate::core::engine::NodeEvent::Error { message, node_id, .. } = &ev {
+                        errs += 1;
+                        if first_err.is_empty() {
+                            first_err = format!("node {node_id}: {message}");
+                        }
+                    }
+                }
+                if errs > 0 {
+                    tracing::warn!(
+                        "automation run of '{}' finished with {errs} error(s); first: {first_err}",
+                        workflow.name
+                    );
+                } else {
+                    tracing::info!("automation run of '{}' completed", workflow.name);
+                }
+            }
+            Err(e) => {
+                tracing::error!("automation run of '{}' failed to start: {e}", workflow.name);
+            }
         }
     }
 }
@@ -253,6 +384,7 @@ async fn handle_client(
     stream: UnixStream,
     engine: Arc<SwanFlowEngine>,
     workflows: Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
+    watched: Arc<Mutex<Vec<WatchedWorkflow>>>,
     peer: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
@@ -306,7 +438,7 @@ async fn handle_client(
             return Ok(());
         }
 
-        let resp = handle_method(&req, &engine, &workflows).await;
+        let resp = handle_method(&req, &engine, &workflows, &watched).await;
         if let Err(e) = write_response(&mut writer, &resp).await {
             eprintln!("[daemon] WARNING: write response to client {} failed: {}", peer, e);
         }
@@ -319,8 +451,71 @@ async fn handle_method(
     req: &DaemonRequest,
     engine: &Arc<SwanFlowEngine>,
     workflows: &Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
+    watched: &Arc<Mutex<Vec<WatchedWorkflow>>>,
 ) -> DaemonResponse {
     match req.method.as_str() {
+        // ADR-014 Stage 3: register a workflow file with the automation
+        // sensor. Params: {"path": "<workflow.yaml>"} (swanflow YAML/JSON,
+        // NOT knwf).
+        "automation.register" => {
+            let path = req.params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if path.is_empty() {
+                return DaemonResponse {
+                    id: req.id.clone(),
+                    ok: Some(false),
+                    error: Some("Missing 'path' parameter".to_string()),
+                    workflow_id: None,
+                    workflows: None,
+                    status: None,
+                };
+            }
+            // Reuse the CLI loader (YAML or JSON workflow).
+            let loaded = crate::load_workflow_file(std::path::Path::new(path));
+            let workflow = match loaded {
+                Ok(w) => w,
+                Err(e) => {
+                    return DaemonResponse {
+                        id: req.id.clone(),
+                        ok: Some(false),
+                        error: Some(format!("Failed to load workflow: {e}")),
+                        workflow_id: None,
+                        workflows: None,
+                        status: None,
+                    }
+                }
+            };
+            let has_automation = workflow
+                .graph
+                .node_indices()
+                .any(|i| workflow.graph[i].config.get("automation").is_some());
+            if !has_automation {
+                return DaemonResponse {
+                    id: req.id.clone(),
+                    ok: Some(false),
+                    error: Some("Workflow has no nodes with an 'automation' condition".to_string()),
+                    workflow_id: None,
+                    workflows: None,
+                    status: None,
+                };
+            }
+            let wf_id = workflow.id;
+            let n = workflow.name.clone();
+            let mut w = watched.lock().await;
+            w.push(WatchedWorkflow {
+                workflow,
+                last_ready: HashMap::new(),
+            });
+            tracing::info!("automation sensor now watching '{n}' ({wf_id})");
+            DaemonResponse {
+                id: req.id.clone(),
+                ok: Some(true),
+                error: None,
+                workflow_id: Some(wf_id.to_string()),
+                workflows: None,
+                status: None,
+            }
+        }
+
         "daemon.ping" => DaemonResponse {
             id: req.id.clone(),
             ok: Some(true),

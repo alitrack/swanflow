@@ -252,6 +252,9 @@ enum DaemonCommands {
         /// Custom socket path (default: ~/.swanflow/daemon.sock)
         #[arg(long)]
         socket: Option<PathBuf>,
+        /// Automation sensor tick period in seconds (default: 30)
+        #[arg(long)]
+        tick: Option<u64>,
         /// Enable embedded Quack server so any DuckDB client can ATTACH
         #[arg(long)]
         quack: bool,
@@ -280,6 +283,16 @@ enum DaemonCommands {
     /// Submit a KNIME workflow to the daemon for background execution
     Submit {
         /// Path to KNIME workflow file (.knwf/.knar)
+        file: PathBuf,
+        /// Custom socket path
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Register a workflow with the daemon's automation sensor (ADR-014
+    /// Stage 3). The daemon re-evaluates `automation` conditions every
+    /// tick and executes the workflow when nodes are ready.
+    Watch {
+        /// Path to workflow file (.yaml/.json) with `automation` conditions
         file: PathBuf,
         /// Custom socket path
         #[arg(long)]
@@ -1382,7 +1395,7 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
     }
 
     match cmd {
-        DaemonCommands::Start { socket, quack, quack_bind, quack_token, foreground } => {
+        DaemonCommands::Start { socket, tick, quack, quack_bind, quack_token, foreground } => {
             if foreground {
                 // Forked child — run daemon in foreground
                 let registry = Arc::new(NodeRegistry::default());
@@ -1390,6 +1403,9 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
                 let mut daemon = swanflow::core::engine::daemon::Daemon::new(engine);
                 if let Some(path) = socket {
                     daemon = daemon.with_socket_path(path);
+                }
+                if let Some(secs) = tick {
+                    daemon = daemon.with_tick_secs(secs);
                 }
                 if quack {
                     let mut qc = swanflow::core::engine::daemon::QuackConfig::default();
@@ -1419,6 +1435,9 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
                 .stdin(std::process::Stdio::null());
             if let Some(ref p) = socket {
                 child.arg("--socket").arg(p);
+            }
+            if let Some(secs) = tick {
+                child.arg("--tick").arg(secs.to_string());
             }
             if quack {
                 child.arg("--quack").arg("--quack-bind").arg(&quack_bind);
@@ -1472,6 +1491,15 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             let path = file.to_string_lossy().to_string();
             let resp = send_daemon_raw(&socket, "workflow.submit", serde_json::json!({"path": path})).await?;
             println!("{}", resp);
+            Ok(())
+        }
+        DaemonCommands::Watch { file, socket } => {
+            // Absolute path — the daemon's CWD differs from ours.
+            let abs = std::fs::canonicalize(&file)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", file.display()))?;
+            let resp = send_daemon_raw(&socket, "automation.register", serde_json::json!({"path": abs.to_string_lossy().to_string()})).await?;
+            println!("{}", resp);
+            println!("⚙️  The daemon sensor re-evaluates automation conditions every 30s.");
             Ok(())
         }
         DaemonCommands::List { socket } => {
@@ -1561,6 +1589,16 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
         }
         DaemonCommands::Ping { .. } => {
             run_ssh(host, &["swanflow", "daemon", "ping"])?;
+        }
+        DaemonCommands::Watch { file, .. } => {
+            let fname = file.file_name().and_then(|s| s.to_str()).unwrap_or("workflow.yaml");
+            let remote_path = format!("/tmp/{}", fname);
+            let status = Command::new("scp")
+                .arg(file.to_string_lossy().as_ref())
+                .arg(format!("{}:{}", host, remote_path))
+                .status()?;
+            anyhow::ensure!(status.success(), "SCP failed");
+            run_ssh(host, &["swanflow", "daemon", "watch", &remote_path])?;
         }
         DaemonCommands::List { .. } => {
             run_ssh(host, &["swanflow", "daemon", "list"])?;
