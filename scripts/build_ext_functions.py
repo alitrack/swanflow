@@ -61,6 +61,14 @@ from pathlib import Path
 # silently enable zero nodes.
 ENABLED_EXPR = "(function_type = 'table' AND extension_name <> 'core_functions')"
 
+# Human-curated opt-ins: extensions whose functions (including scalars) are
+# enabled on rebuild. Without this, a catalog rebuild silently resets
+# `enabled` for anything not covered by ENABLED_EXPR (this exact trap
+# reverted dashboard's 33 scalar functions to 0 on the next rebuild).
+CURATED_EXTENSIONS = {"dashboard"}
+_curated_list = ", ".join(f"'{e}'" for e in sorted(CURATED_EXTENSIONS))
+ENABLED_EXPR_FULL = f"({ENABLED_EXPR[1:-1]} OR extension_name IN ({_curated_list}))"
+
 DEFAULT_DB = os.environ.get(
     "SWANFLOW_EXT_FUNCTIONS_DB", "target/swanflow_cache/ext_functions.duckdb"
 )
@@ -169,7 +177,7 @@ def sql_direct(exts: list[str]) -> str:
     lines += [f"LOAD {e};" for e in exts]
     lines.append(
         f"CREATE OR REPLACE TABLE ext_functions AS "
-        f"SELECT {FULL_COLS}, {ENABLED_EXPR} AS enabled "
+        f"SELECT {FULL_COLS}, {ENABLED_EXPR_FULL} AS enabled "
         f"FROM duckdb_functions() "
         f"WHERE extension_name IS NOT NULL AND extension_name <> '';"
     )
@@ -214,7 +222,7 @@ def sql_loaddiff(exts: list[str]) -> str:
         )
     lines += [
         "CREATE OR REPLACE TABLE ext_functions AS SELECT *, "
-        f"{ENABLED_EXPR} AS enabled FROM "
+        f"{ENABLED_EXPR_FULL} AS enabled FROM "
         "(SELECT DISTINCT * FROM ext_fn_raw);",
         "DROP TABLE seen;",
         "DROP TABLE ext_fn_raw;",
