@@ -67,7 +67,42 @@ ENABLED_EXPR = "(function_type = 'table' AND extension_name <> 'core_functions')
 # reverted dashboard's 33 scalar functions to 0 on the next rebuild).
 CURATED_EXTENSIONS = {"dashboard", "ml"}
 _curated_list = ", ".join(f"'{e}'" for e in sorted(CURATED_EXTENSIONS))
-ENABLED_EXPR_FULL = f"({ENABLED_EXPR[1:-1]} OR extension_name IN ({_curated_list}))"
+
+# Per-extension function allowlists narrow a curated extension down to its
+# high-frequency analytics surface. Scalar-heavy management APIs (e.g.
+# dashboard's dash_* admin CRUD: create/clone/edit/drop/subscribe/...) are
+# session-lifecycle operations meant for SQL console use, not one-per-canvas
+# node types — 33 of them crowded the palette. Listed = on the canvas;
+# unlisted functions stay in the catalog (enabled=FALSE) and remain callable
+# via SQL inside duckdb_read / core.sql.duckdb nodes.
+CURATED_FUNCTIONS = {
+    "dashboard": {
+        "dash_auto",        # auto-chart a column
+        "dash_quick",       # one-shot dashboard from a query
+        "dash_pivot",       # pivot helper
+        "dash_pivot_sql",   # pivot via SQL
+        "dash_xray",        # data profiling view
+        "dash_dbt",         # dbt model integration
+        "dash_model",       # managed model (select/insert)
+        "dash_subscribe",   # push dashboard updates
+        "start_dash",       # start dashboard server
+        "stop_dash",        # stop dashboard server
+    },
+}
+
+def _curated_fn_predicate() -> str:
+    """SQL predicate: curated extension AND (no function allowlist OR in it)."""
+    ext_clauses = []
+    for ext in sorted(CURATED_EXTENSIONS):
+        allow = CURATED_FUNCTIONS.get(ext)
+        if allow:
+            fns = ", ".join(f"'{f}'" for f in sorted(allow))
+            ext_clauses.append(f"(extension_name = '{ext}' AND function_name IN ({fns}))")
+        else:
+            ext_clauses.append(f"(extension_name = '{ext}')")
+    return "(" + " OR ".join(ext_clauses) + ")"
+
+ENABLED_EXPR_FULL = f"({ENABLED_EXPR[1:-1]} OR {_curated_fn_predicate()})"
 
 DEFAULT_DB = os.environ.get(
     "SWANFLOW_EXT_FUNCTIONS_DB", "target/swanflow_cache/ext_functions.duckdb"
