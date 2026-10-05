@@ -12,6 +12,7 @@
 
 use std::path::Path;
 
+use chrono::Datelike;
 use uuid::Uuid;
 
 /// Digest of everything a node's output depends on.
@@ -95,6 +96,13 @@ impl AssetLedger {
                  last_run_at TEXT NOT NULL,
                  interval_start TEXT,
                  interval_end TEXT
+             );
+             CREATE TABLE IF NOT EXISTS asset_intervals (
+                 node_id TEXT NOT NULL,
+                 interval_start TEXT NOT NULL,
+                 interval_end TEXT NOT NULL,
+                 completed_at TEXT NOT NULL,
+                 PRIMARY KEY (node_id, interval_start)
              );",
         )?;
         Ok(Self { conn })
@@ -134,6 +142,147 @@ impl AssetLedger {
         }
         Ok(out)
     }
+
+    // ── Stage 2: interval tracking ────────────────────────────────────
+
+    /// Mark one interval as completed for a node.
+    pub fn record_interval(
+        &self,
+        node_id: Uuid,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO asset_intervals
+                 (node_id, interval_start, interval_end, completed_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            [
+                node_id.to_string(),
+                start.to_rfc3339(),
+                end.to_rfc3339(),
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Completed interval starts for a node, ascending.
+    pub fn completed_intervals(
+        &self,
+        node_id: Uuid,
+    ) -> anyhow::Result<Vec<chrono::DateTime<chrono::Utc>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT interval_start FROM asset_intervals WHERE node_id = ?1
+             ORDER BY interval_start",
+        )?;
+        let rows = stmt.query_map([node_id.to_string()], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut out = Vec::new();
+        for r in rows.flatten() {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&r) {
+                out.push(dt.with_timezone(&chrono::Utc));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// A half-open daily interval [start, start + 1 day).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DayInterval {
+    pub start: chrono::NaiveDate,
+}
+
+impl DayInterval {
+    pub fn end(&self) -> chrono::NaiveDate {
+        self.start.succ_opt().unwrap_or(self.start)
+    }
+    pub fn start_dt(&self) -> chrono::DateTime<chrono::Utc> {
+        self.start
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Utc)
+            .unwrap()
+    }
+    pub fn end_dt(&self) -> chrono::DateTime<chrono::Utc> {
+        self.end()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Utc)
+            .unwrap()
+    }
+}
+
+/// Compute missing daily intervals in [from, to] given the completed
+/// set — as contiguous runs (batches), SQLMesh-style set difference.
+pub fn daily_gaps(
+    completed: &[chrono::NaiveDate],
+    from: chrono::NaiveDate,
+    to: chrono::NaiveDate,
+) -> Vec<(chrono::NaiveDate, chrono::NaiveDate)> {
+    let done: std::collections::HashSet<chrono::NaiveDate> = completed.iter().copied().collect();
+    let mut batches: Vec<(chrono::NaiveDate, chrono::NaiveDate)> = Vec::new();
+    let mut cursor = Some(from);
+    while let Some(d) = cursor {
+        if d > to {
+            break;
+        }
+        if done.contains(&d) {
+            cursor = d.succ_opt();
+            continue;
+        }
+        // start of a gap; extend while consecutive days are also missing
+        let gap_start = d;
+        let mut gap_end = d;
+        let mut next = d.succ_opt();
+        while let Some(n) = next {
+            if n > to || done.contains(&n) {
+                break;
+            }
+            gap_end = n;
+            next = n.succ_opt();
+        }
+        batches.push((gap_start, gap_end));
+        cursor = gap_end.succ_opt();
+    }
+    batches
+}
+
+/// Render a calendar view: ✅ done, ❌ missing (gap), ⚪ outside range.
+pub fn render_calendar(
+    completed: &[chrono::NaiveDate],
+    from: chrono::NaiveDate,
+    to: chrono::NaiveDate,
+) -> String {
+    use std::fmt::Write as _;
+    let done: std::collections::HashSet<chrono::NaiveDate> = completed.iter().copied().collect();
+    let mut out = String::new();
+    // weekday header (Mo Tu We ...) starting at `from`'s weekday
+    let mut d = from;
+    let mut line = String::new();
+    // pad to Monday-start
+    let weekday = d.weekday().num_days_from_monday();
+    for _ in 0..weekday {
+        line.push_str("   ");
+    }
+    loop {
+        if d > to {
+            break;
+        }
+        let marker = if done.contains(&d) { "✅ " } else { "❌ " };
+        line.push_str(marker);
+        if d.weekday() == chrono::Weekday::Sun {
+            let _ = writeln!(out, "{}", line);
+            line = String::new();
+        }
+        d = d.succ_opt().unwrap_or(d);
+    }
+    if !line.trim().is_empty() {
+        let _ = writeln!(out, "{}", line);
+    }
+    out
 }
 
 impl AssetLedger {
@@ -202,6 +351,13 @@ pub fn record_asset_run(
                  last_run_at TEXT NOT NULL,
                  interval_start TEXT,
                  interval_end TEXT
+             );
+             CREATE TABLE IF NOT EXISTS asset_intervals (
+                 node_id TEXT NOT NULL,
+                 interval_start TEXT NOT NULL,
+                 interval_end TEXT NOT NULL,
+                 completed_at TEXT NOT NULL,
+                 PRIMARY KEY (node_id, interval_start)
              );",
         );
     }
@@ -379,6 +535,49 @@ mod tests {
 
     fn d(bytes: u8) -> UpstreamDigest {
         UpstreamDigest { bytes: [bytes; 32] }
+    }
+
+    #[test]
+    fn daily_gaps_contiguous_batching() {
+        use chrono::NaiveDate;
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        // done: 1st, 4th, 5th, 8th — range 1..=8
+        let done = vec![d("2026-09-01"), d("2026-09-04"), d("2026-09-05"), d("2026-09-08")];
+        let gaps = daily_gaps(&done, d("2026-09-01"), d("2026-09-08"));
+        // expect: [2..=3] batch, [6..=7] batch
+        assert_eq!(gaps.len(), 2);
+        assert_eq!(gaps[0], (d("2026-09-02"), d("2026-09-03")));
+        assert_eq!(gaps[1], (d("2026-09-06"), d("2026-09-07")));
+    }
+
+    #[test]
+    fn daily_gaps_empty_and_full() {
+        use chrono::NaiveDate;
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        // nothing done -> one contiguous batch covering the whole range
+        let gaps = daily_gaps(&[], d("2026-09-01"), d("2026-09-03"));
+        assert_eq!(gaps, vec![(d("2026-09-01"), d("2026-09-03"))]);
+        // everything done -> no gaps
+        let done = vec![d("2026-09-01"), d("2026-09-02"), d("2026-09-03")];
+        assert!(daily_gaps(&done, d("2026-09-01"), d("2026-09-03")).is_empty());
+    }
+
+    #[test]
+    fn daily_gaps_ignores_completed_outside_range() {
+        use chrono::NaiveDate;
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let done = vec![d("2026-08-31"), d("2026-09-02")];
+        let gaps = daily_gaps(&done, d("2026-09-01"), d("2026-09-03"));
+        assert_eq!(gaps, vec![(d("2026-09-01"), d("2026-09-01")), (d("2026-09-03"), d("2026-09-03"))]);
+    }
+
+    #[test]
+    fn render_calendar_marks_done_and_missing() {
+        use chrono::NaiveDate;
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let done = vec![d("2026-09-01")];
+        let cal = render_calendar(&done, d("2026-09-01"), d("2026-09-02"));
+        assert!(cal.contains('✅') && cal.contains('❌'), "cal: {cal}");
     }
 
     #[test]
