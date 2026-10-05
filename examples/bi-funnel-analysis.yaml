@@ -1,0 +1,88 @@
+# SwanFlow BI Template: Funnel Analysis (bi-funnel-analysis)
+#
+# Ported from QwenPaw-Data skill "atomic/bi-funnel-analysis" (Apache-2.0).
+# The SOP logic (step conversion, overall conversion, churn share, and the
+# three bottleneck-detection rules) is encoded entirely in DuckDB SQL —
+# no LLM, no Python, runs deterministically on any machine.
+#
+# Bottleneck rules (from the original SKILL.md):
+#   SEVERE : step_conv < 20%  OR churn_share > 40%
+#   MEDIUM : step_conv < 50%  OR churn_share > 20%
+#   LIGHT  : step_conv < 70%  OR churn_share > 10%
+#
+# Input shape expected from real data (replace node 0's query):
+#   step_order | step_name | user_count | industry_benchmark
+#
+# Usage:
+#   swanflow run examples/bi-funnel-analysis.yaml
+name: "BI Funnel Analysis"
+id: "a0000000-0000-0000-0000-0000000000a0"
+graph:
+  nodes:
+    - id: "a0000000-0000-0000-0000-0000000000a1"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: |
+          SELECT 1 AS step_order, '首页访问'   AS step_name, 10000 AS user_count, NULL  AS industry_benchmark
+          UNION ALL SELECT 2, '商品详情页', 6000, 0.65
+          UNION ALL SELECT 3, '加入购物车', 3000, 0.65
+          UNION ALL SELECT 4, '提交订单',   1500, 0.55
+          UNION ALL SELECT 5, '完成支付',   1200, 0.85
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-0000000000a2"
+      type_id: "core.sql.duckdb"
+      config:
+        query: |
+          WITH totals AS (
+            SELECT
+              MAX(CASE WHEN step_order = 1 THEN user_count END) AS first_cnt,
+              MAX(CASE WHEN step_order = (SELECT MAX(step_order) FROM input_0) THEN user_count END) AS last_cnt
+            FROM input_0
+          ),
+          steps AS (
+            SELECT
+              s.step_order, s.step_name, s.user_count, s.industry_benchmark,
+              t.first_cnt, t.last_cnt,
+              LAG(s.user_count) OVER (ORDER BY s.step_order) AS prev_cnt
+            FROM input_0 s
+            CROSS JOIN totals t
+          )
+          SELECT
+            step_order,
+            step_name,
+            user_count,
+            ROUND(user_count::DOUBLE / prev_cnt, 4)                          AS step_conversion,
+            ROUND(user_count::DOUBLE / first_cnt, 4)                         AS overall_conversion,
+            ROUND(1 - user_count::DOUBLE / prev_cnt, 4)                      AS churn_rate,
+            ROUND((prev_cnt - user_count)::DOUBLE
+                  / NULLIF(first_cnt - last_cnt, 0), 4)                      AS churn_share,
+            industry_benchmark,
+            ROUND(user_count::DOUBLE / prev_cnt - industry_benchmark, 4)     AS gap_vs_benchmark,
+            CASE
+              WHEN prev_cnt IS NULL THEN '—'
+              WHEN user_count::DOUBLE / prev_cnt < 0.20
+                OR (prev_cnt - user_count)::DOUBLE / NULLIF(first_cnt - last_cnt, 0) > 0.40 THEN '严重卡点'
+              WHEN user_count::DOUBLE / prev_cnt < 0.50
+                OR (prev_cnt - user_count)::DOUBLE / NULLIF(first_cnt - last_cnt, 0) > 0.20 THEN '中等卡点'
+              WHEN user_count::DOUBLE / prev_cnt < 0.70
+                OR (prev_cnt - user_count)::DOUBLE / NULLIF(first_cnt - last_cnt, 0) > 0.10 THEN '轻度卡点'
+              ELSE '健康'
+            END AS bottleneck_level
+          FROM steps
+          ORDER BY step_order
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-0000000000a3"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "funnel_analysis.duckdb"
+        table: "funnel_result"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
