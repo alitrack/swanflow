@@ -1,5 +1,7 @@
 // Regression tests for the python script node fixes surfaced by the energy
-// E2E workflow (wf7):
+// E2E workflow (wf7). Feature-gated: these tests embed a CPython interpreter
+// (feature "python"); the default build has no Python nodes at all.
+#![cfg(feature = "python")]
 //
 // * Bug 18 — the sandbox replaced __builtins__ with a dict holding only the
 //   restricted __import__, so len/range/sum/Exception raised NameError in

@@ -24,6 +24,7 @@ use crate::core::observer::{
     MaterializerExec, MaterializerLogical, StateProbeExec, StateProbeLogical,
 };
 use crate::nodes::missing::{MissingNodeExec, MissingNodeLogical};
+#[cfg(feature = "python")]
 use crate::nodes::script::python::{PythonExec, PythonLogical};
 use crate::nodes::sql::SqlProxyLogical;
 use crate::nodes::transform::PivotProxyLogical;
@@ -441,6 +442,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
                     })?,
             ));
         }
+        #[cfg(feature = "python")]
         if let Some(python) = node.as_any().downcast_ref::<PythonLogical>() {
             // The physical plan must advertise the same schema the logical plan
             // reports (probed/declared override), or DataFusion rejects it as a

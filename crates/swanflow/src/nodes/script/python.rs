@@ -1,3 +1,9 @@
+//! Embedded Python script nodes (feature "python").
+//!
+//! Compiled only when the `python` feature is on: these nodes embed a CPython
+//! interpreter via pyo3 (auto-initialize) and therefore link libpythonX.so.
+//! The default build excludes them entirely — see the libpython3.11 incident.
+#![cfg(feature = "python")]
 use std::any::Any;
 use std::ffi::CString;
 use std::fmt;

@@ -39,7 +39,6 @@ use crate::core::observer::{
 use crate::nodes::missing::{MissingNodeExec, MissingNodeLogical};
 use petgraph::visit::EdgeRef;
 use crate::nodes::registry::NodeRegistry;
-use crate::nodes::script::python::{PythonExec, PythonLogical};
 use crate::nodes::sql::SqlProxyLogical;
 use crate::nodes::{NodeDiagnostic, NodeErrorClass, NodeEvent};
 

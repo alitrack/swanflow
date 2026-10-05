@@ -89,6 +89,7 @@ impl NodeRegistry {
             UniquenessCheckNode, ValueRangeCheckNode,
         };
         use crate::nodes::script::boxed_python::BoxedPythonNode;
+        #[cfg(feature = "python")]
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
         use crate::nodes::sql::SqlNode;
         use crate::nodes::transform::{
@@ -176,10 +177,13 @@ impl NodeRegistry {
         self.register_node(Arc::new(SqlAssertNode));
         self.register_node(Arc::new(SemanticCleanerNode));
         self.register_node(Arc::new(AiRouterNode));
-        self.register_node(Arc::new(PythonNode));
-        self.register_node(Arc::new(BoxedPythonNode));
-        // Note: PythonUdfNode is registered but currently returns empty plan (stub implementation)
-        self.register_node(Arc::new(PythonUdfNode));
+        #[cfg(feature = "python")]
+        {
+            self.register_node(Arc::new(PythonNode));
+            self.register_node(Arc::new(BoxedPythonNode));
+            // Note: PythonUdfNode is registered but currently returns empty plan (stub implementation)
+            self.register_node(Arc::new(PythonUdfNode));
+        }
         self.register_node(Arc::new(WasmNode));
         self.register_node(Arc::new(GraphRetrieverNode));
         self.register_node(Arc::new(ContextFuserNode));
@@ -275,6 +279,7 @@ mod shell_marker_tests {
     const SHELL_PREFIX: &str = "[SHELL NODE — no runtime behavior] ";
 
     #[test]
+    #[cfg_attr(not(feature = "python"), ignore = "python_udf node absent without the python feature")]
     fn shell_node_descriptions_carry_marker() {
         let registry = NodeRegistry::default();
         let shells = [
