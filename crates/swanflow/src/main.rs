@@ -96,6 +96,12 @@ enum Commands {
 enum AssetsCommands {
     /// List recorded materializations (digest + last run time)
     List,
+    /// Recompute digest chain for a workflow and classify every node
+    /// against the ledger (fresh / stale-config / stale-upstream / never-run)
+    Status {
+        /// Workflow YAML/JSON file
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -645,6 +651,32 @@ async fn main() -> anyhow::Result<()> {
                 println!("📦 Materialization ledger ({}):", ledger_path.display());
                 for (node_id, digest, at) in rows {
                     println!("  {}  digest {}  last run {}", node_id, &digest[..12], at);
+                }
+            }
+            AssetsCommands::Status { file } => {
+                use swanflow::core::engine::assets::{status_for_workflow, AssetLedger};
+
+                let workflow = load_workflow(file)?;
+                println!("🔎 Asset status for workflow: {} (ID: {})", workflow.name, workflow.id);
+
+                let cache_dir = std::path::PathBuf::from("target/swanflow_cache");
+                let ledger_path = cache_dir.join("assets.duckdb");
+                if !ledger_path.exists() {
+                    println!("📭 No materialization ledger yet ({} absent).", ledger_path.display());
+                    println!("   Every node would be: never-run.");
+                    return Ok(());
+                }
+                let ledger = AssetLedger::open(&cache_dir)?;
+                let rows = status_for_workflow(&ledger, &workflow)?;
+                let fresh = rows.iter().filter(|r| r.2 == swanflow::core::engine::assets::AssetVerdict::Fresh).count();
+                println!("{} node(s): {} fresh, {} action needed\n", rows.len(), fresh, rows.len() - fresh);
+                for (node_id, type_id, verdict) in rows {
+                    let marker = match verdict {
+                        swanflow::core::engine::assets::AssetVerdict::Fresh => "✅",
+                        swanflow::core::engine::assets::AssetVerdict::NeverRun => "🌑",
+                        _ => "⚠️ ",
+                    };
+                    println!("  {} {} [{}] {}", marker, node_id, verdict.label(), type_id);
                 }
             }
         },

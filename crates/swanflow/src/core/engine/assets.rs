@@ -211,6 +211,104 @@ pub fn record_asset_run(
     }
 }
 
+/// Per-node staleness verdict for `assets status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetVerdict {
+    /// Recorded digest matches the recomputed one.
+    Fresh,
+    /// No ledger row for this node.
+    NeverRun,
+    /// Node's own config/type changed.
+    StaleConfig,
+    /// An upstream is stale/never-run, so this node's recorded digest
+    /// no longer reflects its true inputs (digest chain mismatch).
+    StaleUpstream,
+}
+
+impl AssetVerdict {
+    pub fn label(&self) -> &'static str {
+        match self {
+            AssetVerdict::Fresh => "fresh",
+            AssetVerdict::NeverRun => "never-run",
+            AssetVerdict::StaleConfig => "stale-config",
+            AssetVerdict::StaleUpstream => "stale-upstream",
+        }
+    }
+}
+
+/// Recompute the digest chain for a workflow (topological order) and
+/// classify every node against the ledger.
+///
+/// Mirrors the engine hook's semantics exactly: a node's digest hashes
+/// its id/type/config plus each upstream's *recomputed* digest (here we
+/// have no recorded-digest shortcut — we walk the chain, which is the
+/// conservative/authoritative view for "would rerunning change outputs?").
+pub fn status_for_workflow(
+    ledger: &AssetLedger,
+    workflow: &crate::core::graph::Workflow,
+) -> anyhow::Result<Vec<(Uuid, String, AssetVerdict)>> {
+    use petgraph::algo::toposort;
+    use std::collections::HashMap;
+
+    let sorted = toposort(&workflow.graph, None)
+        .map_err(|e| anyhow::anyhow!("Cycle detected in workflow: {:?}", e))?;
+
+    let mut digest_map: HashMap<Uuid, UpstreamDigest> = HashMap::new();
+    let mut verdicts: HashMap<Uuid, AssetVerdict> = HashMap::new();
+    let mut out: Vec<(Uuid, String, AssetVerdict)> = Vec::new();
+
+    for idx in sorted {
+        let node = &workflow.graph[idx];
+        let upstream: Vec<(Uuid, UpstreamDigest)> = workflow
+            .graph
+            .neighbors_directed(idx, petgraph::Direction::Incoming)
+            .filter_map(|u| {
+                let un = &workflow.graph[u];
+                digest_map.get(&un.id).map(|d| (un.id, d.clone()))
+            })
+            .collect();
+        let refs: Vec<(Uuid, &UpstreamDigest)> =
+            upstream.iter().map(|(id, d)| (*id, d)).collect();
+        let digest = compute_digest(
+            node.id,
+            &node.type_id,
+            &node.config.to_string(),
+            &refs,
+        );
+        digest_map.insert(node.id, digest.clone());
+
+        let verdict = match ledger.recorded_digest(node.id)? {
+            None => AssetVerdict::NeverRun,
+            Some(recorded) => {
+                if recorded == digest.hex() {
+                    AssetVerdict::Fresh
+                } else {
+                    // Distinguish: is it my own config, or an upstream?
+                    // Recompute with empty upstream set: if that part
+                    // alone differs from a same-computed recorded
+                    // baseline we cannot know — approximate by checking
+                    // whether any upstream is non-fresh.
+                    let upstream_stale = workflow
+                        .graph
+                        .neighbors_directed(idx, petgraph::Direction::Incoming)
+                        .any(|u| {
+                            let un = &workflow.graph[u];
+                            verdicts.get(&un.id) != Some(&AssetVerdict::Fresh)
+                        });
+                    if upstream_stale {
+                        AssetVerdict::StaleUpstream
+                    } else {
+                        AssetVerdict::StaleConfig
+                    }
+                }
+            }
+        };
+        verdicts.insert(node.id, verdict.clone());
+        out.push((node.id, node.type_id.clone(), verdict));
+    }
+    Ok(out)
+}
+
 
 #[cfg(test)]
 mod tests {
