@@ -83,6 +83,19 @@ enum Commands {
         #[command(subcommand)]
         command: ImportCommands,
     },
+
+    /// Materialization ledger (ADR-014 Stage 1): list what has been
+    /// materialized and what is stale.
+    Assets {
+        #[command(subcommand)]
+        command: AssetsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum AssetsCommands {
+    /// List recorded materializations (digest + last run time)
+    List,
 }
 
 #[derive(Subcommand)]
@@ -610,6 +623,29 @@ async fn main() -> anyhow::Result<()> {
                 std::fs::write(&out_path, &yaml)?;
                 println!("\n💾 Workflow saved to: {}", out_path.display());
                 println!("   Next: swanflow inspect {}", out_path.display());
+            }
+        },
+        Commands::Assets { command } => match command {
+            AssetsCommands::List => {
+                use swanflow::core::engine::assets::AssetLedger;
+
+                let cache_dir = std::path::PathBuf::from("target/swanflow_cache");
+                let ledger_path = cache_dir.join("assets.duckdb");
+                if !ledger_path.exists() {
+                    println!("📭 No materialization ledger yet ({} absent).", ledger_path.display());
+                    println!("   Run a workflow to populate it (ADR-014 Stage 1).");
+                    return Ok(());
+                }
+                let ledger = AssetLedger::open(&cache_dir)?;
+                let rows = ledger.all()?;
+                if rows.is_empty() {
+                    println!("📭 Ledger is empty.");
+                    return Ok(());
+                }
+                println!("📦 Materialization ledger ({}):", ledger_path.display());
+                for (node_id, digest, at) in rows {
+                    println!("  {}  digest {}  last run {}", node_id, &digest[..12], at);
+                }
             }
         },
         Commands::Mcp { command } => match command {
