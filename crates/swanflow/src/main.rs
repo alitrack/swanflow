@@ -635,7 +635,8 @@ async fn main() -> anyhow::Result<()> {
             AssetsCommands::List => {
                 use swanflow::core::engine::assets::AssetLedger;
 
-                let cache_dir = std::path::PathBuf::from("target/swanflow_cache");
+                let cache_dir =
+                    std::path::PathBuf::from(swanflow::core::engine::default_cache_dir());
                 let ledger_path = cache_dir.join("assets.duckdb");
                 if !ledger_path.exists() {
                     println!("📭 No materialization ledger yet ({} absent).", ledger_path.display());
@@ -659,7 +660,8 @@ async fn main() -> anyhow::Result<()> {
                 let workflow = load_workflow(file)?;
                 println!("🔎 Asset status for workflow: {} (ID: {})", workflow.name, workflow.id);
 
-                let cache_dir = std::path::PathBuf::from("target/swanflow_cache");
+                let cache_dir =
+                    std::path::PathBuf::from(swanflow::core::engine::default_cache_dir());
                 let ledger_path = cache_dir.join("assets.duckdb");
                 if !ledger_path.exists() {
                     println!("📭 No materialization ledger yet ({} absent).", ledger_path.display());

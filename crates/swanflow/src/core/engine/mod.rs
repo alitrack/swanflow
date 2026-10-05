@@ -239,9 +239,23 @@ fn count_checkpoint_runs(cache_dir: &str) -> (usize, usize) {
     (completed, in_progress)
 }
 
+/// Canonical cache-dir resolution, shared by the engine and the CLI.
+///
+/// Priority:
+/// 1. `SWANFLOW_CACHE_DIR` (absolute or relative — resolved against cwd,
+///    but typically absolute to make run/list/status agree regardless of
+///    where they are invoked)
+/// 2. `target/swanflow_cache` (cargo-style default, matches the repo layout)
+pub fn default_cache_dir() -> String {
+    std::env::var("SWANFLOW_CACHE_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "target/swanflow_cache".to_string())
+}
+
 impl SwanFlowEngine {
     pub fn new(registry: Arc<NodeRegistry>) -> Self {
-        Self::with_cache_dir(registry, "target/swanflow_cache".to_string())
+        Self::with_cache_dir(registry, default_cache_dir())
     }
 
     pub fn with_cache_dir(registry: Arc<NodeRegistry>, cache_dir: String) -> Self {
