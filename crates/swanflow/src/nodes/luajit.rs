@@ -879,10 +879,17 @@ mod tests {
                     .as_any()
                     .downcast_ref::<DuckDBScanLogical>()
                     .expect("should be DuckDBScanLogical");
+                // Action libs install via attach_sql (binder-ordering fix,
+                // 2026-09-27): the query is the bare luajit_s call.
                 assert!(
-                    scan.query.contains("WITH _reg AS (SELECT * FROM luajit_module(mode:='install', sql_name:='incremental')) SELECT luajit_s('incremental', {'op':'run', 'target':'', 'source':'', 'ts_col':'', 'mode':'ts'}) AS result FROM _reg"),
+                    scan.query.contains("SELECT luajit_s('incremental', {'op':'run', 'target':'', 'source':'', 'ts_col':'', 'mode':'ts'}) AS result"),
                     "unexpected prefilled action SQL: {}",
                     scan.query
+                );
+                assert_eq!(
+                    scan.attach_sql.as_deref(),
+                    Some("SELECT * FROM luajit_module(mode:='install', sql_name:='incremental')"),
+                    "install must run via attach_sql before the binder sees luajit_s"
                 );
             } else {
                 panic!("expected Extension plan");
