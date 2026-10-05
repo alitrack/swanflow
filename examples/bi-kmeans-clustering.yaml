@@ -1,0 +1,96 @@
+# SwanFlow BI Template: K-Means Clustering (bi-clustering, path b)
+#
+# Ported from QwenPaw-Data skill "atomic/bi-clustering" (Apache-2.0),
+# clustering path — via the duckdb-ml extension (pure Rust, zero Python).
+#
+# Two SQL nodes (the model registry is a process-global static, so the
+# model trained in node 1 is visible when node 2 binds):
+#   node 1 (train): zscore-scale + ml_train_model (features auto-cached
+#     as '@clus_model'), and PASS THROUGH the raw rows so downstream
+#     nodes keep the data (uncorrelated scalar subquery trains once).
+#   node 2 (predict): ml_predict_batch('@clus_model') joined back on
+#     cached row order (row_id = row_number - 1).
+# The `extensions` config (same contract as core.io.duckdb_read) loads the
+# ml extension binary by absolute path before the query runs.
+# Requires the duckdb-ml unsupervised-empty-target fix (kmeans with '[]').
+#
+# Input shape expected from real data (replace node 0's query):
+#   object_id | f1 | f2  (numeric features)
+#
+# Usage:
+#   swanflow run examples/bi-kmeans-clustering.yaml
+name: "BI K-Means Clustering"
+id: "a0000000-0000-0000-0000-0000000000f0"
+graph:
+  nodes:
+    - id: "a0000000-0000-0000-0000-0000000000f1"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: |
+          -- 8 objects, 3 obvious clusters in (x, y):
+          -- A={1,2,3} near (1,1); B={4,5,6} near (8,8); C={7,8} near (1,8)
+          SELECT * FROM (VALUES
+            (1, 1.0, 1.0), (2, 1.2, 0.8), (3, 0.8, 1.1),
+            (4, 8.0, 8.0), (5, 8.2, 7.9), (6, 7.9, 8.1),
+            (7, 1.1, 8.0), (8, 0.9, 8.2)
+          ) t(object_id, f1, f2)
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-0000000000f2"
+      type_id: "core.sql.duckdb"
+      config:
+        extensions:
+          - /home/lhy/.duckdb/extensions/v1.5.6/linux_amd64/ml.duckdb_extension
+        output_columns:
+          object_id: int64
+          f1: float64
+          f2: float64
+          model_name: string
+        query: |
+          -- Pass the raw rows through (downstream needs them) while training
+          -- in an uncorrelated scalar subquery (evaluated once by DuckDB).
+          SELECT object_id, f1, f2,
+            (SELECT ml_train_model('clus_model', 'kmeans', '[]',
+               (SELECT to_json(list([f1_z, f2_z])) FROM (
+                  SELECT (f1 - AVG(f1) OVER ()) / STDDEV_POP(f1) OVER () AS f1_z,
+                         (f2 - AVG(f2) OVER ()) / STDDEV_POP(f2) OVER () AS f2_z
+                  FROM input_0)),
+               '{"k": 3}')) AS model_name
+          FROM input_0
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-0000000000f3"
+      type_id: "core.sql.duckdb"
+      config:
+        extensions:
+          - /home/lhy/.duckdb/extensions/v1.5.6/linux_amd64/ml.duckdb_extension
+        output_columns:
+          object_id: int64
+          f1: float64
+          f2: float64
+          cluster_label: int64
+        query: |
+          -- '@clus_model' was cached by the train node's execution; this node
+          -- binds AFTER that node ran, so the registry lookup succeeds.
+          SELECT i.object_id, i.f1, i.f2,
+                 CAST(p.prediction AS INTEGER) AS cluster_label
+          FROM (SELECT *, ROW_NUMBER() OVER () - 1 AS rid FROM input_0) i
+          JOIN ml_predict_batch('clus_model', '@clus_model') p
+            ON p.row_id = i.rid
+          ORDER BY i.object_id
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-0000000000f4"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "kmeans_clustering.duckdb"
+        table: "cluster_assignment"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+    - [2, 3, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
