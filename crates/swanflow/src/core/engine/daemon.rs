@@ -173,8 +173,86 @@ pub struct Daemon {
 pub struct WatchedWorkflow {
     pub workflow: Workflow,
     /// Per-node last-ready timestamps (gates on_cron / on_interval
-    /// re-firing); persisted nowhere yet — daemon lifetime only.
+    /// re-firing); persisted to watched.json so daemon restarts restore it.
     pub last_ready: HashMap<Uuid, chrono::DateTime<chrono::Utc>>,
+    /// Absolute path of the workflow file (persisted; enables re-loading
+    /// on daemon restart). `None` only for programmatic registrations
+    /// without a file (tests).
+    pub path: Option<std::path::PathBuf>,
+}
+
+/// Serializable form of one watched-workflow entry in watched.json.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WatchedEntry {
+    path: String,
+    workflow_id: String,
+    /// node-id -> ISO-8601 UTC timestamp of the last ready evaluation.
+    last_ready: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>>,
+}
+
+/// Location of the watched-workflow registry file: `<cache_dir>/watched.json`
+/// (same directory the asset ledger and extfn catalog live in — cache_dir
+/// env override applies). Returns None when no HOME is set.
+fn watched_registry_path() -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(
+        crate::core::engine::default_cache_dir(),
+    ))
+    .map(|p| p.join("watched.json"))
+}
+
+/// Load persisted watch entries from watched.json (best-effort: missing
+/// file, parse errors, and trailing garbage all yield an empty vec —
+/// persistence must never prevent the daemon from starting).
+fn load_watched_entries() -> Vec<WatchedEntry> {
+    let Some(p) = watched_registry_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&p) else {
+        return Vec::new();
+    };
+    match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("watched.json unreadable ({e}) — starting with no watches");
+            Vec::new()
+        }
+    }
+}
+
+/// Persist the watched list to watched.json (best-effort — a write failure
+/// is logged, never fatal: the in-memory list stays authoritative).
+async fn save_watched_entries(watched: &Arc<Mutex<Vec<WatchedWorkflow>>>) {
+    let Some(p) = watched_registry_path() else {
+        return;
+    };
+    let entries: Vec<WatchedEntry> = {
+        let w = watched.lock().await;
+        w.iter()
+            .filter_map(|ww| {
+                let path = ww.path.as_ref()?;
+                Some(WatchedEntry {
+                    path: path.to_string_lossy().to_string(),
+                    workflow_id: ww.workflow.id.to_string(),
+                    last_ready: ww
+                        .last_ready
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), *v))
+                        .collect(),
+                })
+            })
+            .collect()
+    };
+    if let Some(parent) = p.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    match serde_json::to_string_pretty(&entries) {
+        Ok(text) => {
+            if let Err(e) = tokio::fs::write(&p, text).await {
+                tracing::warn!("failed to persist watched.json: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("failed to serialize watched.json: {e}"),
+    }
 }
 
 impl Daemon {
@@ -246,6 +324,43 @@ impl Daemon {
 
         let listener = UnixListener::bind(&self.socket_path)?;
         tracing::info!("SwanFlow daemon listening on {}", self.socket_path.display());
+
+        // ── ADR-014 Stage 3: restore persisted watches from watched.json ──
+        // Reloads each workflow file from disk (config edits since the last
+        // registration are picked up); entries whose file no longer exists
+        // or no longer parses are dropped with a WARN — never fatal.
+        {
+            let mut w = self.watched.lock().await;
+            for e in load_watched_entries() {
+                let p = std::path::PathBuf::from(&e.path);
+                match crate::load_workflow_file(&p) {
+                    Ok(workflow) => {
+                        let mut last_ready = HashMap::new();
+                        for (k, v) in &e.last_ready {
+                            if let Ok(id) = uuid::Uuid::parse_str(k) {
+                                last_ready.insert(id, *v);
+                            }
+                        }
+                        tracing::info!(
+                            "restored watch '{}' ({}) from watched.json",
+                            workflow.name,
+                            e.path
+                        );
+                        w.push(WatchedWorkflow {
+                            workflow,
+                            last_ready,
+                            path: Some(p),
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "dropped persisted watch {}: file missing or unreadable ({err})",
+                            e.path
+                        );
+                    }
+                }
+            }
+        }
 
         // ── ADR-014 Stage 3: automation sensor loop ──
         // Every tick, evaluate registered workflows' automation conditions
@@ -342,6 +457,9 @@ async fn sensor_tick(
     }
 
     for (_, workflow, ready_nodes) in to_run {
+        // Ready timestamps were stamped under the lock above — flush them
+        // so a daemon restart doesn't re-fire these intervals.
+        save_watched_entries(watched).await;
         tracing::info!(
             "automation sensor: {} node(s) ready in '{}' — executing",
             ready_nodes.len(),
@@ -501,11 +619,23 @@ async fn handle_method(
             let wf_id = workflow.id;
             let n = workflow.name.clone();
             let mut w = watched.lock().await;
+            // Dedupe on workflow id: re-watching an already-watched file
+            // refreshes its definition (config edits) while PRESERVING
+            // last_ready (otherwise on_interval would fire immediately).
+            let prev_last_ready = w
+                .iter()
+                .find(|ww| ww.workflow.id == wf_id)
+                .map(|ww| ww.last_ready.clone())
+                .unwrap_or_default();
+            w.retain(|ww| ww.workflow.id != wf_id);
             w.push(WatchedWorkflow {
                 workflow,
-                last_ready: HashMap::new(),
+                last_ready: prev_last_ready,
+                path: Some(std::path::PathBuf::from(path)),
             });
             tracing::info!("automation sensor now watching '{n}' ({wf_id})");
+            drop(w);
+            save_watched_entries(watched).await;
             DaemonResponse {
                 id: req.id.clone(),
                 ok: Some(true),
@@ -941,4 +1071,120 @@ async fn write_response(
     writer.write_all(json.as_bytes()).await?;
     writer.write_all(b"\n").await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod watched_persistence_tests {
+    use super::*;
+
+    fn sample_entry(path: &str, wf_id: &str) -> WatchedEntry {
+        let mut last_ready = std::collections::BTreeMap::new();
+        last_ready.insert(
+            "11111111-2222-3333-4444-555555555555".to_string(),
+            chrono::DateTime::parse_from_rfc3339("2026-10-06T01:02:03Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        WatchedEntry {
+            path: path.to_string(),
+            workflow_id: wf_id.to_string(),
+            last_ready,
+        }
+    }
+
+    /// The persisted JSON shape must round-trip: field names, nested map,
+    /// RFC3339 timestamps — any drift breaks restarts of older daemons.
+    #[test]
+    fn watched_entry_roundtrips_through_json() {
+        let e = sample_entry("/tmp/wf.yaml", "aaaaaaaa-0000-0000-0000-000000000001");
+        let text = serde_json::to_string_pretty(&e).unwrap();
+        let back: WatchedEntry = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.path, "/tmp/wf.yaml");
+        assert_eq!(
+            back.workflow_id,
+            "aaaaaaaa-0000-0000-0000-000000000001"
+        );
+        let ts = back
+            .last_ready
+            .get("11111111-2222-3333-4444-555555555555")
+            .unwrap();
+        assert_eq!(ts.to_rfc3339(), "2026-10-06T01:02:03+00:00");
+    }
+
+    /// load_watched_entries must tolerate a corrupt/garbage registry file —
+    /// persistence is best-effort and must never block daemon startup.
+    /// NOTE: merged with the save round-trip into ONE test because both
+    /// mutate the process-global SWANFLOW_CACHE_DIR — parallel #[test]s
+    /// would race on it (observed as flaky FAILED when run filtered).
+    #[tokio::test]
+    async fn load_save_roundtrip_tolerates_garbage_and_persists() {
+        let dir = std::env::temp_dir()
+            .join(format!("swanflow-watched-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("watched.json"), "{not valid json").unwrap();
+        let prev = std::env::var("SWANFLOW_CACHE_DIR").ok();
+        std::env::set_var("SWANFLOW_CACHE_DIR", &dir);
+
+        // 1. Garbage file -> empty list, no panic.
+        assert!(load_watched_entries().is_empty());
+
+        // 2. Valid file -> loads.
+        let e = sample_entry("/tmp/wf.yaml", "aaaaaaaa-0000-0000-0000-000000000001");
+        std::fs::write(
+            dir.join("watched.json"),
+            serde_json::to_string_pretty(&vec![e]).unwrap(),
+        )
+        .unwrap();
+        let entries = load_watched_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "/tmp/wf.yaml");
+
+        // 3. save_watched_entries persists path + last_ready for entries
+        //    with a file path and skips programmatic (path-less) entries.
+        let node_id = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-10-06T01:02:03Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let watched: Arc<Mutex<Vec<WatchedWorkflow>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let mut wf = Workflow::default();
+        wf.id = uuid::Uuid::parse_str("aaaaaaaa-0000-0000-0000-000000000001").unwrap();
+        wf.name = "persisted".into();
+        let mut last_ready = HashMap::new();
+        last_ready.insert(node_id, ts);
+        watched.lock().await.push(WatchedWorkflow {
+            workflow: wf,
+            last_ready,
+            path: Some(std::path::PathBuf::from("/tmp/wf.yaml")),
+        });
+        let mut wf2 = Workflow::default();
+        wf2.id = uuid::Uuid::new_v4();
+        wf2.name = "ephemeral".into();
+        watched.lock().await.push(WatchedWorkflow {
+            workflow: wf2,
+            last_ready: HashMap::new(),
+            path: None,
+        });
+
+        save_watched_entries(&watched).await;
+        let entries = load_watched_entries();
+        assert_eq!(entries.len(), 1, "path-less entry must be skipped");
+        assert_eq!(entries[0].path, "/tmp/wf.yaml");
+        assert_eq!(
+            entries[0].workflow_id,
+            "aaaaaaaa-0000-0000-0000-000000000001"
+        );
+        let restored = entries[0]
+            .last_ready
+            .get("11111111-2222-3333-4444-555555555555")
+            .unwrap();
+        assert_eq!(*restored, ts);
+
+        match prev {
+            Some(v) => std::env::set_var("SWANFLOW_CACHE_DIR", v),
+            None => std::env::remove_var("SWANFLOW_CACHE_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
