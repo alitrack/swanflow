@@ -89,22 +89,32 @@ impl AssetLedger {
         std::fs::create_dir_all(cache_dir)?;
         let path = cache_dir.join("assets.duckdb");
         let conn = duckdb::Connection::open(&path)?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS asset_runs (
-                 node_id TEXT PRIMARY KEY,
-                 digest_hex TEXT NOT NULL,
-                 last_run_at TEXT NOT NULL,
-                 interval_start TEXT,
-                 interval_end TEXT
-             );
-             CREATE TABLE IF NOT EXISTS asset_intervals (
-                 node_id TEXT NOT NULL,
-                 interval_start TEXT NOT NULL,
-                 interval_end TEXT NOT NULL,
-                 completed_at TEXT NOT NULL,
-                 PRIMARY KEY (node_id, interval_start)
-             );",
-        )?;
+        // Cheap existence probe first: if both tables exist, skip DDL —
+        // running CREATE TABLE IF NOT EXISTS on a file left with an
+        // un-checkpointed WAL (previous process died between write and
+        // checkpoint) has produced DuckDB InternalException
+        // (MarkBlockAsModified on an already-modified block).
+        if conn
+            .execute_batch("SELECT 1 FROM asset_runs LIMIT 1; SELECT 1 FROM asset_intervals LIMIT 1")
+            .is_err()
+        {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS asset_runs (
+                     node_id TEXT PRIMARY KEY,
+                     digest_hex TEXT NOT NULL,
+                     last_run_at TEXT NOT NULL,
+                     interval_start TEXT,
+                     interval_end TEXT
+                 );
+                 CREATE TABLE IF NOT EXISTS asset_intervals (
+                     node_id TEXT NOT NULL,
+                     interval_start TEXT NOT NULL,
+                     interval_end TEXT NOT NULL,
+                     completed_at TEXT NOT NULL,
+                     PRIMARY KEY (node_id, interval_start)
+                 );",
+            )?;
+        }
         Ok(Self { conn })
     }
 

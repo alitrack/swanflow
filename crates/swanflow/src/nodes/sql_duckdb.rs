@@ -330,9 +330,11 @@ async fn run_duckdb_query(
     let mut input_files: Vec<std::path::PathBuf> = Vec::new();
     for (i, batches) in buffers.iter().enumerate() {
         if batches.is_empty() {
-            return Err(datafusion::error::DataFusionError::Internal(
-                format!("input_{} produced no batches", i),
-            ));
+            // Source SQL nodes (no upstream) legitimately have no batches.
+            // Skip registering input_i entirely — queries that reference
+            // it will fail loudly (correct), queries that don't are
+            // unaffected.
+            continue;
         }
         let f = tmp_dir.join(format!("swan_ducksql_in_{}_{}.parquet", i, uuid::Uuid::new_v4()));
         {
@@ -629,9 +631,10 @@ async fn discover_duck_schema(
     inputs: &[LogicalPlan],
     extensions: &[String],
 ) -> Option<DFSchemaRef> {
-    if inputs.is_empty() {
-        return None;
-    }
+    // Source SQL nodes (no upstream) still get schema discovery: run the
+    // query against a scratch DuckDB with no input tables registered.
+    // Queries that reference input_N fail here and fall back to
+    // declared `output_columns` / pass-through — same best-effort contract.
     // Derive one zero-row typed batch per input from its logical schema.
     let mut sample_batches = Vec::new();
     for input in inputs {

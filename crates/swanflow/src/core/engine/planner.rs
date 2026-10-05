@@ -381,11 +381,28 @@ impl ExtensionPlanner for SwanFlowPlanner {
             // physical_inputs are already the physical children of this node
             // (engine resolves LogicalPlan::inputs() before calling us).
             // DuckSqlExec::new wraps each in CoalescePartitionsExec itself.
+            // A source SQL node (no upstream edges) has zero physical
+            // inputs — feed an empty placeholder so DuckSqlStream sees a
+            // single (empty) stream instead of panicking on [0].
+            let (primary, rest): (Arc<dyn ExecutionPlan>, Vec<Arc<dyn ExecutionPlan>>) =
+                if physical_inputs.is_empty() {
+                    let empty = std::sync::Arc::new(
+                        datafusion::physical_plan::empty::EmptyExec::new(Arc::new(
+                            ducksql.schema.as_arrow().clone(),
+                        )),
+                    ) as Arc<dyn ExecutionPlan>;
+                    (empty, Vec::new())
+                } else {
+                    (
+                        physical_inputs[0].clone(),
+                        physical_inputs[1..].to_vec(),
+                    )
+                };
             let exec = crate::nodes::sql_duckdb::DuckSqlExec::new(
                 ducksql.query.clone(),
                 ducksql.extensions.clone(),
-                physical_inputs[0].clone(),
-                physical_inputs[1..].to_vec(),
+                primary,
+                rest,
                 Arc::new(ducksql.schema.as_arrow().clone()),
             );
             return Ok(Some(Arc::new(exec)));

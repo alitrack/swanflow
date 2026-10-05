@@ -786,30 +786,85 @@ async fn main() -> anyhow::Result<()> {
                     // open() created it; harmless
                 }
 
-                // Execute each gap batch via the normal run path with
-                // interval substitution: SWANFLOW_INTERVAL_START/END env
-                // vars drive ${interval_start}/${interval_end} in SQL.
+                // Execute each gap batch: per day, run the node's upstream
+                // subgraph with SWANFLOW_INTERVAL_START/END set — the
+                // templating engine substitutes ${interval_start}/
+                // ${interval_end} into SQL. Interval completes only when
+                // the run finishes without errors.
+                //
+                // IMPORTANT: drop the CLI-side ledger connection before
+                // executing — the engine's record_asset_run hook opens its
+                // own connection to the same assets.duckdb, and two
+                // independent DuckDB instances writing one file corrupt it
+                // (SerializationException: field id mismatch). Reopen per
+                // day AFTER the run completes to record the interval.
+                use swanflow::core::graph::Workflow;
+
+                // Build the upstream-closure subgraph once.
+                let sub = upstream_closure(&workflow, node_id);
+
+                drop(ledger); // exclusive engine access during execution
+                let mut failures = 0usize;
+
                 for (s, e) in gaps {
                     println!("▶ backfilling {} ..= {}", s, e);
                     let mut day = s;
                     while day <= e {
-                        let start_dt = day.and_hms_opt(0, 0, 0).unwrap().and_local_timezone(chrono::Utc).unwrap();
-                        let end_dt = (day.succ_opt().unwrap_or(day))
+                        let start_dt = day
+                            .and_hms_opt(0, 0, 0)
+                            .unwrap()
+                            .and_local_timezone(chrono::Utc)
+                            .unwrap();
+                        let end_dt = day
+                            .succ_opt()
+                            .unwrap_or(day)
                             .and_hms_opt(0, 0, 0)
                             .unwrap()
                             .and_local_timezone(chrono::Utc)
                             .unwrap();
                         std::env::set_var("SWANFLOW_INTERVAL_START", start_dt.to_rfc3339());
                         std::env::set_var("SWANFLOW_INTERVAL_END", end_dt.to_rfc3339());
-                        // Mark complete after the run below; for now record
-                        // optimistically — engine integration lands with the
-                        // ${interval_start} substitution commit.
-                        ledger.record_interval(node_id, start_dt, end_dt)?;
-                        println!("  ✅ {} recorded", day);
+
+                        // Fresh engine per day: skip-if-fresh must see the
+                        // interval env as a digest input, so re-running a
+                        // day does NOT get skipped by a matching digest.
+                        let engine = SwanFlowEngine::new(Arc::new(
+                            NodeRegistry::default(),
+                        ));
+                        let mut ok = true;
+                        let mut rx = match engine.execute_workflow(&sub).await {
+                            Ok(rx) => rx,
+                            Err(err) => {
+                                eprintln!("  ❌ {} plan failed: {}", day, err);
+                                ok = false;
+                                tokio::sync::mpsc::unbounded_channel::<NodeEvent>().1
+                            }
+                        };
+                        while let Some(event) = rx.recv().await {
+                            #[allow(irrefutable_let_patterns)]
+                            if let NodeEvent::Error { message, .. } = &event {
+                                eprintln!("  ❌ {}: {}", day, message);
+                                ok = false;
+                            }
+                        }
+                        if ok {
+                            // Reopen AFTER the engine run finished — see the
+                            // exclusivity comment above.
+                            let ledger = AssetLedger::open(&cache_dir)?;
+                            ledger.record_interval(node_id, start_dt, end_dt)?;
+                            println!("  ✅ {} recorded", day);
+                        } else {
+                            failures += 1;
+                        }
                         day = day.succ_opt().unwrap_or(e);
                     }
                 }
-                println!("\nDone. Re-run with --dry-run to verify the calendar.");
+                if failures == 0 {
+                    println!("\nDone. Re-run with --dry-run to verify the calendar.");
+                } else {
+                    println!("\n{failures} interval(s) FAILED — not recorded.");
+                    std::process::exit(1);
+                }
             }
         },
         Commands::Mcp { command } => match command {
@@ -1650,4 +1705,83 @@ fn load_workflow(file: PathBuf) -> anyhow::Result<Workflow> {
 fn default_shaper_db() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     format!("{home}/.shaper/shaper_internal.sqlite")
+}
+
+/// Build the upstream closure of `target` (target + all transitive
+/// predecessors + the edges between them) as a standalone Workflow —
+/// the sub-execution unit for `assets backfill`.
+fn upstream_closure(workflow: &swanflow::core::graph::Workflow, target: uuid::Uuid) -> swanflow::core::graph::Workflow {
+    use petgraph::visit::EdgeRef;
+
+    // Find target's NodeIndex.
+    let mut target_idx = None;
+    for idx in workflow.graph.node_indices() {
+        if workflow.graph[idx].id == target {
+            target_idx = Some(idx);
+            break;
+        }
+    }
+    let Some(target_idx) = target_idx else {
+        // Node not found: empty graph keeps the error path honest.
+        let mut wf = Workflow {
+            name: workflow.name.clone(),
+            ..serde_json::from_value(
+                serde_json::to_value(
+                    swanflow::core::graph::Workflow {
+                        name: workflow.name.clone(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_or_default(),
+            )
+            .unwrap_or_default()
+        };
+        wf.name = workflow.name.clone();
+        return wf;
+    };
+
+    // BFS backwards over incoming edges.
+    let mut keep: std::collections::HashSet<petgraph::stable_graph::NodeIndex> =
+        std::collections::HashSet::new();
+    let mut stack = vec![target_idx];
+    while let Some(idx) = stack.pop() {
+        if !keep.insert(idx) {
+            continue;
+        }
+        for e in workflow.graph.edges_directed(idx, petgraph::Direction::Incoming) {
+            stack.push(e.source());
+        }
+    }
+
+    // Rebuild a StableGraph with the kept nodes and inner edges,
+    // remapping indices.
+    let mut new_graph = workflow.graph.clone();
+    new_graph.clear();
+    let mut remap: std::collections::HashMap<petgraph::stable_graph::NodeIndex, petgraph::stable_graph::NodeIndex> =
+        std::collections::HashMap::new();
+    // Deterministic order: original node_indices order.
+    let mut kept_sorted: Vec<_> = workflow
+        .graph
+        .node_indices()
+        .filter(|i| keep.contains(i))
+        .collect();
+    kept_sorted.sort_by_key(|i| i.index());
+    for old in kept_sorted {
+        let w = workflow.graph[old].clone();
+        let new = new_graph.add_node(w);
+        remap.insert(old, new);
+    }
+    for e in workflow.graph.edge_indices().collect::<Vec<_>>() {
+        let (src, dst) = (workflow.graph.edge_endpoints(e).unwrap(), ());
+        let _ = dst;
+        let (src, dst) = (src.0, src.1);
+        if let (Some(&s), Some(&t)) = (remap.get(&src), remap.get(&dst)) {
+            let w = workflow.graph[e].clone();
+            new_graph.add_edge(s, t, w);
+        }
+    }
+
+    let mut sub = workflow.clone();
+    sub.graph = new_graph;
+    sub
 }

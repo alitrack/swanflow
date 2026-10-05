@@ -35,8 +35,20 @@ impl TemplateEngine {
 
     /// Replaces placeholders like ${context.key} in a string with values from the context.
     /// Also resolves {{mustache}} style placeholders (same semantics as render_json).
+    ///
+    /// ADR-014 Stage 2: `${interval_start}` / `${interval_end}` are bound
+    /// from SWANFLOW_INTERVAL_START/END env vars when set (backfill mode),
+    /// BEFORE context substitution — interval bounds always win.
     pub fn render_string(input: &str, context: &HashMap<String, JsonValue>) -> String {
         let mut output = input.to_string();
+
+        // Interval substitution (backfill / scheduled runs).
+        if let Ok(v) = std::env::var("SWANFLOW_INTERVAL_START") {
+            output = output.replace("${interval_start}", &v);
+        }
+        if let Ok(v) = std::env::var("SWANFLOW_INTERVAL_END") {
+            output = output.replace("${interval_end}", &v);
+        }
 
         for (key, value) in context {
             let placeholder = format!("${{context.{}}}", key);
