@@ -383,6 +383,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
             // DuckSqlExec::new wraps each in CoalescePartitionsExec itself.
             let exec = crate::nodes::sql_duckdb::DuckSqlExec::new(
                 ducksql.query.clone(),
+                ducksql.extensions.clone(),
                 physical_inputs[0].clone(),
                 physical_inputs[1..].to_vec(),
                 Arc::new(ducksql.schema.as_arrow().clone()),

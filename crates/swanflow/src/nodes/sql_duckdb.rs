@@ -50,6 +50,11 @@ pub struct DuckSqlLogical {
     pub query: String,
     pub inputs: Vec<LogicalPlan>,
     pub schema: DFSchemaRef,
+    /// DuckDB extensions to LOAD before executing the query (same contract
+    /// as core.io.duckdb_read's `extensions` config). Entries ending in
+    /// `.duckdb_extension` are treated as paths (unsigned load allowed);
+    /// otherwise INSTALL+LOAD by name.
+    pub extensions: Vec<String>,
 }
 
 impl std::cmp::PartialEq for DuckSqlLogical {
@@ -94,6 +99,7 @@ impl UserDefinedLogicalNodeCore for DuckSqlLogical {
             query: self.query.clone(),
             inputs,
             schema: self.schema.clone(),
+            extensions: self.extensions.clone(),
         })
     }
 }
@@ -105,6 +111,7 @@ impl UserDefinedLogicalNodeCore for DuckSqlLogical {
 #[derive(Debug)]
 pub struct DuckSqlExec {
     pub query: String,
+    pub extensions: Vec<String>,
     pub input: Arc<dyn ExecutionPlan>,
     /// Extra inputs (multi-input workflows): input_1 .. input_N
     pub extra_inputs: Vec<Arc<dyn ExecutionPlan>>,
@@ -115,6 +122,7 @@ pub struct DuckSqlExec {
 impl DuckSqlExec {
     pub fn new(
         query: String,
+        extensions: Vec<String>,
         input: Arc<dyn ExecutionPlan>,
         extra_inputs: Vec<Arc<dyn ExecutionPlan>>,
         project_schema: SchemaRef,
@@ -134,6 +142,7 @@ impl DuckSqlExec {
         );
         Self {
             query,
+            extensions,
             input,
             extra_inputs,
             project_schema,
@@ -176,6 +185,7 @@ impl ExecutionPlan for DuckSqlExec {
         })?;
         Ok(Arc::new(Self {
             query: self.query.clone(),
+            extensions: self.extensions.clone(),
             input: first,
             extra_inputs: it.collect(),
             project_schema: self.project_schema.clone(),
@@ -202,6 +212,7 @@ impl ExecutionPlan for DuckSqlExec {
         Ok(Box::pin(DuckSqlStream {
             streams,
             query: self.query.clone(),
+            extensions: self.extensions.clone(),
             schema: self.project_schema.clone(),
             buffers: (0..n_streams).map(|_| Vec::new()).collect(),
             state: DuckSqlState::Polling,
@@ -222,6 +233,7 @@ enum DuckSqlState {
 struct DuckSqlStream {
     streams: Vec<SendableRecordBatchStream>,
     query: String,
+    extensions: Vec<String>,
     schema: SchemaRef,
     buffers: Vec<Vec<RecordBatch>>,
     state: DuckSqlState,
@@ -258,9 +270,12 @@ impl Stream for DuckSqlStream {
                     }
                     if all_done {
                         let query = self.query.clone();
+                        let extensions = self.extensions.clone();
                         let schema = self.schema.clone();
                         let buffers = std::mem::take(&mut self.buffers);
-                        let fut = async move { run_duckdb_query(&query, schema, buffers).await };
+                        let fut = async move {
+                            run_duckdb_query(&query, &extensions, schema, buffers).await
+                        };
                         self.state = DuckSqlState::Running(Box::pin(fut));
                     } else {
                         return Poll::Pending;
@@ -285,11 +300,27 @@ impl Stream for DuckSqlStream {
     }
 }
 
+/// Load configured extensions on a scratch DuckDB connection. Path entries
+/// (ending in `.duckdb_extension`) require an unsigned-allowed connection.
+fn load_extensions(conn: &duckdb::Connection, extensions: &[String]) -> duckdb::Result<()> {
+    for ext in extensions {
+        if ext.ends_with(".duckdb_extension") {
+            let path = ext.replace('\'', "''");
+            conn.execute(&format!("LOAD '{path}'"), [])?;
+        } else {
+            let _ = conn.execute(&format!("INSTALL {ext};"), []);
+            conn.execute(&format!("LOAD {ext};"), [])?;
+        }
+    }
+    Ok(())
+}
+
 /// Core routine: spill inputs to temp parquet, register as DuckDB tables
 /// named input_0..input_N, execute the query, COPY result to temp parquet,
 /// read back with DataFusion, cast to the declared schema.
 async fn run_duckdb_query(
     query: &str,
+    extensions: &[String],
     schema: SchemaRef,
     buffers: Vec<Vec<RecordBatch>>,
 ) -> std::result::Result<RecordBatch, datafusion::error::DataFusionError> {
@@ -321,9 +352,16 @@ async fn run_duckdb_query(
     // Execute in DuckDB (owned clones for the 'static spawn_blocking closure)
     {
         let query_owned = query.to_string();
+        let ext_owned = extensions.to_vec();
         let out_path_owned = out_path_str.clone();
         tokio::task::spawn_blocking(move || -> duckdb::Result<()> {
-            let conn = duckdb::Connection::open_in_memory()?;
+            // Unsigned-allowed connection so locally-built extension
+            // binaries (ml/turbovec/luajit/...) can be loaded by path.
+            let config = duckdb::Config::default()
+                .allow_unsigned_extensions()
+                .map_err(|e| duckdb::Error::InvalidParameterName(format!("DuckDB config failed: {e}")))?;
+            let conn = duckdb::Connection::open_in_memory_with_flags(config)?;
+            load_extensions(&conn, &ext_owned)?;
             for (i, f) in input_files.iter().enumerate() {
                 let path = f.to_str().unwrap_or_default().replace('\'', "''");
                 conn.execute(
@@ -463,6 +501,11 @@ impl NodeBehavior for DuckSqlNode {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
+                    "extensions": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "DuckDB extensions to load before the query. Entries ending in .duckdb_extension are local binary paths (unsigned); others are INSTALL+LOAD by name."
+                    },
                     "output_columns": {
                         "type": "object",
                         "description": "Optional declared output schema {name: type} for downstream planning when schema discovery fails"
@@ -473,6 +516,19 @@ impl NodeBehavior for DuckSqlNode {
         }
     }
 
+    fn analyze(&self, config: &JsonValue) -> Vec<String> {
+        let query = cfg::required_string(config, "query").unwrap_or_default();
+        if query.trim().is_empty() {
+            return Vec::new();
+        }
+        let lineage = crate::nodes::sql_lineage::extract_lineage(&query);
+        if lineage.reads.is_empty() && lineage.writes.is_empty() {
+            // Pure port-to-port transform (or unparseable SQL): nothing to report.
+            return Vec::new();
+        }
+        vec![format!("SQL lineage: {}", lineage)]
+    }
+
     fn validate(&self, config: &JsonValue) -> Result<()> {
         let q = cfg::required_string(config, "query")?;
         if q.trim().is_empty() {
@@ -480,11 +536,32 @@ impl NodeBehavior for DuckSqlNode {
         }
         // Guard: block writes to the engine's own metadata database via
         // sneaky statements embedded in the COPY payload.
+        // Exception: LOAD '<path>.duckdb_extension' — loading a local
+        // extension binary by absolute path (e.g. the ml extension) is a
+        // legitimate use; ATTACH/INSTALL stay banned.
         let lower = q.to_lowercase();
         for banned in ["attach ", "install ", "load "] {
-            if lower.contains(banned) {
-                return Err(anyhow!("DuckDB statement '{}' is not allowed in this node", banned.trim()));
+            if !lower.contains(banned) {
+                continue;
             }
+            if banned == "load " {
+                // allow `LOAD '<path>.duckdb_extension'` as a standalone
+                // statement; "load " anywhere else (by-name loads, COPY
+                // payload smuggling, mid-statement) stays banned.
+                let all_loads_local = q.split(';').all(|stmt| {
+                    let s = stmt.trim().to_lowercase();
+                    if s.starts_with("load ") {
+                        let path = s["load ".len()..].trim();
+                        path.starts_with('\'') && path.ends_with(".duckdb_extension'")
+                    } else {
+                        !s.contains("load ")
+                    }
+                });
+                if all_loads_local {
+                    continue;
+                }
+            }
+            return Err(anyhow!("DuckDB statement '{}' is not allowed in this node", banned.trim()));
         }
         Ok(())
     }
@@ -495,11 +572,12 @@ impl NodeBehavior for DuckSqlNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let query = cfg::required_string(config, "query")?;
+        let extensions = cfg::optional_string_array(config, "extensions")?;
 
         // Schema discovery: execute the query against a scratch DuckDB with
         // sample inputs. Falls back to `output_columns` config, then to
         // pass-through.
-        let schema: DFSchemaRef = discover_duck_schema(&query, &inputs)
+        let schema: DFSchemaRef = discover_duck_schema(&query, &inputs, &extensions)
             .await
             .or_else(|| declared_output_schema(config))
             .unwrap_or_else(|| {
@@ -516,6 +594,7 @@ impl NodeBehavior for DuckSqlNode {
                     query,
                     inputs,
                     schema,
+                    extensions,
                 }),
             },
         )])
@@ -533,7 +612,11 @@ impl TypedNodeBehavior for DuckSqlNode {
 /// of the input plan can NEVER work — the plan references tables registered
 /// in the engine's SessionContext, not ours). Best-effort: any failure falls
 /// back to declared `output_columns`, then pass-through.
-async fn discover_duck_schema(query: &str, inputs: &[LogicalPlan]) -> Option<DFSchemaRef> {
+async fn discover_duck_schema(
+    query: &str,
+    inputs: &[LogicalPlan],
+    extensions: &[String],
+) -> Option<DFSchemaRef> {
     if inputs.is_empty() {
         return None;
     }
@@ -554,8 +637,15 @@ async fn discover_duck_schema(query: &str, inputs: &[LogicalPlan]) -> Option<DFS
         files.push(f);
     }
     let q = query.to_string();
+    let ext_owned = extensions.to_vec();
     let res = tokio::task::spawn_blocking(move || -> duckdb::Result<Vec<(String, String)>> {
-        let conn = duckdb::Connection::open_in_memory()?;
+        // Unsigned-allowed connection, same as run time, so extension-backed
+        // functions (ml_train_model etc.) bind during schema discovery too.
+        let config = duckdb::Config::default()
+            .allow_unsigned_extensions()
+            .map_err(|e| duckdb::Error::InvalidParameterName(format!("DuckDB config failed: {e}")))?;
+        let conn = duckdb::Connection::open_in_memory_with_flags(config)?;
+        load_extensions(&conn, &ext_owned)?;
         for (i, f) in files.iter().enumerate() {
             let path = f.to_str().unwrap_or_default().replace('\'', "''");
             conn.execute(
@@ -684,6 +774,27 @@ mod tests {
             .is_err());
         assert!(node
             .validate(&serde_json::json!({ "query": "INSTALL httpfs" }))
+            .is_err());
+    }
+
+    #[test]
+    fn test_validate_allows_local_extension_load() {
+        let node = DuckSqlNode;
+        // legit: load a local extension binary by path
+        assert!(node
+            .validate(&serde_json::json!({ "query":
+                "LOAD '/home/u/.duckdb/extensions/v1.5.6/linux_amd64/ml.duckdb_extension'; SELECT 1;"
+            }))
+            .is_ok());
+        // still banned: loading an installed extension by name
+        assert!(node
+            .validate(&serde_json::json!({ "query": "LOAD json" }))
+            .is_err());
+        // still banned: load buried mid-statement (COPY payload smuggling)
+        assert!(node
+            .validate(&serde_json::json!({ "query":
+                "COPY (SELECT 'install stuff; load json;') TO 'x.csv'"
+            }))
             .is_err());
     }
 
