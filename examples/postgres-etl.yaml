@@ -1,43 +1,47 @@
 # SwanFlow Example: PostgreSQL ETL Pipeline
 #
-# Reads data from a PostgreSQL source, transforms with SQL,
-# and materializes results as Parquet.
+# Reads data from a PostgreSQL source via DuckDB's postgres scanner
+# (core.io.db_connector), transforms with DuckDB-dialect SQL,
+# and materializes results into a DuckDB table.
 #
-# Connection config is loaded from DBX-compatible profile:
-#   connections/postgres-prod.yaml
-#
+# Prerequisite: a reachable PostgreSQL instance. Adjust url/table below.
 # Usage:
 #   swanflow run examples/postgres-etl.yaml
-
-workflow: postgres-etl
-version: v1
-description: "PostgreSQL → SQL transform → Parquet export"
-
-nodes:
-  - id: source
-    type: db_scan
-    config:
-      connection: "connections/postgres-prod.yaml"
-      table: "orders"
-      limit: 10000
-
-  - id: summary
-    type: sql_transform
-    inputs: [source]
-    config:
-      sql: |
-        SELECT
-          DATE_TRUNC('month', order_date) AS month,
-          customer_id,
-          COUNT(*) AS order_count,
-          SUM(amount) AS total_amount
-        FROM input
-        GROUP BY 1, 2
-        ORDER BY 1 DESC, 3 DESC
-
-  - id: export
-    type: parquet_sink
-    inputs: [summary]
-    config:
-      path: "output/monthly_summary.parquet"
-      mode: "overwrite"
+name: "PostgreSQL ETL"
+id: "a0000000-0000-0000-0000-000000000002"
+graph:
+  nodes:
+    - id: "a0000000-0000-0000-0000-000000000201"
+      type_id: "core.io.db_connector"
+      config:
+        url: "postgresql://user:pass@localhost:5432/proddb"
+        table: "orders"
+        driver: "auto"
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-000000000202"
+      type_id: "core.sql.duckdb"
+      config:
+        query: |
+          SELECT
+            DATE_TRUNC('month', order_date) AS month,
+            customer_id,
+            COUNT(*) AS order_count,
+            SUM(amount) AS total_amount
+          FROM input_0
+          GROUP BY 1, 2
+          ORDER BY 1 DESC, 3 DESC
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-000000000203"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "monthly_summary.duckdb"
+        table: "monthly_summary"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

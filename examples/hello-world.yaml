@@ -1,31 +1,37 @@
 # SwanFlow Example: Hello World
 #
 # A minimal workflow demonstrating SwanFlow's DAG data pipeline.
-# Uses DuckDB's built-in generate_series to produce sample data,
-# then applies a SQL transform.
+# Uses DuckDB's generate_series to produce sample data, then applies
+# a SQL transform via core.sql.duckdb (DuckDB dialect).
 #
 # Usage:
 #   swanflow run examples/hello-world.yaml
-
-workflow: hello-world
-version: v1
-description: "Minimal SwanFlow DAG: generate → transform"
-
-nodes:
-  - id: data_source
-    type: duckdb_source    # DuckDB: can query CSV, Parquet, or inline SQL
-    config:
-      query: "SELECT range as id, 'item_' || range::VARCHAR as label FROM generate_series(1, 5) AS t(range)"
-      materialize: true
-
-  - id: transform
-    type: sql_transform
-    inputs: [data_source]
-    config:
-      sql: "SELECT id, label, id * 10 AS scaled FROM input"
-
-  - id: output
-    type: table_view
-    inputs: [transform]
-    config:
-      limit: 10
+name: "Hello World"
+id: "a0000000-0000-0000-0000-000000000001"
+graph:
+  nodes:
+    - id: "a0000000-0000-0000-0000-000000000101"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: "SELECT range AS id, 'item_' || range::VARCHAR AS label FROM generate_series(1, 5) AS t(range)"
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-000000000102"
+      type_id: "core.sql.duckdb"
+      config:
+        query: "SELECT id, label, id * 10 AS scaled FROM input_0"
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-000000000103"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "hello_world.duckdb"
+        table: "scaled_items"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

@@ -1,55 +1,44 @@
-# SwanFlow Example: AI Analyst Agent
+# SwanFlow Example: AI Data Analyst
 #
-# A SwanFlow DAG that uses AI to analyze data, detect anomalies,
-# and produce a report — all while staying deterministically
-# scheduled and auditable via the DAG engine.
-#
-# The AI Agent node has read-only access to the data stream;
-# it cannot write to the database or external systems without
-# explicit permission (read-XOR-write model).
+# A SwanFlow DAG that generates synthetic sales data, computes a profile
+# with DuckDB-dialect SQL, and extracts entities from the profile text
+# with the LLM-backed entity extractor (requires LLM env config —
+# see LLM_API_BASE / LLM_MODEL / LLM_API_KEY).
 #
 # Usage:
 #   swanflow run examples/agent-analyst.yaml
-
-workflow: agent-analyst
-version: v1
-description: "AI data analyst with deterministic DAG scheduling"
-
-nodes:
-  - id: data
-    type: duckdb_source
-    config:
-      query: "SELECT * FROM 'sales_2026.parquet'"
-      materialize: true
-
-  - id: profile
-    type: sql_transform
-    inputs: [data]
-    config:
-      sql: |
-        SELECT
-          COUNT(*) AS row_count,
-          COUNT(DISTINCT product_id) AS products,
-          MIN(sale_date) AS first_sale,
-          MAX(sale_date) AS last_sale,
-          ROUND(AVG(amount), 2) AS avg_amount
-        FROM input
-
-  - id: analyst
-    type: ai_agent
-    inputs: [profile, data]
-    config:
-      mode: "read-only"          # Agent can only read data, not write
-      prompt: >
-        Analyze the sales data. Identify:
-        1. Any significant anomalies or outliers
-        2. Monthly trends
-        3. Top-performing products
-        Return structured JSON with findings.
-      model: "ollama/llama3.1"
-
-  - id: report
-    type: sql_transform
-    inputs: [analyst]
-    config:
-      sql: "SELECT * FROM input"
+name: "AI Data Analyst"
+id: "a0000000-0000-0000-0000-000000000003"
+graph:
+  nodes:
+    - id: "a0000000-0000-0000-0000-000000000301"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: |
+          SELECT 'ACME Corp bought 42 laptops from TechSupply on 2026-09-01 for 50400 USD' AS event_text, 42000 AS amount
+          UNION ALL
+          SELECT 'Beta LLC ordered 10 monitors from ScreenWorld on 2026-09-03 for 2500 USD', 2500
+          UNION ALL
+          SELECT 'Gamma Inc returned 3 keyboards to TechSupply on 2026-09-05 for 90 USD', 90
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-000000000302"
+      type_id: "ai.entity_extractor"
+      config:
+        entity_types: ["organization", "product", "date", "money"]
+        relation_types: ["bought_from", "ordered_from", "returned_to"]
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-000000000303"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "agent_analyst.duckdb"
+        table: "extracted_entities"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
