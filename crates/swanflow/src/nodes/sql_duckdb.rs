@@ -517,16 +517,28 @@ impl NodeBehavior for DuckSqlNode {
     }
 
     fn analyze(&self, config: &JsonValue) -> Vec<String> {
+        use crate::nodes::sql_lineage::extract_lineage;
+        use crate::nodes::sql_lineage_columns::extract_column_lineage;
+
         let query = cfg::required_string(config, "query").unwrap_or_default();
         if query.trim().is_empty() {
             return Vec::new();
         }
-        let lineage = crate::nodes::sql_lineage::extract_lineage(&query);
-        if lineage.reads.is_empty() && lineage.writes.is_empty() {
-            // Pure port-to-port transform (or unparseable SQL): nothing to report.
-            return Vec::new();
+        let mut hints = Vec::new();
+
+        let lineage = extract_lineage(&query);
+        if !lineage.reads.is_empty() || !lineage.writes.is_empty() {
+            hints.push(format!("SQL lineage: {}", lineage));
         }
-        vec![format!("SQL lineage: {}", lineage)]
+
+        // Column-level provenance for plain SELECTs (best-effort; wildcards
+        // and subquery passthroughs are skipped — see module docs).
+        let cols = extract_column_lineage(&query);
+        if !cols.columns.is_empty() {
+            hints.push(format!("Column lineage: {}", cols));
+        }
+
+        hints
     }
 
     fn validate(&self, config: &JsonValue) -> Result<()> {

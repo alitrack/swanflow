@@ -95,7 +95,7 @@ impl Collector {
     }
 }
 
-fn object_name_to_string(name: &sqlparser::ast::ObjectName) -> String {
+pub(crate) fn object_name_to_string(name: &sqlparser::ast::ObjectName) -> String {
     name.0
         .iter()
         .map(|p| match p {

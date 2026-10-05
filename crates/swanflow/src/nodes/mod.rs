@@ -27,6 +27,7 @@ pub mod script;
 pub mod sql;
 pub mod sql_duckdb;
 pub mod sql_lineage;
+pub mod sql_lineage_columns;
 pub mod transform;
 pub mod wasm;
 
