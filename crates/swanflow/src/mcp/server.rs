@@ -82,13 +82,18 @@ fn read_node_outputs(
     };
     let mut out = serde_json::Map::new();
     for spec in output_specs {
-        // Match by table name (node_<uuid-prefix8>) or full node uuid.
+        // Match by full node uuid, full table name, or legacy 8-char prefix.
+        let legacy_prefix = if spec.to_string().len() >= 8 {
+            format!("node_{}", &spec.to_string()[..8])
+        } else {
+            spec.to_string()
+        };
         let rows: Vec<(String, String)> = match conn
             .prepare(
-                "SELECT table_name, parquet_path FROM flow_metadata WHERE node_id = ? OR table_name = ?",
+                "SELECT table_name, parquet_path FROM flow_metadata WHERE node_id = ? OR table_name = ? OR table_name = ?",
             ) {
             Ok(mut stmt) => match stmt.query_map(
-                duckdb::params![spec.to_string(), format!("node_{}", spec)],
+                duckdb::params![spec.to_string(), format!("node_{}", spec), legacy_prefix],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             ) {
                 Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),

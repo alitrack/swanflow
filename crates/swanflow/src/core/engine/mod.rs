@@ -515,7 +515,7 @@ impl SwanFlowEngine {
                             if !batches.is_empty() {
                                 // Materialize result as a registered table
                                 let table_name =
-                                    format!("node_{}", &node_id.to_string()[..8]);
+                                    crate::core::node_table_name(node_id);
                                 let schema = batches[0].schema();
                                 if let Err(e) = engine_clone
                                     .register_table(RegisteredTable {
@@ -769,7 +769,7 @@ impl SwanFlowEngine {
                                 let mut found = false;
                                 if let Some(preds) = map.get(&node_id) {
                                     for pid in preds {
-                                        let t = format!("node_{}", &pid.to_string()[..8]);
+                                        let t = crate::core::node_table_name(*pid);
                                         if let Ok(df) =
                                             ctx_shared.sql(&format!("SELECT * FROM \"{}\"", t)).await
                                         {
@@ -831,7 +831,7 @@ impl SwanFlowEngine {
                         let mut collected: Vec<String> = Vec::new();
                         if let Some(preds) = workflow_pred_ids.get(&node_id) {
                             for pid in preds {
-                                let tname = format!("node_{}", &pid.to_string()[..8]);
+                                let tname = crate::core::node_table_name(*pid);
                                 if let Ok(df) = ctx_shared
                                     .sql(&format!("SELECT * FROM \"{}\"", tname))
                                     .await
@@ -866,7 +866,7 @@ impl SwanFlowEngine {
                             true,
                         )])
                         .expect("collect batch build");
-                        let table_name = format!("node_{}", &node_id.to_string()[..8]);
+                        let table_name = crate::core::node_table_name(node_id);
                         if let Ok(df) = ctx_shared.read_batches(vec![batch]) {
                             let _ = ctx_shared.register_table(&table_name, df.into_view());
                             let _ = tx.send(NodeEvent::Materialized {
@@ -923,7 +923,7 @@ impl SwanFlowEngine {
                             &upstream_digests,
                         );
                         if let Some(parquet_path) = skip_result {
-                            let table_name = format!("node_{}", &node_id.to_string()[..8]);
+                            let table_name = crate::core::node_table_name(node_id);
                             // sync_metadata_to_context may have registered this
                             // table at startup — replace it with our parquet view.
                             let _ = ctx_shared.deregister_table(&table_name);
@@ -1016,7 +1016,7 @@ impl SwanFlowEngine {
                                     // MANUAL MATERIALIZATION: Register as table so it's queryable
                                     if !batches.is_empty() {
                                         let table_name =
-                                            format!("node_{}", &node_id.to_string()[..8]);
+                                            crate::core::node_table_name(node_id);
                                         if let Ok(df) = ctx_shared.read_batches(batches.clone()) {
                                             let _ = ctx_shared
                                                 .register_table(&table_name, df.into_view());
@@ -1573,7 +1573,7 @@ impl SwanFlowEngine {
                         continue;
                     }
                 };
-                let table_name = format!("node_{}", &src_node.id.to_string()[..8]);
+                let table_name = crate::core::node_table_name(src_node.id);
                 if let Ok(df) = ctx
                     .sql(&format!("SELECT * FROM \"{}\" LIMIT 1", table_name))
                     .await
@@ -1870,7 +1870,7 @@ impl SwanFlowEngine {
 
             let mut collected = Vec::new();
             for pred in &predecessors {
-                let table_name = format!("node_{}", &pred.id.to_string()[..8]);
+                let table_name = crate::core::node_table_name(pred.id);
                 if let Ok(df) = ctx.sql(&format!("SELECT * FROM \"{}\"", table_name)).await {
                     if let Ok(batches) = df.collect().await {
                         for batch in &batches {
@@ -1950,7 +1950,7 @@ impl SwanFlowEngine {
                     continue;
                 }
             };
-            let table_name = format!("node_{}", &src_node.id.to_string()[..8]);
+            let table_name = crate::core::node_table_name(src_node.id);
             if let Ok(df) = ctx.sql(&format!("SELECT * FROM \"{}\"", table_name)).await {
                 let plan = df.into_optimized_plan()?;
                 // Also register as input_{i} so late-binding SQL nodes
@@ -2057,7 +2057,7 @@ impl SwanFlowEngine {
 
         // 5. Materialize: register as table for downstream nodes
         if !batches.is_empty() {
-            let table_name = format!("node_{}", &node.id.to_string()[..8]);
+            let table_name = crate::core::node_table_name(node.id);
             if let Ok(df) = ctx.read_batches(batches.clone()) {
                 let _ = ctx.register_table(&table_name, df.into_view());
             }

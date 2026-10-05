@@ -229,7 +229,7 @@ impl WorkflowCompiler {
             // Apply probes and materializers
             if self.inject_probes && node.type_id != "core.output" && !is_placeholder {
                 for (port, plan) in compiled_node_outputs.iter_mut() {
-                    let table_name = format!("node_{}", &node.id.to_string()[..8]);
+                    let table_name = crate::core::node_table_name(node.id);
                     let cache_key = format!("{}_{}", node.id, port);
 
                     if self.event_tx.is_some() {
