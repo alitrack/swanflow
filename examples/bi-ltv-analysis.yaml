@@ -1,0 +1,88 @@
+# SwanFlow BI Template: LTV Analysis, stage-weighted (bi-ltv-analysis)
+#
+# Ported from QwenPaw-Data skill "atomic/bi-ltv-analysis" (Apache-2.0),
+# stage_weighted formula — the richest of its four formulas:
+#
+#   LTV = Σ_j  revenue_j × Π_{k<j} (1 - churn_k)
+#
+# (revenue of stage j weighted by the survival probability of reaching it).
+# Survival is computed as a running product of (1 - churn) in DuckDB SQL:
+#   exp(sum(ln(1 - churn)) over (... rows unbounded preceding, 1 preceding))
+# Semantics preserved from ltv_calc.py: NULL churn counts as 0 (no attrition),
+# NULL revenue stage contributes 0, result rounded to 6 decimals.
+#
+# Input shape expected from real data (replace node 0's query), long format:
+#   group_name | stage_order | churn_rate | stage_revenue
+#
+# Usage:
+#   swanflow run examples/bi-ltv-analysis.yaml
+name: "BI LTV Analysis (stage-weighted)"
+id: "a0000000-0000-0000-0000-0000000000c0"
+graph:
+  nodes:
+    - id: "a0000000-0000-0000-0000-0000000000c1"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: |
+          -- Example data straight from the QwenPaw SKILL.md (group-level):
+          --   group_1: a阶段 churn .366 rev 26.0 | b阶段 churn .121 rev 6.5
+          --   group_2: a阶段 churn .253 rev 6.5 | b阶段 churn .754 rev 2.0
+          -- Expected LTV: group_1 = 26 + 6.5*0.634 = 30.121
+          --               group_2 = 6.5 + 2.0*0.747 = 7.994
+          SELECT 'group_1' AS group_name, 1 AS stage_order, 0.366 AS churn_rate, 26.0 AS stage_revenue
+          UNION ALL SELECT 'group_1', 2, 0.121, 6.5
+          UNION ALL SELECT 'group_2', 1, 0.253, 6.5
+          UNION ALL SELECT 'group_2', 2, 0.754, 2.0
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-0000000000c2"
+      type_id: "core.sql.duckdb"
+      config:
+        query: |
+          WITH stages AS (
+            SELECT
+              group_name,
+              stage_order,
+              COALESCE(churn_rate, 0.0) AS churn,          -- NULL churn → 0 (matches ltv_calc.py)
+              COALESCE(stage_revenue, 0.0) AS revenue      -- NULL revenue stage → 0
+            FROM input_0
+          ),
+          weighted AS (
+            SELECT
+              group_name,
+              stage_order,
+              churn,
+              revenue,
+              revenue * COALESCE(
+                EXP(SUM(LN(1.0 - churn)) OVER (
+                  PARTITION BY group_name ORDER BY stage_order
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                )),
+                1.0
+              ) AS weighted_revenue
+            FROM stages
+          )
+          SELECT
+            group_name,
+            ROUND(SUM(weighted_revenue), 6)               AS ltv,
+            COUNT(*)                                      AS stage_count,
+            ROUND(SUM(weighted_revenue) - SUM(revenue), 6) AS attrition_cost,
+            ROUND(AVG(churn), 4)                          AS avg_churn
+          FROM weighted
+          GROUP BY group_name
+          ORDER BY ltv DESC
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-0000000000c3"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "ltv_analysis.duckdb"
+        table: "ltv_result"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
