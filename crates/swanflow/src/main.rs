@@ -77,6 +77,26 @@ enum Commands {
         #[command(subcommand)]
         command: AgentCommands,
     },
+
+    /// Import external workflow formats into SwanFlow YAML
+    Import {
+        #[command(subcommand)]
+        command: ImportCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImportCommands {
+    /// Convert a duckOrch task folder (one *.sql = one task) into a
+    /// SwanFlow workflow YAML. Edges come from @inputs/@depends_on and
+    /// are auto-inferred from SQL lineage when omitted.
+    Duckorch {
+        /// Path to the folder containing duckOrch *.sql task files
+        dir: PathBuf,
+        /// Output workflow YAML path (default: <dir>/<dirname>.yaml)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -485,6 +505,111 @@ async fn main() -> anyhow::Result<()> {
                 std::fs::write(&path, &yaml)?;
                 println!("\n💾 Saved to: {}", path.display());
                 println!("   Next: swanflow agent approve {}", path.display());
+            }
+        },
+        Commands::Import { command } => match command {
+            ImportCommands::Duckorch { dir, output } => {
+                use swanflow::nodes::import_duckorch as orch;
+
+                println!("🦆 Importing duckOrch tasks from: {}", dir.display());
+                let report = orch::import_folder(&dir)?;
+                print!("{}", report);
+
+                // Build the workflow: one core.sql.duckdb node per task,
+                // edges from inputs/depends_on (task-name resolution).
+                use petgraph::stable_graph::StableGraph;
+                use swanflow_core::graph::{EdgeInstance, NodeInstance, Workflow};
+                use swanflow_core::nodes::NodeState;
+
+                let name_by_table: std::collections::HashMap<String, String> = report
+                    .tasks
+                    .iter()
+                    .flat_map(|t| t.outputs.iter().map(|o| (o.clone(), t.name.clone())))
+                    .collect();
+
+                let mut graph: StableGraph<NodeInstance, EdgeInstance> = StableGraph::new();
+                let mut idx_by_task: std::collections::HashMap<String, petgraph::graph::NodeIndex> =
+                    std::collections::HashMap::new();
+
+                for t in &report.tasks {
+                    let idx = graph.add_node(NodeInstance {
+                        id: orch::task_node_id(&t.name),
+                        type_id: "core.sql.duckdb".to_string(),
+                        config: serde_json::json!({ "query": t.sql }),
+                        state: NodeState::Configured,
+                        ..Default::default()
+                    });
+                    idx_by_task.insert(t.name.clone(), idx);
+                }
+
+                let mut added = std::collections::BTreeSet::<(String, String)>::new();
+                let mut add_edge = |from: &str, to: &str,
+                                    idx_by_task: &std::collections::HashMap<
+                    String,
+                    petgraph::graph::NodeIndex,
+                >,
+                                    graph: &mut StableGraph<NodeInstance, EdgeInstance>,
+                                    added: &mut std::collections::BTreeSet<(String, String)>| {
+                    if from == to {
+                        return;
+                    }
+                    if let (Some(&a), Some(&b)) = (idx_by_task.get(from), idx_by_task.get(to)) {
+                        if added.insert((from.to_string(), to.to_string())) {
+                            graph.add_edge(
+                                a,
+                                b,
+                                EdgeInstance { source_port: 0, target_port: 0 },
+                            );
+                        }
+                    }
+                };
+
+                for t in &report.tasks {
+                    let upstream_names: Vec<String> = t
+                        .inputs
+                        .iter()
+                        .filter_map(|i| name_by_table.get(i).cloned())
+                        .chain(t.depends_on.iter().cloned())
+                        .collect();
+                    for up in upstream_names {
+                        add_edge(&up, &t.name, &idx_by_task, &mut graph, &mut added);
+                    }
+                    if t.inputs.is_empty() {
+                        if let Some(inf) = report.inferred_inputs.get(&t.name) {
+                            for up in inf {
+                                add_edge(up, &t.name, &idx_by_task, &mut graph, &mut added);
+                            }
+                        }
+                    }
+                }
+
+                let workflow = Workflow {
+                    id: uuid::Uuid::new_v4(),
+                    name: dir
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("duckorch-import")
+                        .to_string(),
+                    context: Default::default(),
+                    graph,
+                };
+
+                let out_path = output.unwrap_or_else(|| {
+                    dir.clone()
+                });
+                let out_path = if out_path.is_dir() {
+                    let stem = dir
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("duckorch-import");
+                    out_path.join(format!("{}.yaml", stem))
+                } else {
+                    out_path
+                };
+                let yaml = serde_yaml::to_string(&workflow)?;
+                std::fs::write(&out_path, &yaml)?;
+                println!("\n💾 Workflow saved to: {}", out_path.display());
+                println!("   Next: swanflow inspect {}", out_path.display());
             }
         },
         Commands::Mcp { command } => match command {

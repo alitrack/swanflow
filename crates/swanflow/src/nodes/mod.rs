@@ -16,6 +16,7 @@ pub mod common;
 pub mod config;
 pub mod connectors;
 pub mod extfn;
+pub mod import_duckorch;
 pub mod io;
 pub mod luajit;
 pub mod mcp;
