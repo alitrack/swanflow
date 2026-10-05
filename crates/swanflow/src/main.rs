@@ -298,6 +298,16 @@ enum DaemonCommands {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    /// Remove a workflow from the daemon's automation sensor. Idempotent:
+    /// unregistering something not watched succeeds quietly. Accepts the
+    /// workflow file path or its workflow id (UUID).
+    Unwatch {
+        /// Path to the watched workflow file, or its workflow UUID
+        target: String,
+        /// Custom socket path
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// List running workflows
     List {
         #[arg(long)]
@@ -1502,6 +1512,21 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             println!("⚙️  The daemon sensor re-evaluates automation conditions every 30s.");
             Ok(())
         }
+        DaemonCommands::Unwatch { target, socket } => {
+            // UUID targets pass through as workflow_id; anything else is
+            // treated as a file path (canonicalized like `daemon watch`).
+            let (method, params) = match uuid::Uuid::parse_str(&target) {
+                Ok(id) => ("automation.unregister", serde_json::json!({"workflow_id": id.to_string()})),
+                Err(_) => {
+                    let abs = std::fs::canonicalize(&target)
+                        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", target))?;
+                    ("automation.unregister", serde_json::json!({"path": abs.to_string_lossy().to_string()}))
+                }
+            };
+            let resp = send_daemon_raw(&socket, method, params).await?;
+            println!("{}", resp);
+            Ok(())
+        }
         DaemonCommands::List { socket } => {
             let resp = send_daemon_raw(&socket, "workflow.list", serde_json::json!({})).await?;
             println!("{}", resp);
@@ -1599,6 +1624,10 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
                 .status()?;
             anyhow::ensure!(status.success(), "SCP failed");
             run_ssh(host, &["swanflow", "daemon", "watch", &remote_path])?;
+        }
+        DaemonCommands::Unwatch { target, .. } => {
+            // Target is a remote path or UUID — forwarded verbatim.
+            run_ssh(host, &["swanflow", "daemon", "unwatch", &target])?;
         }
         DaemonCommands::List { .. } => {
             run_ssh(host, &["swanflow", "daemon", "list"])?;

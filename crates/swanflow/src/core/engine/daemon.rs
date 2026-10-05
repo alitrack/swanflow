@@ -655,6 +655,83 @@ async fn handle_method(
             status: None,
         },
 
+        // ADR-014 follow-up: remove a workflow from the automation sensor.
+        // Params: {"path": "..."} or {"workflow_id": "..."} (path resolves
+        // by canonicalization + id match, matching how `daemon watch` sends
+        // absolute paths). Idempotent — unregistering an unknown workflow
+        // returns ok with removed=false rather than an error.
+        "automation.unregister" => {
+            let wf_id: Option<uuid::Uuid> = req
+                .params
+                .get("workflow_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok());
+            let path = req.params.get("path").and_then(|v| v.as_str());
+            if wf_id.is_none() && path.is_none() {
+                return DaemonResponse {
+                    id: req.id.clone(),
+                    ok: Some(false),
+                    error: Some("Need 'path' or 'workflow_id' parameter".to_string()),
+                    workflow_id: None,
+                    workflows: None,
+                    status: None,
+                };
+            }
+            let mut w = watched.lock().await;
+            let before = w.len();
+            // Path matching: canonicalize (like `daemon watch` does) and
+            // compare both raw and canonical forms — a watch registered
+            // from one symlink/relative spelling must still unregister.
+            let canon = path.and_then(|p| std::fs::canonicalize(p).ok());
+            w.retain(|ww| {
+                let id_match = wf_id.map(|id| ww.workflow.id == id).unwrap_or(false);
+                if id_match {
+                    return false;
+                }
+                if let (Some(p), Some(wwp)) = (path, ww.path.as_ref()) {
+                    if wwp.to_string_lossy() == p {
+                        return false;
+                    }
+                    if let Some(c) = &canon {
+                        // canonicalize the stored path lazily; entries whose
+                        // file vanished still match by raw string above.
+                        if std::fs::canonicalize(wwp)
+                            .map(|cp| cp == *c)
+                            .unwrap_or(false)
+                        {
+                            return false;
+                        }
+                    }
+                }
+                true
+            });
+            let removed = before - w.len();
+            drop(w);
+            if removed > 0 {
+                save_watched_entries(watched).await;
+            }
+            match wf_id {
+                Some(id) => tracing::info!(
+                    "automation sensor: unregistered {removed} watch(es) for {id}"
+                ),
+                None => tracing::info!(
+                    "automation sensor: unregistered {removed} watch(es) for path {path:?}"
+                ),
+            }
+            DaemonResponse {
+                id: req.id.clone(),
+                ok: Some(removed > 0),
+                error: if removed > 0 {
+                    None
+                } else {
+                    Some("no matching watch".to_string())
+                },
+                workflow_id: wf_id.map(|id| id.to_string()),
+                workflows: None,
+                status: None,
+            }
+        }
+
         "daemon.stop" => {
             tracing::info!("Daemon stop requested — shutting down");
             // Allow graceful shutdown — just acknowledge
