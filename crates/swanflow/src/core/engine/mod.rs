@@ -402,6 +402,28 @@ impl SwanFlowEngine {
         let duckdb_total_levels = stages.len();
         let duckdb_max_cache = self.max_cache_size_mb;
 
+        // ADR-014 Stage 1: node_id -> (self config, upstream tuples) for
+        // asset digest computation at run-record time.
+        let duckdb_level_upstreams: std::collections::HashMap<
+            Uuid,
+            (String, Vec<(Uuid, String, String)>),
+        > = workflow
+            .graph
+            .node_indices()
+            .map(|idx| {
+                let node = &workflow.graph[idx];
+                let ups: Vec<(Uuid, String, String)> = workflow
+                    .graph
+                    .neighbors_directed(idx, petgraph::Direction::Incoming)
+                    .map(|u| {
+                        let un = &workflow.graph[u];
+                        (un.id, un.type_id.clone(), un.config.to_string())
+                    })
+                    .collect();
+                (node.id, (node.config.to_string(), ups))
+            })
+            .collect();
+
         tokio::spawn(async move {
             let cm = checkpoint::CheckpointManager::new(&duckdb_cache_dir);
 
@@ -510,6 +532,18 @@ impl SwanFlowEngine {
                                 node_id,
                                 state: crate::nodes::NodeState::Executed,
                             });
+                            // ADR-014 Stage 1: record the materialization in
+                            // the asset ledger. Best-effort — ledger failures
+                            // must never fail the run.
+                            if let Some((cfg, ups)) = duckdb_level_upstreams.get(&node_id) {
+                                assets::record_asset_run(
+                                    &duckdb_cache_dir,
+                                    node_id,
+                                    &node_type,
+                                    cfg,
+                                    ups,
+                                );
+                            }
                         }
                         Err(e) => {
                             let _ = tx_err.send(NodeEvent::Error {
@@ -639,6 +673,28 @@ impl SwanFlowEngine {
         let workflow_pred_ids = Arc::new(wf_pred_map);
         let df_total_levels = stages.len();
         let df_max_cache = self.max_cache_size_mb;
+
+        // ADR-014 Stage 1: node_id -> (self config, upstream tuples) for
+        // asset digest computation at run-record time.
+        let df_level_upstreams: std::collections::HashMap<
+            Uuid,
+            (String, Vec<(Uuid, String, String)>),
+        > = workflow
+            .graph
+            .node_indices()
+            .map(|idx| {
+                let node = &workflow.graph[idx];
+                let ups: Vec<(Uuid, String, String)> = workflow
+                    .graph
+                    .neighbors_directed(idx, petgraph::Direction::Incoming)
+                    .map(|u| {
+                        let un = &workflow.graph[u];
+                        (un.id, un.type_id.clone(), un.config.to_string())
+                    })
+                    .collect();
+                (node.id, (node.config.to_string(), ups))
+            })
+            .collect();
 
         tokio::spawn(async move {
             let cm = checkpoint::CheckpointManager::new(&df_cache_dir);
@@ -868,6 +924,19 @@ impl SwanFlowEngine {
                                         node_id,
                                         state: crate::nodes::NodeState::Executed,
                                     });
+                                    // ADR-014 Stage 1: record materialization
+                                    // in the asset ledger (best-effort).
+                                    if let Some((cfg, ups)) =
+                                        df_level_upstreams.get(&node_id)
+                                    {
+                                        assets::record_asset_run(
+                                            &df_cache_dir,
+                                            node_id,
+                                            &node_type,
+                                            cfg,
+                                            ups,
+                                        );
+                                    }
                                 }
                                 Err(e) => {
                                     let diagnostic = NodeDiagnostic::new(

@@ -26,6 +26,20 @@ impl UpstreamDigest {
     }
 }
 
+/// Parse a 64-char lowercase hex digest back to bytes.
+pub fn parse_digest_hex(hex: &str) -> Option<UpstreamDigest> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        bytes[i] = (hi * 16 + lo) as u8;
+    }
+    Some(UpstreamDigest { bytes })
+}
+
 /// Compute a node's digest from its config JSON and its upstream
 /// dependencies' digests (transitive staleness: any upstream change
 /// bubbles down).
@@ -122,9 +136,81 @@ impl AssetLedger {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+impl AssetLedger {
+    /// Record a successful node run: computes the upstream digest (node
+    /// id + type + config + upstream digests — transitive via recorded
+    /// upstream digests when available) and writes it.
+    ///
+    /// Best-effort engine hook: failures are logged to stderr, never
+    /// propagated.
+    pub fn record_asset_run_for(
+        &self,
+        node_id: Uuid,
+        type_id: &str,
+        node_config_json: &str,
+        upstream: &[(Uuid, String, String)],
+    ) -> anyhow::Result<()> {
+        // Prefer each upstream's *recorded* digest (captures transitive
+        // staleness); fall back to hashing its identity+config.
+        let ups: Vec<(Uuid, UpstreamDigest)> = upstream
+            .iter()
+            .map(|(id, ty, cfg)| {
+                let recorded = self
+                    .recorded_digest(*id)
+                    .ok()
+                    .flatten()
+                    .and_then(|hex| parse_digest_hex(&hex))
+                    .unwrap_or_else(|| compute_digest(*id, ty, cfg, &[]));
+                (*id, recorded)
+            })
+            .collect();
+        let refs: Vec<(Uuid, &UpstreamDigest)> =
+            ups.iter().map(|(id, d)| (*id, d)).collect();
+        let digest = compute_digest(node_id, type_id, node_config_json, &refs);
+        self.record_run(node_id, &digest)
+    }
+}
+
+/// Engine hook: open the ledger (creating lazily) and record a node run.
+/// Best-effort — errors are logged, never propagated.
+pub fn record_asset_run(
+    cache_dir: &str,
+    node_id: Uuid,
+    type_id: &str,
+    node_config_json: &str,
+    upstream: &[(Uuid, String, String)],
+) {
+    let path = std::path::Path::new(cache_dir).join("assets.duckdb");
+    let _ = std::fs::create_dir_all(cache_dir);
+    let conn = match duckdb::Connection::open(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[assets] ledger open failed (ignored): {}", e);
+            return;
+        }
+    };
+    let mut needs_init = true;
+    // Cheap existence probe: SELECT from the table; on failure run DDL.
+    if conn.execute_batch("SELECT 1 FROM asset_runs LIMIT 1").is_ok() {
+        needs_init = false;
+    }
+    if needs_init {
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS asset_runs (
+                 node_id TEXT PRIMARY KEY,
+                 digest_hex TEXT NOT NULL,
+                 last_run_at TEXT NOT NULL,
+                 interval_start TEXT,
+                 interval_end TEXT
+             );",
+        );
+    }
+    let ledger = AssetLedger { conn };
+    if let Err(e) = ledger.record_asset_run_for(node_id, type_id, node_config_json, upstream) {
+        eprintln!("[assets] ledger record failed (ignored): {}", e);
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
