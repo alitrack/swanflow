@@ -1,0 +1,92 @@
+# SwanFlow BI Template: Anomaly Detection (bi-anomaly-detection)
+#
+# Ported from QwenPaw-Data skill "atomic/bi-anomaly-detection" (Apache-2.0).
+# Threshold-based time-series anomaly flags as one SQL node:
+#   DoD (day-over-day, lag 1) and WoW (week-over-year vs same weekday, lag 7)
+#   change rates per pandas pct_change semantics: (cur - prev) / prev.
+# Multiple thresholds intersect — a point is anomalous only when EVERY
+# enabled check exceeds its threshold (NULL rate, i.e. warm-up rows,
+# never flags, matching NaN >= t == False in the original script).
+#
+# The daily combo recommended by the SKILL.md (DoD + WoW) is what this
+# template encodes; swap thresholds in the flags expression as needed.
+#
+# Input shape expected from real data (replace node 0's query):
+#   metric_date | metric_value        (daily series)
+#
+# Usage:
+#   swanflow run examples/bi-anomaly-detection.yaml
+name: "BI Anomaly Detection (DoD x WoW)"
+id: "a0000000-0000-0000-0000-0000000000d0"
+graph:
+  nodes:
+    - id: "a0000000-0000-0000-0000-0000000000d1"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: |
+          -- 21-day series with known-answer anomalies:
+          --   day 10 spike 10100 -> 13000  : DoD +28.7%, WoW +31.3%  => ANOMALY
+          --   day 11       13000 -> 12900  : WoW-only (+27.7%)       => not (intersection)
+          --   day 15 drop  12600 -> 10000  : DoD-only (-20.6%)       => not (intersection)
+          --   day 16 drop  10000 -> 8500   : DoD -15.0%, WoW -15.8%  => ANOMALY
+          SELECT DATE '2026-01-01' + INTERVAL (i - 1) DAY AS metric_date, v AS metric_value
+          FROM (VALUES
+            (1,10000),(2,10200),(3,9900),(4,10100),(5,10000),(6,10300),(7,9900),
+            (8,10400),(9,10100),(10,13000),(11,12900),(12,12800),(13,12700),(14,12600),
+            (15,10000),(16,8500),(17,8400),(18,8300),(19,8200),(20,8250),(21,8150)
+          ) t(i, v)
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-0000000000d2"
+      type_id: "core.sql.duckdb"
+      config:
+        query: |
+          WITH rates AS (
+            SELECT
+              metric_date,
+              metric_value,
+              LAG(metric_value, 1) OVER (ORDER BY metric_date) AS prev_1d,
+              LAG(metric_value, 7) OVER (ORDER BY metric_date) AS prev_7d
+            FROM input_0
+          ),
+          flagged AS (
+            SELECT
+              metric_date,
+              metric_value,
+              ROUND((metric_value - prev_1d)::DOUBLE / prev_1d, 4) AS dod_rate,
+              ROUND((metric_value - prev_7d)::DOUBLE / prev_7d, 4) AS wow_rate,
+              -- thresholds: DoD 10%, WoW 15% (multiple checks intersect)
+              (dod_rate_c IS NOT NULL AND ABS(dod_rate_c) >= 0.10) AS dod_flag,
+              (wow_rate_c IS NOT NULL AND ABS(wow_rate_c) >= 0.15) AS wow_flag
+            FROM (
+              SELECT *,
+                     (metric_value - prev_1d)::DOUBLE / prev_1d AS dod_rate_c,
+                     (metric_value - prev_7d)::DOUBLE / prev_7d AS wow_rate_c
+              FROM rates
+            )
+          )
+          SELECT
+            metric_date,
+            metric_value,
+            dod_rate,
+            wow_rate,
+            dod_flag,
+            wow_flag,
+            (dod_flag AND wow_flag) AS is_anomaly
+          FROM flagged
+          ORDER BY metric_date
+      state: "Configured"
+      sub_workflow: null
+    - id: "a0000000-0000-0000-0000-0000000000d3"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "anomaly_detection.duckdb"
+        table: "anomaly_flags"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
