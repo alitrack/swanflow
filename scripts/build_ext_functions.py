@@ -65,7 +65,7 @@ ENABLED_EXPR = "(function_type = 'table' AND extension_name <> 'core_functions')
 # enabled on rebuild. Without this, a catalog rebuild silently resets
 # `enabled` for anything not covered by ENABLED_EXPR (this exact trap
 # reverted dashboard's 33 scalar functions to 0 on the next rebuild).
-CURATED_EXTENSIONS = {"dashboard"}
+CURATED_EXTENSIONS = {"dashboard", "ml"}
 _curated_list = ", ".join(f"'{e}'" for e in sorted(CURATED_EXTENSIONS))
 ENABLED_EXPR_FULL = f"({ENABLED_EXPR[1:-1]} OR extension_name IN ({_curated_list}))"
 

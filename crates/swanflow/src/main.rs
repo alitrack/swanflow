@@ -286,6 +286,17 @@ enum McpCommands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Honor RUST_LOG (default info) so registry auto-registration and engine
+    // diagnostics are actually visible — previously all tracing went nowhere
+    // because no subscriber was ever installed. Logs go to stderr so stdout
+    // stays clean for piped/JSON CLI output.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
 

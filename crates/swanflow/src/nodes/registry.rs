@@ -177,10 +177,12 @@ impl NodeRegistry {
         self.register_node(Arc::new(SqlAssertNode));
         self.register_node(Arc::new(SemanticCleanerNode));
         self.register_node(Arc::new(AiRouterNode));
+        // BoxedPython is a pure-DataFusion placeholder (no pyo3) — stays
+        // registered in every build.
+        self.register_node(Arc::new(BoxedPythonNode));
         #[cfg(feature = "python")]
         {
             self.register_node(Arc::new(PythonNode));
-            self.register_node(Arc::new(BoxedPythonNode));
             // Note: PythonUdfNode is registered but currently returns empty plan (stub implementation)
             self.register_node(Arc::new(PythonUdfNode));
         }
