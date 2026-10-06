@@ -185,6 +185,16 @@ pub struct WatchedWorkflow {
     /// the generation no longer matches and the stale run is dropped
     /// instead of executing a workflow nobody asked for.
     pub generation: u64,
+    /// Claim slot (codex-review P1 r2): a run in flight holds a claim
+    /// (wf_id, generation) here. An unregister racing the run marks
+    /// `pending_remove` instead of removing — the entry must survive
+    /// until the sensor clears the claim, so post-run bookkeeping
+    /// (last_ready stamps) lands on a live entry and the removal takes
+    /// effect atomically once the run finishes.
+    pub running_claim: Option<(Uuid, u64)>,
+    /// Set by unregister while a claim is held; the claim-holder removes
+    /// the entry after the run completes.
+    pub pending_remove: bool,
 }
 
 /// Serializable form of one watched-workflow entry in watched.json.
@@ -427,6 +437,8 @@ impl Daemon {
                                 1,
                                 std::sync::atomic::Ordering::Relaxed,
                             ),
+                            running_claim: None,
+                            pending_remove: false,
                         });
                     }
                     Err(err) => {
@@ -544,13 +556,33 @@ async fn sensor_tick(
     }
 
     for (wf_id, generation, workflow, ready_nodes) in to_run {
-        // Re-check under the lock: still watched, same registration epoch?
-        let still_current = {
-            let w = watched.lock().await;
-            w.iter()
-                .any(|ww| ww.workflow.id == wf_id && ww.generation == generation)
+        // Claim + re-check under ONE lock acquisition (codex-review P1 r2):
+        // the old code checked (id, generation) and released the lock, then
+        // `save_watched_entries().await` yielded — an unregister landing in
+        // that window removed the entry while the run proceeded with the
+        // old definition anyway, and its post-run last_ready stamps were
+        // lost. Now: verify AND set running_claim atomically; unregister
+        // sees the claim and defers removal (pending_remove) until we
+        // clear the claim after the run.
+        let claimed = {
+            let mut w = watched.lock().await;
+            match w
+                .iter_mut()
+                .find(|ww| ww.workflow.id == wf_id && ww.generation == generation)
+            {
+                None => false,
+                Some(ww) => {
+                    if ww.pending_remove {
+                        // Unregister already requested before we claimed — honor it.
+                        false
+                    } else {
+                        ww.running_claim = Some((wf_id, generation));
+                        true
+                    }
+                }
+            }
         };
-        if !still_current {
+        if !claimed {
             tracing::info!(
                 "automation sensor: dropping stale run for '{n}' (unwatched/re-watched mid-tick)",
                 n = workflow.name
@@ -560,10 +592,25 @@ async fn sensor_tick(
         // Ready timestamps were stamped under the lock above — flush them
         // so a daemon restart doesn't re-fire these intervals.
         save_watched_entries(watched).await;
+        // save() awaits — close the window: honor a pending_remove that
+        // landed while we were persisting.
+        let aborted = {
+            let w = watched.lock().await;
+            w.iter().any(|ww| {
+                ww.workflow.id == wf_id && ww.generation == generation && ww.pending_remove
+            })
+        };
+        if aborted {
+            tracing::info!(
+                "automation sensor: aborted run for '{n}' before execute (unregistered during save)",
+                n = workflow.name
+            );
+            sensor_clear_claim(watched, wf_id, generation).await;
+            continue;
+        }
         tracing::info!(
             "automation sensor: {} node(s) ready in '{}' — executing",
-            ready_nodes.len(),
-            workflow.name
+            ready_nodes.len(), workflow.name
         );
         match engine.execute_workflow(&workflow).await {
             Ok(rx) => {
@@ -591,6 +638,39 @@ async fn sensor_tick(
                 tracing::error!("automation run of '{}' failed to start: {e}", workflow.name);
             }
         }
+        // Run finished (or failed to start): release the claim and honor
+        // any unregister that was deferred while we held it.
+        sensor_clear_claim(watched, wf_id, generation).await;
+    }
+}
+
+/// Clear a sensor-run claim; if an unregister was deferred behind it,
+/// remove the entry now and persist (codex-review P1 r2).
+async fn sensor_clear_claim(
+    watched: &Arc<Mutex<Vec<WatchedWorkflow>>>,
+    wf_id: Uuid,
+    generation: u64,
+) {
+    let remove_now = {
+        let mut w = watched.lock().await;
+        let mut remove = false;
+        for ww in w.iter_mut() {
+            if ww.running_claim == Some((wf_id, generation)) {
+                ww.running_claim = None;
+                if ww.pending_remove {
+                    ww.pending_remove = false;
+                    remove = true;
+                }
+                break;
+            }
+        }
+        if remove {
+            w.retain(|ww| !(ww.workflow.id == wf_id && ww.generation == generation));
+        }
+        remove
+    };
+    if remove_now {
+        save_watched_entries(watched).await;
     }
 }
 
@@ -748,12 +828,22 @@ async fn handle_method(
                 .find(|ww| ww.workflow.id == wf_id)
                 .map(|ww| ww.last_ready.clone())
                 .unwrap_or_default();
-            w.retain(|ww| ww.workflow.id != wf_id);
+            // Re-watch replacing an old entry: if a sensor run is in flight
+            // on the OLD entry, defer its removal (pending_remove) — the
+            // claim-holder finalizes it. The new entry starts unclaimed.
+            for old in w.iter_mut() {
+                if old.workflow.id == wf_id && old.running_claim.is_some() {
+                    old.pending_remove = true;
+                }
+            }
+            w.retain(|ww| !(ww.workflow.id == wf_id && !ww.pending_remove));
             w.push(WatchedWorkflow {
                 workflow,
                 last_ready: prev_last_ready,
                 path: Some(std::path::PathBuf::from(path)),
                 generation: WATCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                running_claim: None,
+                pending_remove: false,
             });
             tracing::info!("automation sensor now watching '{n}' ({wf_id})");
             drop(w);
@@ -805,31 +895,39 @@ async fn handle_method(
             // compare both raw and canonical forms — a watch registered
             // from one symlink/relative spelling must still unregister.
             let canon = path.and_then(|p| std::fs::canonicalize(p).ok());
-            w.retain(|ww| {
+            let mut deferred = 0usize;
+            w.retain_mut(|ww| {
                 let id_match = wf_id.map(|id| ww.workflow.id == id).unwrap_or(false);
-                if id_match {
-                    return false;
-                }
-                if let (Some(p), Some(wwp)) = (path, ww.path.as_ref()) {
-                    if wwp.to_string_lossy() == p {
-                        return false;
+                let path_match = path
+                    .zip(ww.path.as_ref())
+                    .map(|(p, wwp)| {
+                        wwp.to_string_lossy() == p
+                            || canon
+                                .as_ref()
+                                .map(|c| {
+                                    std::fs::canonicalize(wwp).map(|cp| cp == *c).unwrap_or(false)
+                                })
+                                .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if id_match || path_match {
+                    if ww.running_claim.is_some() {
+                        // A sensor run is in flight on this entry — removing
+                        // it now would strand the run's post-run bookkeeping.
+                        // Defer: the claim-holder removes it on completion.
+                        ww.pending_remove = true;
+                        deferred += 1;
+                        true // keep for now
+                    } else {
+                        false
                     }
-                    if let Some(c) = &canon {
-                        // canonicalize the stored path lazily; entries whose
-                        // file vanished still match by raw string above.
-                        if std::fs::canonicalize(wwp)
-                            .map(|cp| cp == *c)
-                            .unwrap_or(false)
-                        {
-                            return false;
-                        }
-                    }
+                } else {
+                    true
                 }
-                true
             });
             let removed = before - w.len();
             drop(w);
-            if removed > 0 {
+            if removed > 0 || deferred > 0 {
                 save_watched_entries(watched).await;
             }
             match wf_id {
@@ -1357,6 +1455,8 @@ mod watched_persistence_tests {
             last_ready,
             path: Some(std::path::PathBuf::from("/tmp/wf.yaml")),
             generation: 1,
+            running_claim: None,
+            pending_remove: false,
         });
         let mut wf2 = Workflow::default();
         wf2.id = uuid::Uuid::new_v4();
@@ -1366,6 +1466,8 @@ mod watched_persistence_tests {
             last_ready: HashMap::new(),
             path: None,
             generation: 2,
+            running_claim: None,
+            pending_remove: false,
         });
 
         save_watched_entries(&watched).await;
@@ -1416,6 +1518,8 @@ mod watched_persistence_tests {
                     last_ready: HashMap::new(),
                     path: Some(std::path::PathBuf::from(format!("/tmp/racer-{i}.yaml"))),
                     generation: i as u64 + 1,
+                    running_claim: None,
+                    pending_remove: false,
                 });
                 save_watched_entries(&w).await;
             }));
@@ -1464,6 +1568,8 @@ mod watched_persistence_tests {
             last_ready: HashMap::new(),
             path: Some(std::path::PathBuf::from("/tmp/gen_wf.yaml")),
             generation: 10,
+            running_claim: None,
+            pending_remove: false,
         });
 
         // Snapshot as sensor_tick would.
@@ -1484,6 +1590,8 @@ mod watched_persistence_tests {
                 last_ready: HashMap::new(),
                 path: Some(std::path::PathBuf::from("/tmp/gen_wf.yaml")),
                 generation: WATCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                running_claim: None,
+                pending_remove: false,
             });
         }
 
@@ -1495,5 +1603,85 @@ mod watched_persistence_tests {
                 .any(|ww| ww.workflow.id == snap_id && ww.generation == snap_gen)
         };
         assert!(!still_current, "stale (id, generation) must not match");
+    }
+
+    #[tokio::test]
+    async fn unregister_during_run_defers_until_claim_released() {
+        // codex-review P1 (r2): the sensor used to verify (id, generation)
+        // and release the lock, then await save + execute — an unregister
+        // in that window removed the entry while the stale run proceeded
+        // and its post-run bookkeeping was lost. With claims: unregister
+        // marks pending_remove, the entry survives until the claim is
+        // cleared, THEN is removed and persisted.
+        let dir = std::env::temp_dir().join(format!(
+            "swanflow_claim_e2e_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = std::env::var("SWANFLOW_CACHE_DIR").ok();
+        unsafe { std::env::set_var("SWANFLOW_CACHE_DIR", dir.to_str().unwrap()) };
+
+        let watched: Arc<Mutex<Vec<WatchedWorkflow>>> = Arc::new(Mutex::new(Vec::new()));
+        let wf_id = uuid::Uuid::new_v4();
+        let mut wf = Workflow::default();
+        wf.id = wf_id;
+        wf.name = "claim_test".into();
+        watched.lock().await.push(WatchedWorkflow {
+            workflow: wf,
+            last_ready: HashMap::new(),
+            path: Some(std::path::PathBuf::from("/tmp/claim_wf.yaml")),
+            generation: 42,
+            running_claim: None,
+            pending_remove: false,
+        });
+
+        // 1) Sensor claims the run (same shape as sensor_tick).
+        {
+            let mut w = watched.lock().await;
+            let ww = w
+                .iter_mut()
+                .find(|ww| ww.workflow.id == wf_id && ww.generation == 42)
+                .unwrap();
+            ww.running_claim = Some((wf_id, 42));
+        }
+
+        // 2) Unregister arrives mid-run: entry must survive, flagged.
+        {
+            let mut w = watched.lock().await;
+            w.retain_mut(|ww| {
+                if ww.workflow.id == wf_id {
+                    if ww.running_claim.is_some() {
+                        ww.pending_remove = true;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                }
+            });
+        }
+        {
+            let w = watched.lock().await;
+            assert_eq!(w.len(), 1, "claimed entry must survive unregister");
+            assert!(w[0].pending_remove, "removal must be deferred");
+        }
+
+        // 3) Run finishes -> claim cleared -> deferred removal lands.
+        sensor_clear_claim(&watched, wf_id, 42).await;
+        {
+            let w = watched.lock().await;
+            assert!(w.is_empty(), "entry must be gone after claim release");
+        }
+        // And the persisted file reflects the removal (empty list).
+        let entries = load_watched_entries();
+        assert!(entries.is_empty(), "watched.json must show removal: {entries:?}");
+
+        match prev {
+            Some(v) => std::env::set_var("SWANFLOW_CACHE_DIR", v),
+            None => std::env::remove_var("SWANFLOW_CACHE_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
