@@ -179,6 +179,12 @@ pub struct WatchedWorkflow {
     /// on daemon restart). `None` only for programmatic registrations
     /// without a file (tests).
     pub path: Option<std::path::PathBuf>,
+    /// Monotonic registration epoch. sensor_tick snapshots the workflow
+    /// under the lock and executes outside it; if the entry is
+    /// unregistered (or re-registered with a new definition) in between,
+    /// the generation no longer matches and the stale run is dropped
+    /// instead of executing a workflow nobody asked for.
+    pub generation: u64,
 }
 
 /// Serializable form of one watched-workflow entry in watched.json.
@@ -189,6 +195,10 @@ struct WatchedEntry {
     /// node-id -> ISO-8601 UTC timestamp of the last ready evaluation.
     last_ready: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>>,
 }
+
+/// Monotonic counter minting fresh generations on every register /
+/// unregister / re-register (see WatchedWorkflow::generation).
+static WATCH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Location of the watched-workflow registry file: `<cache_dir>/watched.json`
 /// (same directory the asset ledger and extfn catalog live in — cache_dir
@@ -247,8 +257,20 @@ async fn save_watched_entries(watched: &Arc<Mutex<Vec<WatchedWorkflow>>>) {
     }
     match serde_json::to_string_pretty(&entries) {
         Ok(text) => {
-            if let Err(e) = tokio::fs::write(&p, text).await {
-                tracing::warn!("failed to persist watched.json: {e}");
+            // Atomic replace: write temp + fsync + rename. A crash mid-write
+            // must never leave a truncated watched.json (it would silently
+            // drop every watch on daemon restart).
+            let tmp = p.with_extension("json.tmp");
+            match tokio::fs::write(&tmp, &text).await {
+                Ok(()) => {
+                    if let Ok(f) = tokio::fs::File::open(&tmp).await {
+                        drop(f.sync_all().await);
+                    }
+                    if let Err(e) = tokio::fs::rename(&tmp, &p).await {
+                        tracing::warn!("failed to persist watched.json: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!("failed to persist watched.json: {e}"),
             }
         }
         Err(e) => tracing::warn!("failed to serialize watched.json: {e}"),
@@ -350,6 +372,10 @@ impl Daemon {
                             workflow,
                             last_ready,
                             path: Some(p),
+                            generation: WATCH_GENERATION.fetch_add(
+                                1,
+                                std::sync::atomic::Ordering::Relaxed,
+                            ),
                         });
                     }
                     Err(err) => {
@@ -416,11 +442,14 @@ async fn sensor_tick(
 
     let now = Utc::now();
     // Snapshot decisions under the lock, execute outside it (runs can be
-    // long; we must not block watch registration on an execution).
-    let mut to_run: Vec<(usize, Workflow, Vec<Uuid>)> = Vec::new();
+    // long; we must not block watch registration on an execution). Each
+    // snapshot carries the entry's (workflow id, generation) — re-checked
+    // before executing so an unregister / re-watch that happened while we
+    // were busy drops the stale run instead of executing it.
+    let mut to_run: Vec<(uuid::Uuid, u64, Workflow, Vec<Uuid>)> = Vec::new();
     {
         let mut w = watched.lock().await;
-        for (i, ww) in w.iter_mut().enumerate() {
+        for ww in w.iter_mut() {
             let mut ready_nodes = Vec::new();
             for idx in ww.workflow.graph.node_indices() {
                 let node = &ww.workflow.graph[idx];
@@ -451,12 +480,25 @@ async fn sensor_tick(
                 for id in &ready_nodes {
                     ww.last_ready.insert(*id, now);
                 }
-                to_run.push((i, ww.workflow.clone(), ready_nodes));
+                to_run.push((ww.workflow.id, ww.generation, ww.workflow.clone(), ready_nodes));
             }
         }
     }
 
-    for (_, workflow, ready_nodes) in to_run {
+    for (wf_id, generation, workflow, ready_nodes) in to_run {
+        // Re-check under the lock: still watched, same registration epoch?
+        let still_current = {
+            let w = watched.lock().await;
+            w.iter()
+                .any(|ww| ww.workflow.id == wf_id && ww.generation == generation)
+        };
+        if !still_current {
+            tracing::info!(
+                "automation sensor: dropping stale run for '{n}' (unwatched/re-watched mid-tick)",
+                n = workflow.name
+            );
+            continue;
+        }
         // Ready timestamps were stamped under the lock above — flush them
         // so a daemon restart doesn't re-fire these intervals.
         save_watched_entries(watched).await;
@@ -653,6 +695,7 @@ async fn handle_method(
                 workflow,
                 last_ready: prev_last_ready,
                 path: Some(std::path::PathBuf::from(path)),
+                generation: WATCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             });
             tracing::info!("automation sensor now watching '{n}' ({wf_id})");
             drop(w);
@@ -1255,6 +1298,7 @@ mod watched_persistence_tests {
             workflow: wf,
             last_ready,
             path: Some(std::path::PathBuf::from("/tmp/wf.yaml")),
+            generation: 1,
         });
         let mut wf2 = Workflow::default();
         wf2.id = uuid::Uuid::new_v4();
@@ -1263,6 +1307,7 @@ mod watched_persistence_tests {
             workflow: wf2,
             last_ready: HashMap::new(),
             path: None,
+            generation: 2,
         });
 
         save_watched_entries(&watched).await;
@@ -1284,5 +1329,59 @@ mod watched_persistence_tests {
             None => std::env::remove_var("SWANFLOW_CACHE_DIR"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sensor_drops_stale_generation_run() {
+        // A sensor tick snapshots (id, generation) under the lock; if the
+        // entry is unwatched or re-watched before the run starts, the
+        // stale run must be dropped. We can't easily pause sensor_tick
+        // mid-flight, so we verify the mechanism it relies on: after
+        // unregister + re-register, the entry carries a NEW generation
+        // and the old (id, old-gen) pair no longer matches.
+        let watched: Arc<Mutex<Vec<WatchedWorkflow>>> = Arc::new(Mutex::new(Vec::new()));
+        let wf_id = uuid::Uuid::new_v4();
+        let mk_wf = |id: uuid::Uuid| {
+            let mut wf = Workflow::default();
+            wf.id = id;
+            wf.name = "gen_test".into();
+            wf
+        };
+        watched.lock().await.push(WatchedWorkflow {
+            workflow: mk_wf(wf_id),
+            last_ready: HashMap::new(),
+            path: Some(std::path::PathBuf::from("/tmp/gen_wf.yaml")),
+            generation: 10,
+        });
+
+        // Snapshot as sensor_tick would.
+        let (snap_id, snap_gen) = {
+            let w = watched.lock().await;
+            let ww = &w[0];
+            (ww.workflow.id, ww.generation)
+        };
+        assert_eq!((snap_id, snap_gen), (wf_id, 10));
+
+        // Unwatch (retain) then re-watch with a fresh generation — exactly
+        // what automation.register does on re-watch.
+        {
+            let mut w = watched.lock().await;
+            w.retain(|ww| ww.workflow.id != wf_id);
+            w.push(WatchedWorkflow {
+                workflow: mk_wf(wf_id),
+                last_ready: HashMap::new(),
+                path: Some(std::path::PathBuf::from("/tmp/gen_wf.yaml")),
+                generation: WATCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            });
+        }
+
+        // The sensor's re-check predicate: entry must exist with the SAME
+        // generation. The old snapshot no longer matches -> run dropped.
+        let still_current = {
+            let w = watched.lock().await;
+            w.iter()
+                .any(|ww| ww.workflow.id == snap_id && ww.generation == snap_gen)
+        };
+        assert!(!still_current, "stale (id, generation) must not match");
     }
 }
