@@ -29,6 +29,14 @@ pub struct EngineCheckpoint {
     pub started_at: String,
     /// ISO 8601 timestamp when execution completed (None if still running).
     pub completed_at: Option<String>,
+    /// Digest algorithm version that produced this checkpoint's skipped
+    /// levels. When the asset digest algorithm changes (e.g. v1 -> v2 in
+    /// `d774c25`), pre-upgrade checkpoints may reference materializations
+    /// recorded under the old algorithm — resuming them would bypass the
+    /// v2 invalidation. A version mismatch makes the checkpoint non-
+    /// resumable (the workflow re-runs from level 0, one time).
+    #[serde(default)]
+    pub digest_version: u32,
 }
 
 /// Manages reading and writing execution checkpoints to the metadata store.
@@ -118,7 +126,10 @@ impl CheckpointManager {
     }
 
     /// Find an incomplete (resumable) checkpoint matching the given workflow hash.
-    /// Returns None if the workflow has never been started, or the last run completed.
+    /// Returns None if the workflow has never been started, the last run completed,
+    /// or the checkpoint predates the current digest algorithm version
+    /// (codex-review P1 r2: resuming a pre-v2 checkpoint would bypass the
+    /// v2 digest invalidation and reuse stale v1-era materializations).
     pub fn find_resumable(&self, workflow_hash: &str) -> anyhow::Result<Option<EngineCheckpoint>> {
         let conn = Connection::open(&self.metadata_path)?;
         let mut stmt = conn.prepare(
@@ -134,6 +145,8 @@ impl CheckpointManager {
                 let cp: EngineCheckpoint = serde_json::from_str(&json)?;
                 // Only return if NOT completed
                 if cp.completed_at.is_some() {
+                    Ok(None)
+                } else if cp.digest_version != crate::core::engine::assets::DIGEST_VERSION {
                     Ok(None)
                 } else {
                     Ok(Some(cp))
@@ -164,6 +177,7 @@ mod tests {
             flow_vars: HashMap::new(),
             started_at: "now".to_string(),
             completed_at: None,
+            digest_version: crate::core::engine::assets::DIGEST_VERSION,
         };
 
         let json = serde_json::to_string(&cp).unwrap();
@@ -193,6 +207,7 @@ mod tests {
             flow_vars: HashMap::new(),
             started_at: "2026-01-01T00:00:00Z".to_string(),
             completed_at: None,
+            digest_version: crate::core::engine::assets::DIGEST_VERSION,
         };
 
         cm.save_checkpoint(&cp).unwrap();
@@ -224,6 +239,7 @@ mod tests {
             flow_vars: HashMap::new(),
             started_at: "2026-01-01T00:00:00Z".to_string(),
             completed_at: None,
+            digest_version: crate::core::engine::assets::DIGEST_VERSION,
         };
         cm.save_checkpoint(&cp).unwrap();
 
@@ -237,6 +253,44 @@ mod tests {
 
         let not_found = cm.find_resumable("hash-resume").unwrap();
         assert!(not_found.is_none(), "completed run should not be resumable");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_find_resumable_rejects_old_digest_version() {
+        // codex-review P1 r2: a pre-v2 checkpoint must not be resumable —
+        // resuming it would skip levels whose materializations were
+        // recorded under the old digest algorithm, bypassing the v2
+        // invalidation. The workflow simply re-runs from level 0 once.
+        let tmp = std::env::temp_dir().join(format!(
+            "checkpoint_resume_v1_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        let cm = CheckpointManager::new(tmp.to_str().unwrap());
+
+        let cp = EngineCheckpoint {
+            run_id: "run-v1".to_string(),
+            workflow_hash: "hash-v1".to_string(),
+            workflow_name: "v1-wf".to_string(),
+            completed_levels: vec![0, 1],
+            total_levels: 3,
+            materialized_tables: HashMap::new(),
+            flow_vars: HashMap::new(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: None,
+            // Simulate a checkpoint written before DIGEST_VERSION existed
+            // (serde default) or under an older algorithm.
+            digest_version: crate::core::engine::assets::DIGEST_VERSION - 1,
+        };
+        cm.save_checkpoint(&cp).unwrap();
+
+        let found = cm.find_resumable("hash-v1").unwrap();
+        assert!(
+            found.is_none(),
+            "pre-v2 checkpoint must not be resumable (would bypass v2 digest invalidation)"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

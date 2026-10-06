@@ -602,6 +602,7 @@ impl SwanFlowEngine {
                     flow_vars: std::collections::HashMap::new(),
                     started_at: "".to_string(),
                     completed_at: None,
+                    digest_version: crate::core::engine::assets::DIGEST_VERSION,
                 });
             }
             // Mark workflow as completed
@@ -615,6 +616,7 @@ impl SwanFlowEngine {
                 flow_vars: std::collections::HashMap::new(),
                 started_at: "".to_string(),
                 completed_at: Some("".to_string()),
+                digest_version: crate::core::engine::assets::DIGEST_VERSION,
             });
             let cache_mgr = cache::CacheManager::new(&duckdb_cache_dir, duckdb_max_cache);
             cache_mgr.evict();
@@ -1293,6 +1295,7 @@ impl SwanFlowEngine {
                     flow_vars: std::collections::HashMap::new(),
                     started_at: "".to_string(),
                     completed_at: None,
+                    digest_version: crate::core::engine::assets::DIGEST_VERSION,
                 });
             }
 
@@ -1310,6 +1313,7 @@ impl SwanFlowEngine {
                 flow_vars: std::collections::HashMap::new(),
                 started_at: "".to_string(),
                 completed_at: Some("".to_string()),
+                digest_version: crate::core::engine::assets::DIGEST_VERSION,
             });
             let cache_mgr = cache::CacheManager::new(&df_cache_dir, df_max_cache);
             cache_mgr.evict();
@@ -1555,6 +1559,7 @@ impl SwanFlowEngine {
                 flow_vars: std::collections::HashMap::new(),
                 started_at: "".to_string(),
                 completed_at: Some("".to_string()),
+                digest_version: crate::core::engine::assets::DIGEST_VERSION,
             });
             let cache_mgr = cache::CacheManager::new(&yaml_cache_dir, yaml_max_cache);
             cache_mgr.evict();

@@ -29,6 +29,10 @@ use uuid::Uuid;
 ///    instead of corrupting the file. Dropping the File releases it.
 pub(crate) static LEDGER_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Current digest algorithm version (bump when compute_digest's framing
+/// or inputs change — mirrors the version tag inside compute_digest).
+pub const DIGEST_VERSION: u32 = 2;
+
 thread_local! {
     /// Re-entrancy depth for LedgerGuard::acquire. AssetLedger write
     /// helpers acquire the guard themselves; record_asset_run holds an

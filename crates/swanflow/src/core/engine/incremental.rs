@@ -76,6 +76,7 @@ mod tests {
             flow_vars: HashMap::new(),
             started_at: "".to_string(),
             completed_at: if done { Some("done".to_string()) } else { None },
+            digest_version: crate::core::engine::assets::DIGEST_VERSION,
         }
     }
 
