@@ -122,6 +122,35 @@ pub fn parse_digest_hex(hex: &str) -> Option<UpstreamDigest> {
     Some(UpstreamDigest { bytes })
 }
 
+/// Canonicalize a JSON string for digesting: recursively sort object
+/// keys so a user merely re-ordering YAML/JSON keys does not produce a
+/// phantom-stale digest (serde_json/preserve_order keeps insertion
+/// order, which `config.to_string()` bakes into the hash). Unparseable
+/// input is returned unchanged (digest still changes with content).
+fn canonicalize_json_str(s: &str) -> String {
+    fn sorted(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(m) => {
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort();
+                let mut out = serde_json::Map::new();
+                for k in keys {
+                    out.insert(k.clone(), sorted(&m[k]));
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(a) => {
+                serde_json::Value::Array(a.iter().map(sorted).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(s) {
+        Ok(v) => sorted(&v).to_string(),
+        Err(_) => s.to_string(),
+    }
+}
+
 /// Compute a node's digest from its config JSON and its upstream
 /// dependencies' digests (transitive staleness: any upstream change
 /// bubbles down).
@@ -133,19 +162,28 @@ pub fn compute_digest(
 ) -> UpstreamDigest {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(node_id.as_bytes());
-    h.update(type_id.as_bytes());
-    h.update(config_json.as_bytes());
+    // Version tag + length-prefixed fields (framing v2): raw concatenation
+    // of type/config bytes is ambiguous — ("ab","c") and ("a","bc") hash
+    // identically. Note: v2 framing + canonicalized config invalidate
+    // digests recorded by older builds; affected nodes re-materialize once.
+    h.update(b"swanflow-digest-v2");
+    let canon = canonicalize_json_str(config_json);
+    let mut upd = |h: &mut Sha256, b: &[u8]| {
+        h.update(&(b.len() as u64).to_le_bytes());
+        h.update(b);
+    };
+    upd(&mut h, node_id.as_bytes());
+    upd(&mut h, type_id.as_bytes());
+    upd(&mut h, canon.as_bytes());
     // codex-review P0 (domain C): backfill binds ${interval_start}/
     // ${interval_end} from env at execution time, but the raw config is
     // identical across days — without the interval in the digest every
     // day hashes the same and skip-if-fresh reuses day 1's parquet for
-    // all days. Env unset (normal runs) hashes the empty string, which
-    // matches the historical digest format for old ledger rows.
+    // all days. Env unset (normal runs) hashes the empty string.
     let iv_start = std::env::var("SWANFLOW_INTERVAL_START").unwrap_or_default();
     let iv_end = std::env::var("SWANFLOW_INTERVAL_END").unwrap_or_default();
-    h.update(iv_start.as_bytes());
-    h.update(iv_end.as_bytes());
+    upd(&mut h, iv_start.as_bytes());
+    upd(&mut h, iv_end.as_bytes());
     // Order-independent: sort upstream by id for deterministic digests.
     let mut ups: Vec<(Uuid, &[u8; 32])> = upstream
         .iter()
@@ -153,8 +191,8 @@ pub fn compute_digest(
         .collect();
     ups.sort_by_key(|(id, _)| *id);
     for (id, digest) in ups {
-        h.update(id.as_bytes());
-        h.update(digest);
+        upd(&mut h, id.as_bytes());
+        upd(&mut h, digest);
     }
     UpstreamDigest { bytes: h.finalize().into() }
 }
@@ -532,6 +570,13 @@ pub fn try_skip_fresh(
         Err(_) => return None,
     };
     let ledger = AssetLedger { conn, cache_dir: std::path::PathBuf::from(cache_dir) };
+    // codex-review P1: skip only on a COMPLETE upstream digest set. A
+    // missing upstream (filter_map upstream of us silently dropped it)
+    // must not let a partial chain accidentally match a stale recorded
+    // digest — fail safe to executing the node.
+    if upstream.len() != upstream_digests.len() {
+        return None;
+    }
     let refs: Vec<(Uuid, &UpstreamDigest)> = upstream_digests
         .iter()
         .map(|(id, d)| (*id, d))
@@ -804,6 +849,33 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].0, id.to_string());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn digest_ignores_json_key_order() {
+        // P2: preserve_order bakes insertion order into config.to_string();
+        // merely re-ordering keys must NOT change the digest (phantom stale).
+        let id = Uuid::nil();
+        let a = compute_digest(id, "t", r#"{"x":1,"y":{"b":2,"a":3}}"#, &[]);
+        let b = compute_digest(id, "t", r#"{"y":{"a":3,"b":2},"x":1}"#, &[]);
+        assert_eq!(a.hex(), b.hex(), "key order must not matter");
+        // But a real content change must still be detected.
+        let c = compute_digest(id, "t", r#"{"x":1,"y":{"b":2,"a":4}}"#, &[]);
+        assert_ne!(a.hex(), c.hex());
+        // Non-JSON config degrades gracefully (hashed as-is).
+        let d = compute_digest(id, "t", "plain-sql: SELECT 1", &[]);
+        let e = compute_digest(id, "t", "plain-sql: SELECT 2", &[]);
+        assert_ne!(d.hex(), e.hex());
+    }
+
+    #[test]
+    fn digest_framing_disambiguates_concatenations() {
+        // P2: length-prefix prevents ("ab","c") vs ("a","bc") collisions.
+        let id = Uuid::nil();
+        // type_id "ab" + config "c" vs type_id "a" + config "bc"
+        let a = compute_digest(id, "ab", "c", &[]);
+        let b = compute_digest(id, "a", "bc", &[]);
+        assert_ne!(a.hex(), b.hex(), "framing must disambiguate field splits");
     }
 
     #[test]
