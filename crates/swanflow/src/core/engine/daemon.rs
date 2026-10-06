@@ -542,8 +542,15 @@ async fn sensor_tick(
                     last_eval_ready_at: ww.last_ready.get(&node.id).copied(),
                     ledger_unavailable,
                 };
-                if evaluate(&cond, &ctx) {
-                    ready_nodes.push(node.id);
+                match evaluate(&cond, &ctx) {
+                    // Fire only on definite true. Unknown (ledger unreadable
+                    // etc.) skips this tick and retries — never fires blind.
+                    Some(true) => ready_nodes.push(node.id),
+                    Some(false) => {}
+                    None => tracing::debug!(
+                        "automation sensor: '{}' node {n} Unknown — skipping this tick",
+                        ww.workflow.name, n = node.id
+                    ),
                 }
             }
             if !ready_nodes.is_empty() {
@@ -795,6 +802,26 @@ async fn handle_method(
                     workflows: None,
                     status: None,
                 };
+            }
+            // A non-string `automation` value is a misconfiguration, not a
+            // missing condition — reject loudly instead of silently skipping
+            // the node every tick (codex-review P1 r2).
+            for i in workflow.graph.node_indices() {
+                if let Some(v) = workflow.graph[i].config.get("automation") {
+                    if v.as_str().is_none() {
+                        return DaemonResponse {
+                            id: req.id.clone(),
+                            ok: Some(false),
+                            error: Some(format!(
+                                "node {} has a non-string 'automation' value ({v}) — use a quoted DSL string",
+                                workflow.graph[i].id
+                            )),
+                            workflow_id: None,
+                            workflows: None,
+                            status: None,
+                        };
+                    }
+                }
             }
             // Validate every automation expression NOW — a parse error
             // would otherwise be silently skipped every tick (invisible

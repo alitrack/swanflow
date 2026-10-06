@@ -440,33 +440,66 @@ pub struct EvalContext {
     pub ledger_unavailable: bool,
 }
 
-pub fn evaluate(cond: &AutomationCondition, ctx: &EvalContext) -> bool {
+/// Kleene tri-state evaluation. `None` = Unknown (evidence missing —
+/// typically the asset ledger unreadable this tick). The SENSOR must not
+/// fire on Unknown: skip this tick, retry next (codex-review P1 r2).
+///
+/// Why not a bool: the old `Not(unknown) -> true` collapsed "can't tell"
+/// into "definitely not stale", so `eager & !freshness_violated(1h)`
+/// fired on every ledger hiccup. Kleene logic keeps Unknown infectious
+/// through the boolean combinators:
+///   !Unknown        = Unknown
+///   Unknown && x    = Unknown unless x is false (then false)
+///   Unknown || x    = Unknown unless x is true  (then true)
+pub fn evaluate(cond: &AutomationCondition, ctx: &EvalContext) -> Option<bool> {
     match cond {
-        AutomationCondition::Eager => true,
+        AutomationCondition::Eager => Some(true),
         AutomationCondition::OnCron(expr) => {
             let gate = ctx.last_eval_ready_at.unwrap_or(ctx.now - Duration::days(366));
-            expr.fires_between(gate, ctx.now)
+            Some(expr.fires_between(gate, ctx.now))
         }
         AutomationCondition::OnInterval { secs } => {
             let gate = ctx.last_eval_ready_at.unwrap_or(ctx.now - Duration::days(366));
-            ctx.now - gate >= Duration::seconds(*secs as i64)
+            Some(ctx.now - gate >= Duration::seconds(*secs as i64))
         }
         AutomationCondition::FreshnessViolated { max_lag_secs } => {
             if ctx.ledger_unavailable {
                 // Can't tell freshness without the ledger — "never ran"
                 // and "read failed" both surface as last_materialized_at
                 // == None upstream. Firing here would treat every lock
-                // hiccup as maximally stale. Skip; next tick retries.
-                return false;
+                // hiccup as maximally stale. Unknown; next tick retries.
+                return None;
             }
             match ctx.last_materialized_at {
-                None => true, // never materialized = maximally stale
-                Some(t) => ctx.now - t >= Duration::seconds(*max_lag_secs as i64),
+                None => Some(true), // never materialized = maximally stale
+                Some(t) => Some(ctx.now - t >= Duration::seconds(*max_lag_secs as i64)),
             }
         }
-        AutomationCondition::And(a, b) => evaluate(a, ctx) && evaluate(b, ctx),
-        AutomationCondition::Or(a, b) => evaluate(a, ctx) || evaluate(b, ctx),
-        AutomationCondition::Not(a) => !evaluate(a, ctx),
+        AutomationCondition::And(a, b) => kleene_and(evaluate(a, ctx), evaluate(b, ctx)),
+        AutomationCondition::Or(a, b) => kleene_or(evaluate(a, ctx), evaluate(b, ctx)),
+        AutomationCondition::Not(a) => kleene_not(evaluate(a, ctx)),
+    }
+}
+
+fn kleene_not(v: Option<bool>) -> Option<bool> {
+    v.map(|b| !b)
+}
+
+fn kleene_and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        // False dominates: even Unknown && False is definitely false.
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    }
+}
+
+fn kleene_or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        // True dominates: even Unknown || True is definitely true.
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,
     }
 }
 
@@ -497,25 +530,28 @@ mod tests {
         // Tri-state: "never materialized" fires, "ledger unreadable" must
         // not — a lock hiccup or corrupt file is not evidence of staleness.
         let mut c = ctx("2026-10-06 12:00:00", None, None);
-        assert!(
+        assert_eq!(
             evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c),
+            Some(true),
             "never materialized (ledger readable) = maximally stale, fires"
         );
         c.ledger_unavailable = true;
-        assert!(
-            !evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c),
-            "ledger unavailable must NOT fire — skip this tick, retry next"
+        assert_eq!(
+            evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c),
+            None,
+            "ledger unavailable must be Unknown — skip this tick, retry next"
         );
         // With a known-good timestamp the flag is irrelevant (the read
         // succeeded), but a failed read of an existing row still must not.
         let mut c2 = ctx("2026-10-06 12:00:00", Some("2026-10-06 11:00:00"), None);
         c2.ledger_unavailable = true;
-        assert!(
-            !evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c2),
+        assert_eq!(
+            evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c2),
+            None,
             "unavailable suppresses firing even if a stale copy leaked through"
         );
         // Non-freshness conditions are unaffected by the flag.
-        assert!(evaluate(&AutomationCondition::Eager, &c));
+        assert_eq!(evaluate(&AutomationCondition::Eager, &c), Some(true));
     }
 
     // ---- duration ----
@@ -669,7 +705,7 @@ mod tests {
                 _ => unreachable!(),
             };
             let c = ctx("2026-10-05 12:00:00", mat, eval);
-            assert_eq!(evaluate(&cond, &c), expected, "case {label}");
+            assert_eq!(evaluate(&cond, &c), Some(expected), "case {label}");
         }
     }
 
@@ -678,27 +714,43 @@ mod tests {
         // The headline recipe: hourly cron OR freshness blown past 10m.
         let cond = parse_automation(r#"on_cron(0 * * * *) | freshness_violated(10m)"#).unwrap();
         // Off-cron, fresh -> idle.
-        assert!(!evaluate(
-            &cond,
-            &ctx("2026-10-05 12:30:00", Some("2026-10-05 12:25:00"), Some("2026-10-05 12:00:00"))
-        ));
+        assert_eq!(
+            evaluate(
+                &cond,
+                &ctx("2026-10-05 12:30:00", Some("2026-10-05 12:25:00"), Some("2026-10-05 12:00:00"))
+            ),
+            Some(false)
+        );
         // Off-cron, but stale 15m -> fires via freshness.
-        assert!(evaluate(
-            &cond,
-            &ctx("2026-10-05 12:30:00", Some("2026-10-05 12:10:00"), Some("2026-10-05 12:00:00"))
-        ));
+        assert_eq!(
+            evaluate(
+                &cond,
+                &ctx("2026-10-05 12:30:00", Some("2026-10-05 12:10:00"), Some("2026-10-05 12:00:00"))
+            ),
+            Some(true)
+        );
 
         // eager & !freshness_violated(1h): run often, but pause while very stale
         // (e.g. upstream broken — avoid hammering).
         let cond = parse_automation("eager & !freshness_violated(1h)").unwrap();
-        assert!(evaluate(
-            &cond,
-            &ctx("2026-10-05 12:00:00", Some("2026-10-05 11:30:00"), None)
-        ));
-        assert!(!evaluate(
-            &cond,
-            &ctx("2026-10-05 12:00:00", Some("2026-10-05 10:00:00"), None)
-        ));
-        assert!(!evaluate(&cond, &ctx("2026-10-05 12:00:00", None, None)));
+        assert_eq!(
+            evaluate(&cond, &ctx("2026-10-05 12:00:00", Some("2026-10-05 11:30:00"), None)),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate(&cond, &ctx("2026-10-05 12:00:00", Some("2026-10-05 10:00:00"), None)),
+            Some(false)
+        );
+        // The headline anti-hammering case with Unknown: ledger unreadable
+        // makes freshness Unknown; Not(Unknown) stays Unknown (old bool
+        // logic flipped it to true and fired). The sensor must skip.
+        let mut c_unknown = ctx("2026-10-05 12:00:00", None, None);
+        c_unknown.ledger_unavailable = true;
+        assert_eq!(evaluate(&cond, &c_unknown), None);
+        // And the plain condition itself is Unknown, not "stale".
+        assert_eq!(
+            evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c_unknown),
+            None
+        );
     }
 }

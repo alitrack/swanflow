@@ -723,10 +723,10 @@ async fn main() -> anyhow::Result<()> {
                                     last_eval_ready_at: Some(now),
                                     ledger_unavailable: true, // no ledger in dry-run branch
                                 };
-                                if swanflow::core::engine::automation::evaluate(&cond, &ctx) {
-                                    "🟢 ready".to_string()
-                                } else {
-                                    "⏸ hold".to_string()
+                                match swanflow::core::engine::automation::evaluate(&cond, &ctx) {
+                                    Some(true) => "🟢 ready".to_string(),
+                                    Some(false) => "⏸ hold".to_string(),
+                                    None => "❓ unknown (ledger unreadable)".to_string(),
                                 }
                             }
                         };
@@ -780,7 +780,11 @@ async fn main() -> anyhow::Result<()> {
                             let lag_s = if lag == i64::MAX { "never".into() } else { format!("{lag}m ago") };
                             let ready = swanflow::core::engine::automation::evaluate(&cond, &ctx);
                             (
-                                if ready { "🟢 ready".to_string() } else { "⏸ hold".to_string() },
+                                match ready {
+                                    Some(true) => "🟢 ready".to_string(),
+                                    Some(false) => "⏸ hold".to_string(),
+                                    None => "❓ unknown".to_string(),
+                                },
                                 format!("(materialized {lag_s})"),
                             )
                         }
