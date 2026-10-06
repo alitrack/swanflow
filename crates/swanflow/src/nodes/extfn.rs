@@ -437,13 +437,33 @@ QUALIFY row_number() OVER ( \
 ) = 1 \
 ORDER BY extension_name, function_name";
 
-    let conn = match duckdb::Connection::open(db_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[extfn] cannot open ext_functions catalog {db_path}: {e}");
-            return vec![];
+    // Read-only open: auto-registration only ever SELECTs from the
+    // catalog, and DuckDB lets multiple read-only processes share the
+    // file lock — concurrent `swanflow run` invocations no longer
+    // contend on an exclusive lock (observed as
+    // "[extfn] cannot open ... Conflicting lock" noise). A short
+    // conflicting-lock retry still covers the window where the build
+    // script is rewriting the catalog read-write.
+    let mut attempts = 0u32;
+    let conn = loop {
+        let ro_config = duckdb::Config::default()
+            .access_mode(duckdb::AccessMode::ReadOnly)
+            .unwrap_or_default();
+        match duckdb::Connection::open_with_flags(db_path, ro_config) {
+            Ok(c) => break c,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("Conflicting lock") && attempts < 40 {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    continue;
+                }
+                eprintln!("[extfn] cannot open ext_functions catalog {db_path}: {e}");
+                return vec![];
+            }
         }
     };
+
     let mut stmt = match conn.prepare(SQL) {
         Ok(s) => s,
         Err(e) => {
