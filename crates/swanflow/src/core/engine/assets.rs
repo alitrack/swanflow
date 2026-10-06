@@ -36,6 +36,11 @@ thread_local! {
     /// on the nested acquire, so the in-process mutex is only taken at
     /// depth 0 (the flock is per-fd and likewise only taken once).
     static GUARD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Whether the OUTERMOST guard on this thread actually holds the
+    /// cross-process flock. Nested guards inherit this value; write
+    /// paths refuse to proceed when it is false (codex-review P0:
+    /// never write the ledger uncoordinated).
+    static GUARD_EXCLUSIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// RAII guard: in-process mutex + cross-process advisory lock.
@@ -43,22 +48,41 @@ thread_local! {
 pub(crate) struct LedgerGuard {
     _pm: Option<std::sync::MutexGuard<'static, ()>>,
     _file: Option<std::fs::File>,
+    exclusive: bool,
 }
 
 impl LedgerGuard {
-    /// Blocking acquire with a 30s deadline. On timeout we proceed
-    /// WITHOUT the cross-process lock (best-effort, matching the
-    /// ledger's degrade-to-log posture) but keep the in-process mutex,
-    /// which fixes the observed same-process corruption.
+    /// True when the cross-process flock is actually held (or this is a
+    /// nested guard under an outer one that holds it). Write paths MUST
+    /// refuse to proceed when this is false.
+    pub(crate) fn exclusive(&self) -> bool {
+        self.exclusive
+    }
+
+    /// Blocking acquire with a 30s deadline. On timeout or lock-file
+    /// open failure the in-process mutex is still held (same-process
+    /// writes stay serialized) but `exclusive()` is false and callers
+    /// must skip/fail the write — proceeding without the cross-process
+    /// lock is exactly the corruption this guard exists to prevent.
     pub(crate) fn acquire(cache_dir: &Path) -> Self {
+        Self::acquire_with_deadline(cache_dir, std::time::Duration::from_secs(30))
+    }
+
+    pub(crate) fn acquire_with_deadline(cache_dir: &Path, timeout: std::time::Duration) -> Self {
         let depth = GUARD_DEPTH.with(|d| d.get());
         if depth > 0 {
-            // Nested acquire on this thread — outer guard already holds
-            // both layers. Just bump the depth so its drop still runs at 0.
+            // Nested acquire on this thread — outer guard owns both
+            // layers; inherit its exclusivity so inner write checks see
+            // the outer truth.
             GUARD_DEPTH.with(|d| d.set(depth + 1));
-            return Self { _pm: None, _file: None };
+            return Self {
+                _pm: None,
+                _file: None,
+                exclusive: GUARD_EXCLUSIVE.with(|e| e.get()),
+            };
         }
         GUARD_DEPTH.with(|d| d.set(1));
+        GUARD_EXCLUSIVE.with(|e| e.set(false));
         let pm = LEDGER_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let _ = std::fs::create_dir_all(cache_dir);
         let lock_path = cache_dir.join("assets.lock");
@@ -69,17 +93,24 @@ impl LedgerGuard {
             .open(&lock_path)
             .ok();
         let Some(file) = file else {
-            // Lock file unopenable (read-only cache dir?) — in-process
-            // serialization only.
-            return Self { _pm: Some(pm), _file: None };
+            // Lock file unopenable (read-only cache dir?) — writes must
+            // be refused; readers may still proceed via open()'s Err.
+            tracing::error!("assets.lock unopenable — ledger writes refused");
+            return Self { _pm: Some(pm), _file: None, exclusive: false };
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + timeout;
         loop {
             match file.try_lock_exclusive() {
-                Ok(()) => return Self { _pm: Some(pm), _file: Some(file) },
+                Ok(()) => {
+                    GUARD_EXCLUSIVE.with(|e| e.set(true));
+                    return Self { _pm: Some(pm), _file: Some(file), exclusive: true };
+                }
                 Err(_) if std::time::Instant::now() >= deadline => {
-                    tracing::warn!("assets.lock busy >30s — proceeding without cross-process lock");
-                    return Self { _pm: Some(pm), _file: Some(file) };
+                    tracing::error!(
+                        "assets.lock busy >{:?} — refusing uncoordinated ledger write",
+                        timeout
+                    );
+                    return Self { _pm: Some(pm), _file: Some(file), exclusive: false };
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
             }
@@ -92,6 +123,9 @@ impl Drop for LedgerGuard {
         let depth = GUARD_DEPTH.with(|d| d.get());
         if depth > 0 {
             GUARD_DEPTH.with(|d| d.set(depth - 1));
+            if depth == 1 {
+                GUARD_EXCLUSIVE.with(|e| e.set(false));
+            }
         }
     }
 }
@@ -226,6 +260,13 @@ impl AssetLedger {
         std::fs::create_dir_all(cache_dir)?;
         let path = cache_dir.join("assets.duckdb");
         let guard = LedgerGuard::acquire(cache_dir);
+        if !guard.exclusive() {
+            // codex-review P0: opening for the write path (DDL possible)
+            // without the cross-process flock is how corruption starts.
+            // Read callers handle the Err by degrading (tri-state /
+            // execute-normally), never by proceeding uncoordinated.
+            anyhow::bail!("assets.lock not acquired — refusing ledger open");
+        }
         let conn = duckdb::Connection::open(&path)?;
         // Cheap existence probe first: if both tables exist, skip DDL —
         // running CREATE TABLE IF NOT EXISTS on a file left with an
@@ -261,6 +302,11 @@ impl AssetLedger {
     /// other connections) for the duration of `f`.
     fn with_write_guard<T>(&self, f: impl FnOnce(&Self) -> anyhow::Result<T>) -> anyhow::Result<T> {
         let _guard = LedgerGuard::acquire(&self.cache_dir);
+        if !_guard.exclusive() {
+            // P0: never write uncoordinated — fail the operation; callers
+            // are best-effort loggers, execution itself is unaffected.
+            anyhow::bail!("assets.lock not acquired — refusing ledger write");
+        }
         f(self)
     }
 
@@ -508,6 +554,11 @@ pub fn record_asset_run(
     // Serialize against other ledger writers (same process and other
     // processes) for the whole open→DDL→write window.
     let _guard = LedgerGuard::acquire(std::path::Path::new(cache_dir));
+    if !_guard.exclusive() {
+        // P0: never write uncoordinated. Best-effort hook: log and skip.
+        eprintln!("[assets] ledger lock unavailable — run not recorded");
+        return;
+    }
     let conn = match duckdb::Connection::open(&path) {
         Ok(c) => c,
         Err(e) => {
@@ -565,6 +616,11 @@ pub fn try_skip_fresh(
     // Read-mostly, but the open itself can run DDL on first use — hold
     // the guard for open + digest comparison only.
     let _guard = LedgerGuard::acquire(std::path::Path::new(cache_dir));
+    if !_guard.exclusive() {
+        // P0: can't coordinate — fail safe to executing the node
+        // (no skip decision based on an uncoordinated read).
+        return None;
+    }
     let conn = match duckdb::Connection::open(&path) {
         Ok(c) => c,
         Err(_) => return None,
@@ -876,6 +932,43 @@ mod tests {
         let a = compute_digest(id, "ab", "c", &[]);
         let b = compute_digest(id, "a", "bc", &[]);
         assert_ne!(a.hex(), b.hex(), "framing must disambiguate field splits");
+    }
+
+    #[test]
+    fn ledger_write_refused_when_lock_held_externally() {
+        // P0: a foreign flock holder must make OUR write path refuse to
+        // proceed, never write uncoordinated. Hold ONLY the flock (raw
+        // fs2 lock, not LedgerGuard — that would also take the in-process
+        // mutex and deadlock the spawned thread's acquire).
+        use fs2::FileExt as _;
+        let dir = std::env::temp_dir().join(format!("swanflow_lockref_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("assets.lock"))
+            .unwrap();
+        lock_file.try_lock_exclusive().unwrap();
+
+        let dir_s = dir.to_str().unwrap().to_string();
+        std::thread::spawn(move || {
+            // Flock is per-fd: a different fd on the same file blocks.
+            let g = LedgerGuard::acquire_with_deadline(
+                std::path::Path::new(&dir_s),
+                std::time::Duration::from_millis(50),
+            );
+            assert!(!g.exclusive(), "deadline must expire non-exclusive");
+            // The guarded write path must refuse: open() bails.
+            let r = AssetLedger::open(std::path::Path::new(&dir_s));
+            assert!(r.is_err(), "ledger open must be refused without flock");
+        })
+        .join()
+        .unwrap();
+
+        drop(lock_file);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
