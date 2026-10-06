@@ -294,12 +294,28 @@ impl AssetLedger {
                  );",
             )?;
         }
+        // codex-review P1 (r2): DuckDB checkpoints lazily on connection
+        // DROP — which happens when the CALLER drops the ledger, outside
+        // any guard. Flush now, inside the guard, so the later drop has
+        // nothing dirty to write (an uncoordinated checkpoint racing
+        // another process's write is the corruption we must prevent).
+        let _ = conn.execute_batch("CHECKPOINT");
         drop(guard);
         Ok(Self { conn, cache_dir: cache_dir.to_path_buf() })
     }
 
     /// Serialize a write against other processes (and our own process's
     /// other connections) for the duration of `f`.
+    ///
+    /// codex-review P1 (r2): DuckDB connections opened on the same file
+    /// in one process are INDEPENDENT instances with private buffer
+    /// caches — a connection opened before another's checkpoint holds a
+    /// stale view, and checkpointing it later writes that stale view
+    /// over the file (observed: 8 guarded writers -> 1 row survived).
+    /// Therefore writes run on an OPERATION-SCOPED connection opened
+    /// INSIDE the guard (sees every prior guarded checkpoint), flushed
+    /// with CHECKPOINT and dropped before the guard releases. The
+    /// long-lived read connection never checkpoints anything dirty.
     fn with_write_guard<T>(&self, f: impl FnOnce(&Self) -> anyhow::Result<T>) -> anyhow::Result<T> {
         let _guard = LedgerGuard::acquire(&self.cache_dir);
         if !_guard.exclusive() {
@@ -307,16 +323,51 @@ impl AssetLedger {
             // are best-effort loggers, execution itself is unaffected.
             anyhow::bail!("assets.lock not acquired — refusing ledger write");
         }
-        f(self)
+        let path = self.cache_dir.join("assets.duckdb");
+        let scoped = duckdb::Connection::open(&path)?;
+        // First-use DDL (existence probe pattern from open()).
+        if scoped
+            .execute_batch("SELECT 1 FROM asset_runs LIMIT 1; SELECT 1 FROM asset_intervals LIMIT 1")
+            .is_err()
+        {
+            scoped.execute_batch(
+                "CREATE TABLE IF NOT EXISTS asset_runs (
+                     node_id TEXT PRIMARY KEY,
+                     digest_hex TEXT NOT NULL,
+                     last_run_at TEXT NOT NULL,
+                     interval_start TEXT,
+                     interval_end TEXT
+                 );
+                 CREATE TABLE IF NOT EXISTS asset_intervals (
+                     node_id TEXT NOT NULL,
+                     interval_start TEXT NOT NULL,
+                     interval_end TEXT NOT NULL,
+                     completed_at TEXT NOT NULL,
+                     PRIMARY KEY (node_id, interval_start)
+                 );",
+            )?;
+        }
+        let writer = AssetLedger { conn: scoped, cache_dir: self.cache_dir.clone() };
+        let r = f(&writer);
+        // Flush inside the guard, then drop the scoped connection still
+        // inside it — the lazy drop-checkpoint stays coordinated too.
+        let _ = writer.conn.execute_batch("CHECKPOINT");
+        r
     }
 
     /// Last recorded digest for a node, if any.
+    ///
+    /// Runs on a guard-scoped fresh connection: the long-lived read
+    /// connection's private buffer may predate another writer's
+    /// checkpoint (codex-review P1 r2 — stale view across connections).
     pub fn recorded_digest(&self, node_id: Uuid) -> anyhow::Result<Option<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT digest_hex FROM asset_runs WHERE node_id = ?1")?;
-        let mut rows = stmt.query([node_id.to_string()])?;
-        Ok(rows.next()?.map(|r| r.get::<_, String>(0)).transpose()?)
+        self.with_write_guard(|this| {
+            let mut stmt = this
+                .conn
+                .prepare("SELECT digest_hex FROM asset_runs WHERE node_id = ?1")?;
+            let mut rows = stmt.query([node_id.to_string()])?;
+            Ok(rows.next()?.map(|r| r.get::<_, String>(0)).transpose()?)
+        })
     }
 
     /// Record (or overwrite) a successful run for a node.
@@ -333,32 +384,38 @@ impl AssetLedger {
     }
 
     /// Last successful materialization time for a node (None = never).
+    /// Guard-scoped fresh connection (see recorded_digest).
     pub fn last_materialized_at(&self, node_id: Uuid) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT last_run_at FROM asset_runs WHERE node_id = ?1")?;
-        let mut rows = stmt.query([node_id.to_string()])?;
-        Ok(rows
-            .next()?
-            .map(|r| r.get::<_, String>(0))
-            .transpose()?
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|t| t.with_timezone(&chrono::Utc)))
+        self.with_write_guard(|this| {
+            let mut stmt = this
+                .conn
+                .prepare("SELECT last_run_at FROM asset_runs WHERE node_id = ?1")?;
+            let mut rows = stmt.query([node_id.to_string()])?;
+            Ok(rows
+                .next()?
+                .map(|r| r.get::<_, String>(0))
+                .transpose()?
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                .map(|t| t.with_timezone(&chrono::Utc)))
+        })
     }
 
-    /// All recorded rows (for `assets list`).
+    /// All recorded rows (for `assets list`). Guard-scoped fresh
+    /// connection (see recorded_digest).
     pub fn all(&self) -> anyhow::Result<Vec<(String, String, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT node_id, digest_hex, last_run_at FROM asset_runs ORDER BY node_id")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        self.with_write_guard(|this| {
+            let mut stmt = this
+                .conn
+                .prepare("SELECT node_id, digest_hex, last_run_at FROM asset_runs ORDER BY node_id")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
     }
 
     // ── Stage 2: interval tracking ────────────────────────────────────
@@ -387,25 +444,26 @@ impl AssetLedger {
         })
     }
 
-    /// Completed interval starts for a node, ascending.
+    /// Completed interval starts for a node, ascending. Guard-scoped
+    /// fresh connection (see recorded_digest).
     pub fn completed_intervals(
         &self,
         node_id: Uuid,
     ) -> anyhow::Result<Vec<chrono::DateTime<chrono::Utc>>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT interval_start FROM asset_intervals WHERE node_id = ?1
-             ORDER BY interval_start",
-        )?;
-        let rows = stmt.query_map([node_id.to_string()], |r| {
-            r.get::<_, String>(0)
-        })?;
-        let mut out = Vec::new();
-        for r in rows.flatten() {
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&r) {
-                out.push(dt.with_timezone(&chrono::Utc));
+        self.with_write_guard(|this| {
+            let mut stmt = this.conn.prepare(
+                "SELECT interval_start FROM asset_intervals WHERE node_id = ?1
+                 ORDER BY interval_start",
+            )?;
+            let rows = stmt.query_map([node_id.to_string()], |r| r.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for r in rows.flatten() {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&r) {
+                    out.push(dt.with_timezone(&chrono::Utc));
+                }
             }
-        }
-        Ok(out)
+            Ok(out)
+        })
     }
 }
 
@@ -589,10 +647,21 @@ pub fn record_asset_run(
              );",
         );
     }
+    // Flush this connection's DDL NOW: with_write_guard writes via a
+    // separate operation-scoped instance, and THIS connection's lazy
+    // drop-checkpoint would otherwise write its stale view (no rows)
+    // over the guarded writer's checkpoint (observed cross-process row
+    // loss). After an explicit CHECKPOINT it is clean and its drop is a
+    // no-op write-wise.
+    let _ = conn.execute_batch("CHECKPOINT");
     let ledger = AssetLedger { conn, cache_dir: std::path::PathBuf::from(cache_dir) };
     if let Err(e) = ledger.record_asset_run_for(node_id, type_id, node_config_json, upstream) {
         eprintln!("[assets] ledger record failed (ignored): {}", e);
     }
+    // record_asset_run_for flushed via with_write_guard; drop the
+    // connection now while the outer guard is still held so any residual
+    // lazy checkpoint also stays coordinated.
+    drop(ledger);
 }
 
 /// Try to skip a fresh node: returns the parquet path when the node's
@@ -1032,29 +1101,31 @@ mod tests {
 
     #[test]
     fn concurrent_ledger_writers_same_process() {
-        // Spawn threads that each open their OWN AssetLedger connection
-        // (mirrors engine hook + daemon status racing) and write distinct
-        // node ids. Connections are dropped INSIDE the guard so the next
-        // thread's open sees the previous checkpoint (DuckDB lazily
-        // checkpoints on connection drop; an overlapping pair of
-        // independent instances on one file overwrite each other).
+        // codex-review P1 (r2): exercise the PUBLIC API exactly as
+        // production uses it — no manually held outer guard. Each thread
+        // opens its own AssetLedger (mirrors engine hook + daemon status
+        // racing), writes a distinct node id, drops it normally. Correct-
+        // ness: all 8 rows survive, file not corrupted. Barrier forces
+        // genuine simultaneous contention.
         let dir = std::env::temp_dir().join(format!(
             "swanflow_conc_test_{:?}",
             (std::process::id(), std::thread::current().id())
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let dir_s = dir.to_str().unwrap().to_string();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
         let mut handles = Vec::new();
         for i in 0..8u32 {
             let d = dir_s.clone();
+            let b = barrier.clone();
             handles.push(std::thread::spawn(move || {
-                let guard = LedgerGuard::acquire(std::path::Path::new(&d));
+                b.wait();
                 let ledger = AssetLedger::open(std::path::Path::new(&d)).unwrap();
                 let id = Uuid::new_v4();
-                ledger.record_run(id, &UpstreamDigest { bytes: [i as u8; 32] }).unwrap();
-                // drop connection while still holding the guard
-                drop(ledger);
-                drop(guard);
+                ledger
+                    .record_run(id, &UpstreamDigest { bytes: [i as u8; 32] })
+                    .unwrap();
+                drop(ledger); // normal lifecycle — drop outside any guard
             }));
         }
         for h in handles {
