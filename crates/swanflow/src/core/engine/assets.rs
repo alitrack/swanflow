@@ -136,6 +136,16 @@ pub fn compute_digest(
     h.update(node_id.as_bytes());
     h.update(type_id.as_bytes());
     h.update(config_json.as_bytes());
+    // codex-review P0 (domain C): backfill binds ${interval_start}/
+    // ${interval_end} from env at execution time, but the raw config is
+    // identical across days — without the interval in the digest every
+    // day hashes the same and skip-if-fresh reuses day 1's parquet for
+    // all days. Env unset (normal runs) hashes the empty string, which
+    // matches the historical digest format for old ledger rows.
+    let iv_start = std::env::var("SWANFLOW_INTERVAL_START").unwrap_or_default();
+    let iv_end = std::env::var("SWANFLOW_INTERVAL_END").unwrap_or_default();
+    h.update(iv_start.as_bytes());
+    h.update(iv_end.as_bytes());
     // Order-independent: sort upstream by id for deterministic digests.
     let mut ups: Vec<(Uuid, &[u8; 32])> = upstream
         .iter()
@@ -794,6 +804,36 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].0, id.to_string());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn digest_changes_with_interval_env() {
+        // codex-review P0 (domain C): backfill binds ${interval_start} at
+        // execution time; the digest must see the interval or every day
+        // reuses day 1's parquet under SWANFLOW_SKIP_FRESH=1.
+        let id = Uuid::nil();
+        let d1 = UpstreamDigest { bytes: [1; 32] };
+
+        // Baseline with env unset — must equal the historical format
+        // (empty SHA-256 updates are no-ops, so old ledger rows still hit).
+        std::env::remove_var("SWANFLOW_INTERVAL_START");
+        std::env::remove_var("SWANFLOW_INTERVAL_END");
+        let base = compute_digest(id, "t", "{}", &[(id, &d1)]);
+
+        std::env::set_var("SWANFLOW_INTERVAL_START", "2026-10-01T00:00:00+00:00");
+        std::env::set_var("SWANFLOW_INTERVAL_END", "2026-10-02T00:00:00+00:00");
+        let day1 = compute_digest(id, "t", "{}", &[(id, &d1)]);
+
+        std::env::set_var("SWANFLOW_INTERVAL_START", "2026-10-02T00:00:00+00:00");
+        std::env::set_var("SWANFLOW_INTERVAL_END", "2026-10-03T00:00:00+00:00");
+        let day2 = compute_digest(id, "t", "{}", &[(id, &d1)]);
+
+        std::env::remove_var("SWANFLOW_INTERVAL_START");
+        std::env::remove_var("SWANFLOW_INTERVAL_END");
+
+        assert_ne!(day1.hex(), day2.hex(), "different days must differ");
+        assert_ne!(base.hex(), day1.hex(), "interval run must differ from no-interval run");
+        assert_eq!(base.hex(), compute_digest(id, "t", "{}", &[(id, &d1)]).hex());
     }
 
     #[test]
