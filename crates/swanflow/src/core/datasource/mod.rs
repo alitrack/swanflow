@@ -808,17 +808,7 @@ impl DuckDBWriteSinkExec {
     ) -> Result<usize> {
         use parquet::arrow::ArrowWriter;
         use std::collections::HashMap;
-        use std::sync::{Arc, Mutex, OnceLock};
-
-        static SINK_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
-        let locks = SINK_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-        let per_db = {
-            let mut map = locks.lock().unwrap_or_else(|p| p.into_inner());
-            map.entry(db_path.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-        let _serialize = per_db.lock().unwrap_or_else(|p| p.into_inner());
+        use std::sync::{Arc, Mutex, OnceLock, Weak};
 
         if batches.is_empty() {
             return Ok(0);
@@ -827,7 +817,10 @@ impl DuckDBWriteSinkExec {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
 
         // 1. Spill batches to a temp parquet file (independent `parquet`
-        //    crate, same as the materialization cache path).
+        //    crate, same as the materialization cache path). Done BEFORE
+        //    taking the per-db mutex — pure CPU/IO with no shared state,
+        //    serializing it needlessly blocked other writers to the same
+        //    db (codex-review r3 P2).
         let tmp_dir = std::env::temp_dir();
         let tmp_file = tmp_dir.join(format!(
             "swanflow_duckdb_write_{}.parquet",
@@ -848,6 +841,52 @@ impl DuckDBWriteSinkExec {
                 .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
         }
         let tmp_path = tmp_file.to_str().unwrap_or("").to_string();
+
+        // 1b. Normalize the lock key (codex-review r3 P1): `/tmp/x.db`,
+        //     `/tmp/./x.db`, relative spellings and symlinks can all name
+        //     the SAME DuckDB file while hashing to different mutexes —
+        //     re-opening the catalog-conflict / silent-row-loss race this
+        //     lock exists to close. Canonicalize the file when present;
+        //     otherwise canonicalize the parent and append the file name
+        //     (path may not exist yet on first write).
+        let lock_key = {
+            let p = std::path::Path::new(db_path);
+            if let Ok(canon) = p.canonicalize() {
+                canon.to_string_lossy().into_owned()
+            } else {
+                let parent = p.parent().unwrap_or(std::path::Path::new("."));
+                let file_name = p
+                    .file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let canon_parent = parent
+                    .canonicalize()
+                    .unwrap_or_else(|_| parent.to_path_buf());
+                canon_parent.join(file_name).to_string_lossy().into_owned()
+            }
+        };
+
+        // Weak registry (codex-review r3 P2): a long-running daemon writing
+        // templated/temporary db paths would grow a strong-ref entry per
+        // path forever. Weak lets unreferenced entries be replaced, and a
+        // dead entry is upgraded-or-recreated on lookup.
+        static SINK_LOCKS: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+        let locks = SINK_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let per_db = {
+            let mut map = locks.lock().unwrap_or_else(|p| p.into_inner());
+            // Upgrade-or-recreate: a live entry is shared with any
+            // concurrent writer to the same file; a dead one (all writers
+            // done) is replaced fresh.
+            if let Some(arc) = map.get(&lock_key).and_then(Weak::upgrade) {
+                arc
+            } else {
+                let arc = Arc::new(Mutex::new(()));
+                map.insert(lock_key.clone(), Arc::downgrade(&arc));
+                arc
+            }
+        };
+        // Take the writer mutex only around the DuckDB interaction.
+        let _serialize = per_db.lock().unwrap_or_else(|p| p.into_inner());
 
         // 2. Durable write via DuckDB. `CREATE OR REPLACE` makes re-runs
         //    idempotent; a subsequent run replaces the previous table.
@@ -1245,6 +1284,64 @@ mod duckdb_write_sink_tests {
         assert!(errs.is_empty(), "writers failed: {errs:?}");
         assert_eq!(n, 8, "all 8 writers must be durable");
         std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn concurrent_writers_alias_paths_share_one_lock() {
+        // codex-review r3 P1: the per-db mutex is keyed by a NORMALIZED
+        // path. Raw-string keys let `/tmp/x.db`, `/tmp/./x.db`, a
+        // relative spelling, or a symlink alias of the same file get
+        // DIFFERENT mutexes — reopening the silent-row-loss race. Half
+        // the writers here address the file through aliases; all 8 rows
+        // must still be durable.
+        let tmp = std::env::temp_dir();
+        let db = tmp.join(format!("swan_duckdb_alias_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        // Pre-create so canonicalize() and the symlink resolve to it.
+        duckdb::Connection::open(&db).unwrap();
+        let dotted = db
+            .parent()
+            .unwrap()
+            .join(format!("./{}", db.file_name().unwrap().to_str().unwrap()));
+        let link = tmp.join(format!("swan_duckdb_alias_{}.lnk", uuid::Uuid::new_v4()));
+        std::os::unix::fs::symlink(&db, &link).expect("symlink");
+        let mode = WriteMode::Append { partition_by: vec![] };
+
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let which = match i % 4 {
+                    0 => db_str.clone(),
+                    1 => dotted.to_str().unwrap().to_string(),
+                    2 => link.to_str().unwrap().to_string(),
+                    _ => db_str.clone(),
+                };
+                let mode = mode.clone();
+                let tx = tx.clone();
+                let name = format!("a{i}");
+                s.spawn(move || {
+                    let batches = sample_batches_named(&name, 1.0);
+                    if let Err(e) =
+                        DuckDBWriteSinkExec::write_batches(&which, "people", &batches, &mode)
+                    {
+                        let _ = tx.send(format!("{name}: {e}"));
+                    }
+                });
+            }
+        });
+        drop(tx);
+        let mut errs: Vec<String> = rx.iter().collect();
+        errs.sort();
+
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM people", [], |r| r.get(0))
+            .unwrap_or(-1);
+        println!("alias writers: rows={n} errs={errs:?}");
+        assert!(errs.is_empty(), "writers failed: {errs:?}");
+        assert_eq!(n, 8, "all 8 alias-path writers must be durable");
+        std::fs::remove_file(&db).ok();
+        std::fs::remove_file(&link).ok();
     }
 
     #[test]

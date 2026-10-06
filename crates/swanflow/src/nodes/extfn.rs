@@ -446,9 +446,19 @@ ORDER BY extension_name, function_name";
     // script is rewriting the catalog read-write.
     let mut attempts = 0u32;
     let conn = loop {
-        let ro_config = duckdb::Config::default()
+        // codex-review r3 P2: do NOT unwrap_or_default() the ReadOnly
+        // config — the silent fallback is read-write, restoring exactly
+        // the lock contention this open mode exists to eliminate.
+        // Fail closed (no ext nodes, diagnostic) instead.
+        let ro_config = match duckdb::Config::default()
             .access_mode(duckdb::AccessMode::ReadOnly)
-            .unwrap_or_default();
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[extfn] read-only config rejected for {db_path}: {e}");
+                return vec![];
+            }
+        };
         match duckdb::Connection::open_with_flags(db_path, ro_config) {
             Ok(c) => break c,
             Err(e) => {

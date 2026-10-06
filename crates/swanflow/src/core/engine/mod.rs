@@ -1377,6 +1377,13 @@ impl SwanFlowEngine {
         let yaml_run_id = Uuid::new_v4().to_string();
         let yaml_wf_name = workflow.name.clone();
         let yaml_max_cache = self.max_cache_size_mb;
+        // codex-review r3 P1: the sub-engine built per loop iteration used
+        // to hardcode skip_fresh=false with a stale "parent already
+        // reused" comment — but execute_yaml_workflow performs no
+        // parent-level skip, so --skip-fresh (CLI or env opt-in) silently
+        // stopped applying inside legacy loop sub-workflows. Inherit like
+        // every other engine setting below.
+        let yaml_skip_fresh = self.skip_fresh;
 
         tokio::spawn(async move {
             let cm = checkpoint::CheckpointManager::new(&yaml_cache_dir);
@@ -1454,7 +1461,7 @@ impl SwanFlowEngine {
                             node_timeout_seconds: yaml_timeout_secs,
                             max_rows_per_node: 0, // unlimited for sub-workflow (parent applies limits)
                             max_cache_size_mb: 0, // unlimited for sub-workflow
-                            skip_fresh: false, // sub-workflows re-execute (parent already reused)
+                            skip_fresh: yaml_skip_fresh, // inherit: yaml path has no parent-level skip
                         };
 
                         match sub_engine.execute_workflow(sub_wf).await {
