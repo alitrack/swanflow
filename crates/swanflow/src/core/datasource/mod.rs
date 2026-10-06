@@ -792,6 +792,14 @@ impl DuckDBWriteSinkExec {
     /// the bundled libduckdb; `read_arrow` is an extension function and not
     /// guaranteed present. Exposed `pub` so unit tests verify the durable
     /// write without a full execution plan.
+    ///
+    /// Concurrency: DuckDB connections opened within one process to the
+    /// same file share a single database instance, and concurrent
+    /// `CREATE TABLE` transactions hit catalog write-write conflicts —
+    /// observed as silently lost rows (8 writers, 1 row durable). A
+    /// per-db-path process-local mutex serializes writers; a second
+    /// process is kept out by DuckDB's own file lock, which we retry on
+    /// for a few seconds before failing.
     pub fn write_batches(
         db_path: &str,
         table: &str,
@@ -799,6 +807,18 @@ impl DuckDBWriteSinkExec {
         write_mode: &WriteMode,
     ) -> Result<usize> {
         use parquet::arrow::ArrowWriter;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, OnceLock};
+
+        static SINK_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+        let locks = SINK_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let per_db = {
+            let mut map = locks.lock().unwrap_or_else(|p| p.into_inner());
+            map.entry(db_path.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _serialize = per_db.lock().unwrap_or_else(|p| p.into_inner());
 
         if batches.is_empty() {
             return Ok(0);
@@ -834,8 +854,41 @@ impl DuckDBWriteSinkExec {
         //    Append mode INSERTs; with `partition_by`, rows sharing the
         //    incoming partition values are deleted first (idempotent
         //    per-interval backfills).
-        let conn = duckdb::Connection::open_with_flags(db_path, duckdb::Config::default())
-            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+        //
+        // Cross-process: DuckDB holds an exclusive file lock on the db
+        // while another process has it open. A brief conflicting-lock
+        // window is normal under concurrent runs — retry for a few
+        // seconds before surfacing the error to the node.
+        let mut conn = None;
+        let mut last_err = None;
+        for attempt in 0..40 {
+            match duckdb::Connection::open_with_flags(db_path, duckdb::Config::default()) {
+                Ok(c) => {
+                    conn = Some(c);
+                    break;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("Conflicting lock") && attempt < 39 {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(datafusion::error::DataFusionError::External(Box::new(e)));
+                }
+            }
+        }
+        let conn = match conn {
+            Some(c) => c,
+            // Unreachable: the loop either breaks with Some(c) or returns
+            // Err. Keep a defensive arm mapping the last retry error.
+            None => {
+                return Err(datafusion::error::DataFusionError::External(format!(
+                    "duckdb open retry exhausted for {db_path}"
+                )
+                .into()))
+            }
+        };
 
         let safe_table = table.replace('"', "\"\"");
         let tmp = tmp_path.replace('\'', "''");
@@ -1149,6 +1202,48 @@ mod duckdb_write_sink_tests {
             .query_row("SELECT score FROM people WHERE name='carol'", [], |r| r.get(0))
             .unwrap();
         assert!((score - 88.25).abs() < 1e-9);
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn concurrent_writers_to_same_table_all_land() {
+        // Test gap flagged in codex-review r1: multiple nodes (or retries)
+        // can target the SAME db+table concurrently. DuckDB takes a file
+        // lock on open, so naive concurrent write_batches must either
+        // serialize or retry — never silently lose a writer. 8 writers,
+        // one distinct name each; all 8 rows must be durable at the end.
+        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let mode = WriteMode::Append { partition_by: vec![] };
+        let names: Vec<String> = (0..8).map(|i| format!("p{i}")).collect();
+
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::scope(|s| {
+            for name in &names {
+                let db_str = db_str.clone();
+                let mode = mode.clone();
+                let tx = tx.clone();
+                s.spawn(move || {
+                    let batches = sample_batches_named(name, 1.0);
+                    if let Err(e) =
+                        DuckDBWriteSinkExec::write_batches(&db_str, "people", &batches, &mode)
+                    {
+                        let _ = tx.send(format!("{name}: {e}"));
+                    }
+                });
+            }
+        });
+        drop(tx);
+        let mut errs: Vec<String> = rx.iter().collect();
+        errs.sort();
+
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM people", [], |r| r.get(0))
+            .unwrap_or(-1);
+        println!("concurrent writers: rows={n} errs={errs:?}");
+        assert!(errs.is_empty(), "writers failed: {errs:?}");
+        assert_eq!(n, 8, "all 8 writers must be durable");
         std::fs::remove_file(&db).ok();
     }
 
