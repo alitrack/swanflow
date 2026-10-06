@@ -667,9 +667,38 @@ pub enum WriteMode {
     /// `CREATE OR REPLACE TABLE` — each run replaces the whole table (default,
     /// historical behavior).
     Replace,
-    /// Append rows; when `partition_by` is set, rows of the same partition
-    /// value are deleted first, making per-interval backfills idempotent.
-    Append { partition_by: Option<String> },
+    /// Append rows; when `partition_by` is non-empty, rows in the same
+    /// partition (per the partition key spec) are deleted first, making
+    /// per-interval backfills idempotent.
+    Append { partition_by: Vec<PartitionCol> },
+}
+
+/// One partition key column. `trunc` (e.g. "day"/"hour") applies
+/// `date_trunc('<trunc>', col)` to both sides of the delete predicate —
+/// a backfill for one hour of a timestamp column replaces exactly that
+/// hour's rows, not the whole column value's rows.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PartitionCol {
+    pub column: String,
+    /// DuckDB date_trunc unit: year|quarter|month|week|day|hour|minute|second
+    pub trunc: Option<String>,
+}
+
+impl PartitionCol {
+    /// SQL expression referencing this key over a table alias/qualifier
+    /// (empty qualifier = unqualified). Escaped identifier included.
+    fn sql_expr(&self, qualifier: &str) -> String {
+        let col = self.column.replace('"', "\"\"");
+        let ident = if qualifier.is_empty() {
+            format!("\"{}\"", col)
+        } else {
+            format!("{}.\"{}\"", qualifier, col)
+        };
+        match &self.trunc {
+            Some(u) => format!("date_trunc('{}', {})", u.replace('\'', "''"), ident),
+            None => ident,
+        }
+    }
 }
 
 /// Logical node for writing upstream data into a DuckDB table.
@@ -827,72 +856,72 @@ impl DuckDBWriteSinkExec {
                 res
             }
             WriteMode::Append { partition_by } => {
-                // Partition values present in this batch (NULLs excluded —
-                // SQL `IN` cannot express them; such rows always append).
-                let part_vals: Option<Vec<String>> = partition_by.as_ref().map(|col| {
-                    let col = col.replace('"', "\"\"");
-                    batches
-                        .iter()
-                        .flat_map(|b| {
-                            b.schema()
-                                .index_of(col.as_str())
-                                .ok()
-                                .and_then(|i| b.column(i).as_any().downcast_ref::<datafusion::arrow::array::StringArray>())
-                                .map(|a| (0..a.len()).filter(move |&i| !a.is_null(i)).map(move |i| a.value(i).replace('\'', "''")).collect::<Vec<_>>())
-                                .unwrap_or_default()
-                        })
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .into_iter()
-                        .collect()
-                });
-                conn.execute_batch(&format!(
-                    "BEGIN TRANSACTION;\n\
-                     CREATE TABLE IF NOT EXISTS \"{}\" AS \
-                     SELECT * FROM read_parquet('{}') LIMIT 0;\n\
-                     INSERT INTO \"{}\" SELECT * FROM read_parquet('{}');",
-                    safe_table, tmp, safe_table, tmp
-                ))
-                .and_then(|_| {
-                    // Idempotency for partitioned backfills: within the same
-                    // transaction, delete-then-insert for the partitions we
-                    // are about to write. The CREATE..AS..LIMIT 0 above only
-                    // fires on first creation; existing partitions are
-                    // pruned here so a re-run of the same interval replaces
-                    // exactly its own rows.
-                    if let (Some(col), Some(vals)) = (partition_by, part_vals) {
-                        if !vals.is_empty() {
-                            let col = col.replace('"', "\"\"");
-                            let list = vals
-                                .iter()
-                                .map(|v| format!("'{}'", v))
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            // Re-order: DELETE must come BEFORE INSERT, so
-                            // undo the eager INSERT above and redo both in
-                            // the right order.
-                            return conn.execute_batch(&format!(
-                                "ROLLBACK;\n\
-                                 BEGIN TRANSACTION;\n\
-                                 CREATE TABLE IF NOT EXISTS \"{}\" AS \
-                                 SELECT * FROM read_parquet('{}') LIMIT 0;\n\
-                                 DELETE FROM \"{}\" WHERE \"{}\" IN ({});\n\
-                                 INSERT INTO \"{}\" SELECT * FROM read_parquet('{}');\n\
-                                 COMMIT;",
-                                safe_table, tmp, safe_table, col, list, safe_table, tmp
-                            ));
+                // Partitioned idempotent append: within one transaction,
+                // create-if-missing, DELETE exactly the incoming partitions
+                // (tuple-exact via EXISTS over the staging rows — handles
+                // multi-column keys, NULL keys, and date_trunc'ed keys),
+                // then INSERT. Re-running an interval replaces exactly its
+                // own rows.
+                let has_keys = !partition_by.is_empty();
+                // First pass (no keys or keys not yet resolvable): plain
+                // create-if-missing + insert.
+                let first_pass = if has_keys {
+                    // With keys we cannot use the eager INSERT (it would
+                    // duplicate rows before the targeted DELETE); staging
+                    // table approach below handles it in one pass.
+                    conn.execute_batch(&format!(
+                        "BEGIN TRANSACTION;\n\
+                         CREATE TABLE IF NOT EXISTS \"{}\" AS \
+                         SELECT * FROM read_parquet('{}') LIMIT 0;",
+                        safe_table, tmp
+                    ))
+                } else {
+                    conn.execute_batch(&format!(
+                        "BEGIN TRANSACTION;\n\
+                         CREATE TABLE IF NOT EXISTS \"{}\" AS \
+                         SELECT * FROM read_parquet('{}') LIMIT 0;\n\
+                         INSERT INTO \"{}\" SELECT * FROM read_parquet('{}');",
+                        safe_table, tmp, safe_table, tmp
+                    ))
+                };
+                first_pass
+                    .and_then(|_| {
+                        if !has_keys {
+                            return conn.execute_batch("COMMIT;");
                         }
-                    }
-                    conn.execute_batch("COMMIT;")
-                })
-                .map_err(|e| {
-                    let _ = std::fs::remove_file(&tmp_file);
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    datafusion::error::DataFusionError::External(Box::new(e))
-                })
-                .map(|_| {
-                    let _ = std::fs::remove_file(&tmp_file);
-                    total_rows
-                })
+                        // DELETE rows whose partition tuple matches any row
+                        // in the incoming batch (staging = the temp parquet),
+                        // then INSERT. NULL keys: `t.k IS NOT DISTINCT FROM
+                        // s.k` treats NULL equal to NULL.
+                        let cond = partition_by
+                            .iter()
+                            .map(|k| {
+                                format!(
+                                    "{} IS NOT DISTINCT FROM {}",
+                                    k.sql_expr("t"),
+                                    k.sql_expr("s")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" AND ");
+                        conn.execute_batch(&format!(
+                            "DELETE FROM \"{t}\" t WHERE EXISTS (SELECT 1 FROM read_parquet('{p}') s WHERE {cond});\n\
+                             INSERT INTO \"{t}\" SELECT * FROM read_parquet('{p}');\n\
+                             COMMIT;",
+                            t = safe_table,
+                            p = tmp,
+                            cond = cond
+                        ))
+                    })
+                    .map_err(|e| {
+                        let _ = std::fs::remove_file(&tmp_file);
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        datafusion::error::DataFusionError::External(Box::new(e))
+                    })
+                    .map(|_| {
+                        let _ = std::fs::remove_file(&tmp_file);
+                        total_rows
+                    })
             }
         }
     }
@@ -1072,6 +1101,11 @@ mod duckdb_write_sink_tests {
 
     /// One-row batch with the same schema as `sample_batches`.
     fn sample_batches_named(name: &str, score: f64) -> Vec<RecordBatch> {
+        sample_batches_with_age(name, 30, score)
+    }
+
+    /// One-row batch with explicit age (for composite-key tests).
+    fn sample_batches_with_age(name: &str, age: i64, score: f64) -> Vec<RecordBatch> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("name", DataType::Utf8, true),
             Field::new("age", DataType::Int64, true),
@@ -1081,7 +1115,7 @@ mod duckdb_write_sink_tests {
             schema,
             vec![
                 Arc::new(StringArray::from(vec![name.to_string()])),
-                Arc::new(Int64Array::from(vec![30])),
+                Arc::new(Int64Array::from(vec![age])),
                 Arc::new(Float64Array::from(vec![score])),
             ],
         )
@@ -1145,14 +1179,14 @@ mod duckdb_write_sink_tests {
 
         DuckDBWriteSinkExec::write_batches(
             &db_str, "people", &batches,
-            &WriteMode::Append { partition_by: None },
+            &WriteMode::Append { partition_by: vec![] },
         )
         .unwrap();
         // Second run with a different single row must APPEND.
         let other = sample_batches_named("dave", 77.5);
         DuckDBWriteSinkExec::write_batches(
             &db_str, "people", &other,
-            &WriteMode::Append { partition_by: None },
+            &WriteMode::Append { partition_by: vec![] },
         )
         .unwrap();
 
@@ -1170,7 +1204,7 @@ mod duckdb_write_sink_tests {
         // exactly its own rows, never duplicates, never touches siblings.
         let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
-        let mode = WriteMode::Append { partition_by: Some("name".into()) };
+        let mode = WriteMode::Append { partition_by: vec![PartitionCol { column: "name".into(), trunc: None }] };
 
         DuckDBWriteSinkExec::write_batches(
             &db_str, "people", &sample_batches(),
@@ -1197,6 +1231,98 @@ mod duckdb_write_sink_tests {
             .query_row("SELECT score FROM people WHERE name='bob'", [], |r| r.get(0))
             .unwrap();
         assert!((bob_score - 77.0).abs() < 1e-9, "sibling partition untouched");
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn write_batches_append_multi_column_key() {
+        // Composite partition key: (name, age). Re-writing alice@31 must
+        // replace exactly that row even if alice@32 also exists.
+        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let mode = WriteMode::Append {
+            partition_by: vec![
+                PartitionCol { column: "name".into(), trunc: None },
+                PartitionCol { column: "age".into(), trunc: None },
+            ],
+        };
+        DuckDBWriteSinkExec::write_batches(&db_str, "people", &sample_batches(), &mode).unwrap();
+        // alice aged 32 arrives — a DIFFERENT composite partition.
+        let alice32 = sample_batches_with_age("alice", 32, 55.0);
+        DuckDBWriteSinkExec::write_batches(&db_str, "people", &alice32, &mode).unwrap();
+        // Re-write alice@31 with a new score — replaces in place.
+        let alice31v2 = sample_batches_with_age("alice", 31, 99.0);
+        DuckDBWriteSinkExec::write_batches(&db_str, "people", &alice31v2, &mode).unwrap();
+
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM people", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 4, "alice has two age-partitions, each exactly once");
+        let s31: f64 = conn
+            .query_row("SELECT score FROM people WHERE name='alice' AND age=31", [], |r| r.get(0))
+            .unwrap();
+        assert!((s31 - 99.0).abs() < 1e-9, "alice@31 replaced with latest");
+        let s32: f64 = conn
+            .query_row("SELECT score FROM people WHERE name='alice' AND age=32", [], |r| r.get(0))
+            .unwrap();
+        assert!((s32 - 55.0).abs() < 1e-9, "sibling composite partition untouched");
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn write_batches_append_hour_truncated_timestamp_key() {
+        // 'ts:hour' — backfilling one hour replaces exactly that hour's
+        // rows even when the timestamp seconds differ (the pre-trunc value
+        // would never match under plain equality).
+        use datafusion::arrow::array::TimestampMicrosecondArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Microsecond, None), true),
+            Field::new("v", DataType::Int64, true),
+        ]));
+        // 2026-10-06 10:15:00 and 10:45:00 UTC — same HOUR partition.
+        let mk = |usec: i64, v: i64| {
+            vec![RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMicrosecondArray::from(vec![usec])),
+                    Arc::new(Int64Array::from(vec![v])),
+                ],
+            )
+            .unwrap()]
+        };
+        let hour = 3600i64 * 1_000_000;
+        let t1015 = 1_799_284_100i64 * 1_000_000; // arbitrary epoch base
+        let t1045 = t1015 + 30 * 60 * 1_000_000;
+        let t1215 = t1015 + 2 * hour; // different hour
+
+        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let mode = WriteMode::Append {
+            partition_by: vec![PartitionCol { column: "ts".into(), trunc: Some("hour".into()) }],
+        };
+        DuckDBWriteSinkExec::write_batches(&db_str, "ticks", &mk(t1015, 1), &mode).unwrap();
+        DuckDBWriteSinkExec::write_batches(&db_str, "ticks", &mk(t1215, 7), &mode).unwrap();
+        // Backfill the 10:00 hour with the 10:45 value — must REPLACE the
+        // 10:15 row (same truncated hour), keep the 12:00 row untouched.
+        DuckDBWriteSinkExec::write_batches(&db_str, "ticks", &mk(t1045, 2), &mode).unwrap();
+
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM ticks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "hour-partition replaced in place; other hour kept");
+        // The surviving 10:00-hour row carries ts = t1045, v = 2; the 12:00
+        // row carries ts = t1215. Split at t1015 + 1h (covers the 10-hour).
+        let cutoff = t1015 + hour;
+        let v10: i64 = conn
+            .query_row(
+                "SELECT v FROM ticks WHERE ts < make_timestamp(?)",
+                [cutoff],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v10, 2, "10:00-hour row is the backfilled value");
         std::fs::remove_file(&db).ok();
     }
 

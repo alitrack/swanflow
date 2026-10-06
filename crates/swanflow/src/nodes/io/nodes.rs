@@ -220,7 +220,7 @@ impl NodeBehavior for DuckDBWriteNode {
                     "mode": { "type": "string", "enum": ["replace", "append"], "default": "replace",
                                "description": "replace = CREATE OR REPLACE whole table each run; append = INSERT, accumulating across runs (for partitioned backfills)." },
                     "partition_by": { "type": "string",
-                               "description": "Column for append mode idempotency: rows whose partition value matches incoming data are deleted before insert (re-running an interval replaces exactly its own rows)." }
+                               "description": "Partition key(s) for append-mode idempotency: comma-separated columns, each optionally 'col:unit' (unit = date_trunc granularity: day/hour/...). Incoming rows' partitions are deleted before insert — re-running an interval replaces exactly its own rows." }
                 },
                 "required": ["table"]
             }),
@@ -242,10 +242,32 @@ impl NodeBehavior for DuckDBWriteNode {
             cfg::optional_string(config, "path").unwrap_or_else(|| "data.db".to_string());
         // mode: "replace" (default, historical) | "append" — with optional
         // partition_by for idempotent per-interval backfills.
+        // partition_by: single column string, or array of columns; each
+        // entry may carry a date_trunc unit as "col:unit" (e.g. "ts:hour").
+        let parse_partition = |v: Option<&str>| -> Result<Vec<crate::core::datasource::PartitionCol>> {
+            let Some(spec) = v else { return Ok(Vec::new()) };
+            let mut cols = Vec::new();
+            for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                match part.split_once(':') {
+                    Some((col, trunc)) => cols.push(crate::core::datasource::PartitionCol {
+                        column: col.trim().to_string(),
+                        trunc: Some(trunc.trim().to_string()),
+                    }),
+                    None => cols.push(crate::core::datasource::PartitionCol {
+                        column: part.to_string(),
+                        trunc: None,
+                    }),
+                }
+            }
+            if cols.iter().any(|c| c.column.is_empty()) {
+                return Err(anyhow::anyhow!("invalid partition_by '{spec}': empty column name"));
+            }
+            Ok(cols)
+        };
         let write_mode = match cfg::optional_string(config, "mode").as_deref() {
             None | Some("replace") => crate::core::datasource::WriteMode::Replace,
             Some("append") => crate::core::datasource::WriteMode::Append {
-                partition_by: cfg::optional_string(config, "partition_by"),
+                partition_by: parse_partition(cfg::optional_string(config, "partition_by").as_deref())?,
             },
             Some(other) => {
                 return Err(anyhow::anyhow!(
