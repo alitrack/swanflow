@@ -65,6 +65,8 @@ struct DaemonResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     watched: Option<Vec<WatchedInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    logs: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<WorkflowStatus>,
 }
 
@@ -237,6 +239,67 @@ fn watched_registry_path() -> Option<std::path::PathBuf> {
         crate::core::engine::default_cache_dir(),
     ))
     .map(|p| p.join("watched.json"))
+}
+
+/// Location of the daemon event log: `<cache_dir>/daemon.log`. Plain
+/// append-only text (one event per line, RFC3339 timestamp) so it tails
+/// well over SSH and survives daemon restarts. Rolling: when the file
+/// passes [`DAEMON_LOG_MAX_BYTES`] it is renamed to daemon.log.1 (any
+/// previous .1 is dropped) — bounded disk usage, newest events always
+/// win.
+const DAEMON_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+fn daemon_log_path() -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(
+        crate::core::engine::default_cache_dir(),
+    ))
+    .map(|p| p.join("daemon.log"))
+}
+
+/// Serialize appends across sensor ticks and RPC handlers.
+static DAEMON_LOG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Append one event line to `<cache_dir>/daemon.log` (best-effort: log
+/// failures must never break the daemon — fall back to tracing).
+fn daemon_log(event: &str) {
+    let Some(path) = daemon_log_path() else { return };
+    let _g = DAEMON_LOG_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    // Roll when oversized: rename current -> .1 (replacing any old .1).
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > DAEMON_LOG_MAX_BYTES {
+            let rolled = path.with_extension("log.1");
+            let _ = std::fs::remove_file(&rolled);
+            let _ = std::fs::rename(&path, &rolled);
+        }
+    }
+    let line = format!(
+        "{} {}\n",
+        chrono::Utc::now().to_rfc3339(),
+        event.trim()
+    );
+    use std::io::Write;
+    let res = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+    if let Err(e) = res {
+        tracing::warn!("daemon.log append failed: {e}");
+    }
+}
+
+/// Tail the daemon event log: last `tail` lines, oldest first. Missing
+/// file yields an empty vec (a daemon that never logged is not an error).
+fn daemon_log_tail(tail: usize) -> Vec<String> {
+    let Some(path) = daemon_log_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let skip = lines.len().saturating_sub(tail);
+    lines[skip..].iter().map(|s| s.to_string()).collect()
 }
 
 /// Load persisted watch entries from watched.json (best-effort: missing
@@ -638,6 +701,12 @@ async fn sensor_tick(
             "automation sensor: {} node(s) ready in '{}' — executing",
             ready_nodes.len(), workflow.name
         );
+        daemon_log(&format!(
+            "run '{}' ({wf_id}) gen={generation} nodes={}",
+            workflow.name,
+            ready_nodes.len()
+        ));
+        let run_started = std::time::Instant::now();
         match engine.execute_workflow(&workflow).await {
             Ok(rx) => {
                 let mut rx = rx;
@@ -656,12 +725,26 @@ async fn sensor_tick(
                         "automation run of '{}' finished with {errs} error(s); first: {first_err}",
                         workflow.name
                     );
+                    daemon_log(&format!(
+                        "run-done '{}' ({wf_id}) errors={errs} elapsed={:?} first={first_err}",
+                        workflow.name,
+                        run_started.elapsed()
+                    ));
                 } else {
                     tracing::info!("automation run of '{}' completed", workflow.name);
+                    daemon_log(&format!(
+                        "run-done '{}' ({wf_id}) errors=0 elapsed={:?}",
+                        workflow.name,
+                        run_started.elapsed()
+                    ));
                 }
             }
             Err(e) => {
                 tracing::error!("automation run of '{}' failed to start: {e}", workflow.name);
+                daemon_log(&format!(
+                    "run-fail '{}' ({wf_id}) start-error={e}",
+                    workflow.name
+                ));
             }
         }
         // Run finished (or failed to start): release the claim and honor
@@ -729,6 +812,7 @@ async fn handle_client(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
+                logs: None,
                     status: None,
                 };
                 if let Err(e) = write_response(&mut writer, &resp).await {
@@ -755,6 +839,7 @@ async fn handle_client(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
+                logs: None,
                     status: None,
                 };
                 if let Err(e) = write_response(&mut writer, &resp).await {
@@ -793,6 +878,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
+                logs: None,
                     status: None,
                 };
             }
@@ -808,6 +894,7 @@ async fn handle_method(
                         workflow_id: None,
                         workflows: None,
                         watched: None,
+                logs: None,
                         status: None,
                     }
                 }
@@ -824,6 +911,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
+                logs: None,
                     status: None,
                 };
             }
@@ -843,6 +931,7 @@ async fn handle_method(
                             workflow_id: None,
                             workflows: None,
                             watched: None,
+                logs: None,
                             status: None,
                         };
                     }
@@ -865,6 +954,7 @@ async fn handle_method(
                             workflow_id: None,
                             workflows: None,
                             watched: None,
+                logs: None,
                             status: None,
                         };
                     }
@@ -899,6 +989,7 @@ async fn handle_method(
                 pending_remove: false,
             });
             tracing::info!("automation sensor now watching '{n}' ({wf_id})");
+            daemon_log(&format!("watch '{n}' ({wf_id}) path={path}"));
             drop(w);
             save_watched_entries(watched).await;
             DaemonResponse {
@@ -908,6 +999,7 @@ async fn handle_method(
                 workflow_id: Some(wf_id.to_string()),
                 workflows: None,
                 watched: None,
+                logs: None,
                 status: None,
             }
         }
@@ -919,6 +1011,7 @@ async fn handle_method(
             workflow_id: None,
             workflows: None,
             watched: None,
+            logs: None,
             status: None,
         },
 
@@ -942,6 +1035,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
+                logs: None,
                     status: None,
                 };
             }
@@ -987,12 +1081,20 @@ async fn handle_method(
                 save_watched_entries(watched).await;
             }
             match wf_id {
-                Some(id) => tracing::info!(
-                    "automation sensor: unregistered {removed} watch(es) for {id}"
-                ),
-                None => tracing::info!(
-                    "automation sensor: unregistered {removed} watch(es) for path {path:?}"
-                ),
+                Some(id) => {
+                    tracing::info!(
+                        "automation sensor: unregistered {removed} watch(es) for {id}"
+                    );
+                    daemon_log(&format!("unwatch id={id} removed={removed} deferred={deferred}"));
+                }
+                None => {
+                    tracing::info!(
+                        "automation sensor: unregistered {removed} watch(es) for path {path:?}"
+                    );
+                    daemon_log(&format!(
+                        "unwatch path={path:?} removed={removed} deferred={deferred}"
+                    ));
+                }
             }
             DaemonResponse {
                 id: req.id.clone(),
@@ -1005,6 +1107,7 @@ async fn handle_method(
                 workflow_id: wf_id.map(|id| id.to_string()),
                 workflows: None,
                 watched: None,
+                logs: None,
                 status: None,
             }
         }
@@ -1019,6 +1122,7 @@ async fn handle_method(
                 workflow_id: None,
                 workflows: None,
                 watched: None,
+                logs: None,
                 status: None,
             };
             tokio::spawn(async {
@@ -1046,6 +1150,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
+                logs: None,
                     status: None,
                 };
             }
@@ -1058,6 +1163,7 @@ async fn handle_method(
                     workflow_id: Some(wf_id.to_string()),
                     workflows: None,
                     watched: None,
+                logs: None,
                     status: None,
                 },
                 Err(e) => DaemonResponse {
@@ -1067,6 +1173,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
+                logs: None,
                     status: None,
                 },
             }
@@ -1100,6 +1207,28 @@ async fn handle_method(
                 workflow_id: None,
                 workflows: None,
                 watched: Some(list),
+                logs: None,
+                status: None,
+            }
+        }
+
+        "automation.logs" => {
+            // Tail the persistent event log. Default 50 lines; the CLI
+            // passes an explicit tail. Missing log is not an error.
+            let tail = req
+                .params
+                .get("tail")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.clamp(1, 10_000) as usize)
+                .unwrap_or(50);
+            DaemonResponse {
+                id: req.id.clone(),
+                ok: Some(true),
+                error: None,
+                workflow_id: None,
+                workflows: None,
+                watched: None,
+                logs: Some(daemon_log_tail(tail)),
                 status: None,
             }
         }
@@ -1127,6 +1256,7 @@ async fn handle_method(
                 workflow_id: None,
                 workflows: Some(list),
                 watched: None,
+                logs: None,
                 status: None,
             }
         }
@@ -1150,6 +1280,7 @@ async fn handle_method(
                             workflow_id: None,
                             workflows: None,
                             watched: None,
+                logs: None,
                             status: Some(WorkflowStatus {
                                 id: id.to_string(),
                                 name: wf.name.clone(),
@@ -1173,6 +1304,7 @@ async fn handle_method(
                             workflow_id: None,
                             workflows: None,
                             watched: None,
+                logs: None,
                             status: None,
                         }
                     }
@@ -1184,6 +1316,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
+                logs: None,
                     status: None,
                 },
             }
@@ -1208,6 +1341,7 @@ async fn handle_method(
                             workflow_id: Some(id.to_string()),
                             workflows: None,
                             watched: None,
+                logs: None,
                             status: None,
                         }
                     } else {
@@ -1218,6 +1352,7 @@ async fn handle_method(
                             workflow_id: None,
                             workflows: None,
                             watched: None,
+                logs: None,
                             status: None,
                         }
                     }
@@ -1229,6 +1364,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
+                logs: None,
                     status: None,
                 },
             }
@@ -1241,6 +1377,7 @@ async fn handle_method(
             workflow_id: None,
             workflows: None,
             watched: None,
+            logs: None,
             status: None,
         },
     }
@@ -1797,6 +1934,35 @@ mod watched_persistence_tests {
         // And the persisted file reflects the removal (empty list).
         let entries = load_watched_entries();
         assert!(entries.is_empty(), "watched.json must show removal: {entries:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn daemon_log_append_and_tail() {
+        // Events append as timestamped lines; tail returns the last N,
+        // oldest first; a missing log is empty (not an error).
+        let dir = std::env::temp_dir().join(format!("sf_daemon_log_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _g = EnvDir::set(dir.to_str().unwrap());
+
+        // No log yet -> empty tail.
+        assert!(daemon_log_tail(10).is_empty());
+
+        daemon_log("watch 'wf' (abc) path=/tmp/wf.yaml");
+        daemon_log("run 'wf' (abc) gen=1 nodes=2");
+        daemon_log("run-done 'wf' (abc) errors=0");
+
+        let all = daemon_log_tail(10);
+        assert_eq!(all.len(), 3, "all three events: {all:?}");
+        assert!(all[0].contains("watch 'wf'"), "oldest first: {all:?}");
+        assert!(all[0].contains('T'), "RFC3339 timestamp prefix: {}", all[0]);
+        assert!(all[2].contains("run-done"), "newest last: {all:?}");
+
+        // Tail smaller than the log -> only the last lines.
+        let last2 = daemon_log_tail(2);
+        assert_eq!(last2.len(), 2);
+        assert!(last2[0].contains("run 'wf'"), "tail window: {last2:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -321,6 +321,16 @@ enum DaemonCommands {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    /// Show recent daemon events (watch/unwatch/run) from the persistent
+    /// event log `<cache_dir>/daemon.log`.
+    Logs {
+        /// Number of trailing lines to show
+        #[arg(long, default_value_t = 50)]
+        tail: u64,
+        /// Custom socket path
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// List running workflows
     List {
         #[arg(long)]
@@ -1624,6 +1634,31 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             }
             Ok(())
         }
+        DaemonCommands::Logs { tail, socket } => {
+            let resp = send_daemon_raw(
+                &socket,
+                "automation.logs",
+                serde_json::json!({ "tail": tail }),
+            )
+            .await?;
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp) {
+                if let Some(lines) = v.get("logs").and_then(|l| l.as_array()) {
+                    if lines.is_empty() {
+                        println!("No daemon events logged yet.");
+                    }
+                    for l in lines {
+                        println!("{}", l.as_str().unwrap_or(""));
+                    }
+                } else if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                    anyhow::bail!("daemon error: {err}");
+                } else {
+                    println!("{}", resp);
+                }
+            } else {
+                println!("{}", resp);
+            }
+            Ok(())
+        }
         DaemonCommands::List { socket } => {
             let resp = send_daemon_raw(&socket, "workflow.list", serde_json::json!({})).await?;
             println!("{}", resp);
@@ -1714,6 +1749,10 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
         }
         DaemonCommands::Watched { .. } => {
             run_ssh(host, &["swanflow", "daemon", "watched"])?;
+        }
+        DaemonCommands::Logs { tail, .. } => {
+            let t = tail.to_string();
+            run_ssh(host, &["swanflow", "daemon", "logs", "--tail", &t])?;
         }
         DaemonCommands::Watch { file, .. } => {
             let fname = file.file_name().and_then(|s| s.to_str()).unwrap_or("workflow.yaml");
