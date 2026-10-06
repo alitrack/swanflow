@@ -880,7 +880,7 @@ impl DuckDBWriteSinkExec {
                         "BEGIN TRANSACTION;\n\
                          CREATE TABLE IF NOT EXISTS \"{}\" AS \
                          SELECT * FROM read_parquet('{}') LIMIT 0;\n\
-                         INSERT INTO \"{}\" SELECT * FROM read_parquet('{}');",
+                         INSERT INTO \"{}\" BY NAME SELECT * FROM read_parquet('{}');",
                         safe_table, tmp, safe_table, tmp
                     ))
                 };
@@ -906,7 +906,7 @@ impl DuckDBWriteSinkExec {
                             .join(" AND ");
                         conn.execute_batch(&format!(
                             "DELETE FROM \"{t}\" t WHERE EXISTS (SELECT 1 FROM read_parquet('{p}') s WHERE {cond});\n\
-                             INSERT INTO \"{t}\" SELECT * FROM read_parquet('{p}');\n\
+                             INSERT INTO \"{t}\" BY NAME SELECT * FROM read_parquet('{p}');\n\
                              COMMIT;",
                             t = safe_table,
                             p = tmp,

@@ -616,6 +616,27 @@ async fn handle_method(
                     status: None,
                 };
             }
+            // Validate every automation expression NOW — a parse error
+            // would otherwise be silently skipped every tick (invisible
+            // misconfiguration). Quoted forms like on_cron("*/5 * * * *")
+            // are supported.
+            for i in workflow.graph.node_indices() {
+                if let Some(dsl) = workflow.graph[i].config.get("automation").and_then(|v| v.as_str()) {
+                    if let Err(e) = crate::core::engine::automation::parse_automation(dsl) {
+                        return DaemonResponse {
+                            id: req.id.clone(),
+                            ok: Some(false),
+                            error: Some(format!(
+                                "node {} has an invalid automation condition: {e}",
+                                workflow.graph[i].id
+                            )),
+                            workflow_id: None,
+                            workflows: None,
+                            status: None,
+                        };
+                    }
+                }
+            }
             let wf_id = workflow.id;
             let n = workflow.name.clone();
             let mut w = watched.lock().await;

@@ -249,10 +249,21 @@ impl NodeBehavior for DuckDBWriteNode {
             let mut cols = Vec::new();
             for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                 match part.split_once(':') {
-                    Some((col, trunc)) => cols.push(crate::core::datasource::PartitionCol {
-                        column: col.trim().to_string(),
-                        trunc: Some(trunc.trim().to_string()),
-                    }),
+                    Some((col, trunc)) => {
+                        const UNITS: &[&str] = &[
+                            "year", "quarter", "month", "week", "day", "hour", "minute", "second",
+                        ];
+                        let u = trunc.trim();
+                        if !UNITS.contains(&u) {
+                            return Err(anyhow::anyhow!(
+                                "invalid partition_by unit '{u}' on '{col}': expected one of {UNITS:?}"
+                            ));
+                        }
+                        cols.push(crate::core::datasource::PartitionCol {
+                            column: col.trim().to_string(),
+                            trunc: Some(u.to_string()),
+                        })
+                    }
                     None => cols.push(crate::core::datasource::PartitionCol {
                         column: part.to_string(),
                         trunc: None,

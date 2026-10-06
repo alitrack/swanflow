@@ -70,6 +70,14 @@ pub fn parse_duration(s: &str) -> Result<u64, String> {
     if !num.is_empty() || !matched {
         return Err(format!("duration '{s}' must end in a unit (s/m/h/d)"));
     }
+    if total == 0 {
+        return Err(format!("duration '{s}' must be > 0 (0 would fire every tick)"));
+    }
+    // Consumers cast secs to i64 for chrono Duration — reject anything that
+    // would wrap (chrono's practical bound is i64::MAX milliseconds).
+    if total > i64::MAX as u64 / 1000 {
+        return Err(format!("duration '{s}' exceeds the representable range"));
+    }
     Ok(total)
 }
 
@@ -206,8 +214,12 @@ impl CronExpr {
         if now <= last_eval {
             return false;
         }
-        // Fast path: if now itself matches we're done.
-        if self.matches(&now.with_second(0).unwrap().with_nanosecond(0).unwrap()) {
+        // Fast path: the current minute matches AND its canonical fire time
+        // (second=0) is strictly after last_eval. Without the second check,
+        // two ticks inside the SAME minute both match (e.g. 12:00:05 then
+        // 12:00:35) and the 12:00 fire time is consumed twice.
+        let now_min = now.with_second(0).unwrap().with_nanosecond(0).unwrap();
+        if now_min > last_eval && self.matches(&now_min) {
             return true;
         }
         self.next_after(last_eval).map_or(false, |f| f <= now)
@@ -240,6 +252,23 @@ impl<'a> Lexer<'a> {
                 '&' | '|' | '!' | '(' | ')' => {
                     out.push(c.to_string());
                     lx.pos += 1;
+                }
+                '"' => {
+                    // Quoted argument (e.g. on_cron("*/5 * * * *")): the
+                    // docs use this form; keep spaces inside the token.
+                    lx.pos += 1;
+                    let start = lx.pos;
+                    while lx.pos < lx.src.len() && lx.src[lx.pos] != b'"' {
+                        lx.pos += 1;
+                    }
+                    if lx.pos >= lx.src.len() {
+                        return Err("unterminated quoted string".to_string());
+                    }
+                    let tok = std::str::from_utf8(&lx.src[start..lx.pos])
+                        .map_err(|_| "invalid utf8".to_string())?
+                        .to_string();
+                    out.push(format!("\"{tok}\""));
+                    lx.pos += 1; // closing quote
                 }
                 _ => {
                     let start = lx.pos;
@@ -363,17 +392,28 @@ impl CondParser {
                     return Err(format!("unknown atom '{tok}'"));
                 };
                 match tok.as_str() {
-                    "on_cron" => Ok(AutomationCondition::OnCron(CronExpr::parse(&arg)?)),
+                    "on_cron" => Ok(AutomationCondition::OnCron(CronExpr::parse(&unquote(&arg))?)),
                     "on_interval" => Ok(AutomationCondition::OnInterval {
-                        secs: parse_duration(&arg)?,
+                        secs: parse_duration(&unquote(&arg))?,
                     }),
                     "freshness_violated" => Ok(AutomationCondition::FreshnessViolated {
-                        max_lag_secs: parse_duration(&arg)?,
+                        max_lag_secs: parse_duration(&unquote(&arg))?,
                     }),
                     _ => Err(format!("unknown condition '{tok}'")),
                 }
             }
         }
+    }
+}
+
+/// Strip a balanced pair of surrounding double quotes, if present
+/// (lexer preserves them inside the token).
+fn unquote(s: &str) -> String {
+    let t = s.trim();
+    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        t[1..t.len() - 1].to_string()
+    } else {
+        t.to_string()
     }
 }
 
@@ -482,6 +522,36 @@ mod tests {
         assert!(!c.fires_between(at("2026-10-05 11:00:00"), at("2026-10-05 11:59:00")));
         // Boundary: fire exactly at now counts.
         assert!(c.fires_between(at("2026-10-05 10:30:00"), at("2026-10-05 11:00:00")));
+    }
+
+    #[test]
+    fn cron_same_minute_double_tick_does_not_refire() {
+        // Regression (codex review P0): two ticks inside the SAME matching
+        // minute must not consume the fire time twice. Tick 1 at 12:00:05
+        // fires and stamps last_ready=12:00:05; tick 2 at 12:00:35 must NOT
+        // fire again — 12:00 <= last_eval.
+        let c = CronExpr::parse("0 * * * *").unwrap();
+        let tick1 = at("2026-10-05 12:00:05");
+        assert!(c.fires_between(at("2026-10-05 11:30:00"), tick1));
+        // The daemon stamps last_ready = tick time (12:00:05):
+        let tick2 = at("2026-10-05 12:00:35");
+        assert!(!c.fires_between(tick1, tick2), "same-minute re-tick must not refire");
+        // ...and the next hour still fires normally.
+        assert!(c.fires_between(tick1, at("2026-10-05 13:00:10")));
+    }
+
+    #[test]
+    fn quoted_cron_and_duration_guards() {
+        // Documented form with quotes must parse (codex review P1).
+        assert!(parse_automation(r#"on_cron("*/5 * * * *")"#).is_ok());
+        assert!(parse_automation(r#"on_interval("30s")"#).is_ok());
+        // Mixed quoted/unquoted:
+        assert!(parse_automation(r#"on_cron("0 * * * *") | freshness_violated(10m)"#).is_ok());
+        // Unterminated quote errors:
+        assert!(parse_automation(r#"on_cron("*/5 * * * *)"#).is_err());
+        // 0s / oversized durations rejected (codex review P1):
+        assert!(parse_automation("on_interval(0s)").is_err());
+        assert!(parse_automation("on_interval(999999999999999999999d)").is_err());
     }
 
     // ---- parser precedence / errors ----
