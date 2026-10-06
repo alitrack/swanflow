@@ -461,16 +461,23 @@ async fn sensor_tick(
                 };
                 // Freshness input from the ledger — open per tick (short
                 // lived; the engine's record hook owns the write window).
-                let mat = crate::core::engine::assets::AssetLedger::open(std::path::Path::new(
-                    &crate::core::engine::default_cache_dir(),
-                ))
-                .ok()
-                .and_then(|l| l.last_materialized_at(node.id).ok().flatten());
+                // A failed open/read is tri-stated as "unavailable" (not
+                // "never ran") so FreshnessViolated skips instead of
+                // firing on missing data.
+                let mat_res = crate::core::engine::assets::AssetLedger::open(
+                    std::path::Path::new(&crate::core::engine::default_cache_dir()),
+                )
+                .and_then(|l| l.last_materialized_at(node.id));
+                let (mat, ledger_unavailable) = match mat_res {
+                    Ok(v) => (v, false),
+                    Err(_) => (None, true),
+                };
 
                 let ctx = EvalContext {
                     now,
                     last_materialized_at: mat,
                     last_eval_ready_at: ww.last_ready.get(&node.id).copied(),
+                    ledger_unavailable,
                 };
                 if evaluate(&cond, &ctx) {
                     ready_nodes.push(node.id);

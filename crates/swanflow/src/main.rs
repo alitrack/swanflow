@@ -721,6 +721,7 @@ async fn main() -> anyhow::Result<()> {
                                     now,
                                     last_materialized_at: None,
                                     last_eval_ready_at: Some(now),
+                                    ledger_unavailable: true, // no ledger in dry-run branch
                                 };
                                 if swanflow::core::engine::automation::evaluate(&cond, &ctx) {
                                     "🟢 ready".to_string()
@@ -759,7 +760,12 @@ async fn main() -> anyhow::Result<()> {
                     let (label, detail) = match swanflow::core::engine::automation::parse_automation(dsl) {
                         Err(e) => (format!("❌ parse error: {e}"), String::new()),
                         Ok(cond) => {
-                            let mat = ledger.last_materialized_at(node.id).ok().flatten();
+                            let ledger_unavailable = ledger.last_materialized_at(node.id).is_err();
+                            let mat = if ledger_unavailable {
+                                None
+                            } else {
+                                ledger.last_materialized_at(node.id).ok().flatten()
+                            };
                             let ctx = swanflow::core::engine::automation::EvalContext {
                                 now,
                                 last_materialized_at: mat,
@@ -768,6 +774,7 @@ async fn main() -> anyhow::Result<()> {
                                 // status display treat cron gating as open
                                 // since the daemon's last tick.
                                 last_eval_ready_at: Some(now),
+                                ledger_unavailable,
                             };
                             let lag = mat.map(|t| (now - t).num_minutes()).unwrap_or(i64::MAX);
                             let lag_s = if lag == i64::MAX { "never".into() } else { format!("{lag}m ago") };

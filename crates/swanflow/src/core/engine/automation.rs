@@ -431,6 +431,13 @@ pub struct EvalContext {
     /// Last time this condition evaluated ready (run or no-op) — gates
     /// on_cron / on_interval re-fire.
     pub last_eval_ready_at: Option<DateTime<Utc>>,
+    /// True when the asset ledger could not be read this tick (lock
+    /// contention, corrupt file, …). Tri-state: `last_materialized_at ==
+    /// None` + this flag distinguishes "never ran" from "can't tell".
+    /// FreshnessViolated must NOT fire on unavailable — that would run
+    /// workflows based on missing data; better to skip this tick and
+    /// retry.
+    pub ledger_unavailable: bool,
 }
 
 pub fn evaluate(cond: &AutomationCondition, ctx: &EvalContext) -> bool {
@@ -444,10 +451,19 @@ pub fn evaluate(cond: &AutomationCondition, ctx: &EvalContext) -> bool {
             let gate = ctx.last_eval_ready_at.unwrap_or(ctx.now - Duration::days(366));
             ctx.now - gate >= Duration::seconds(*secs as i64)
         }
-        AutomationCondition::FreshnessViolated { max_lag_secs } => match ctx.last_materialized_at {
-            None => true, // never materialized = maximally stale
-            Some(t) => ctx.now - t >= Duration::seconds(*max_lag_secs as i64),
-        },
+        AutomationCondition::FreshnessViolated { max_lag_secs } => {
+            if ctx.ledger_unavailable {
+                // Can't tell freshness without the ledger — "never ran"
+                // and "read failed" both surface as last_materialized_at
+                // == None upstream. Firing here would treat every lock
+                // hiccup as maximally stale. Skip; next tick retries.
+                return false;
+            }
+            match ctx.last_materialized_at {
+                None => true, // never materialized = maximally stale
+                Some(t) => ctx.now - t >= Duration::seconds(*max_lag_secs as i64),
+            }
+        }
         AutomationCondition::And(a, b) => evaluate(a, ctx) && evaluate(b, ctx),
         AutomationCondition::Or(a, b) => evaluate(a, ctx) || evaluate(b, ctx),
         AutomationCondition::Not(a) => !evaluate(a, ctx),
@@ -472,7 +488,34 @@ mod tests {
             now: at(now),
             last_materialized_at: mat.map(at),
             last_eval_ready_at: eval.map(at),
+            ledger_unavailable: false,
         }
+    }
+
+    #[test]
+    fn freshness_violated_does_not_fire_when_ledger_unavailable() {
+        // Tri-state: "never materialized" fires, "ledger unreadable" must
+        // not — a lock hiccup or corrupt file is not evidence of staleness.
+        let mut c = ctx("2026-10-06 12:00:00", None, None);
+        assert!(
+            evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c),
+            "never materialized (ledger readable) = maximally stale, fires"
+        );
+        c.ledger_unavailable = true;
+        assert!(
+            !evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c),
+            "ledger unavailable must NOT fire — skip this tick, retry next"
+        );
+        // With a known-good timestamp the flag is irrelevant (the read
+        // succeeded), but a failed read of an existing row still must not.
+        let mut c2 = ctx("2026-10-06 12:00:00", Some("2026-10-06 11:00:00"), None);
+        c2.ledger_unavailable = true;
+        assert!(
+            !evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c2),
+            "unavailable suppresses firing even if a stale copy leaked through"
+        );
+        // Non-freshness conditions are unaffected by the flag.
+        assert!(evaluate(&AutomationCondition::Eager, &c));
     }
 
     // ---- duration ----
