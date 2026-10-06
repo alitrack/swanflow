@@ -36,6 +36,11 @@ enum Commands {
         /// node mode annotations (loop/conditional/fan_out/collect + sub_workflow)
         #[arg(long)]
         legacy_yaml: bool,
+
+        /// ADR-014 Stage 1: reuse cached parquet materializations when the
+        /// digest chain is unchanged (equivalent to SWANFLOW_SKIP_FRESH=1)
+        #[arg(long)]
+        skip_fresh: bool,
     },
     /// Inspect a workflow's inferred schemas without executing it
     Inspect {
@@ -380,7 +385,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file, legacy_yaml } => {
+        Commands::Run { file, legacy_yaml, skip_fresh } => {
             let workflow = load_workflow(file)?;
             println!(
                 "🚀 Loading Workflow: {} (ID: {})",
@@ -388,7 +393,7 @@ async fn main() -> anyhow::Result<()> {
             );
 
             let registry = Arc::new(NodeRegistry::default());
-            let engine = SwanFlowEngine::new(registry);
+            let engine = SwanFlowEngine::new(registry).with_skip_fresh(skip_fresh);
 
             let mut rx = if legacy_yaml {
                 engine.execute_yaml_workflow(&workflow).await?

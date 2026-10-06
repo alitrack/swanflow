@@ -1401,6 +1401,36 @@ async fn write_response(
 mod watched_persistence_tests {
     use super::*;
 
+    /// Serializes tests that mutate the process-global SWANFLOW_CACHE_DIR.
+    /// Parallel #[test]s racing on set_var made load_watched_entries read
+    /// the WRONG dir (observed flaky); a module-level mutex keeps them
+    /// exclusive without new deps.
+    static ENV_MUX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard: hold the env lock, set the dir, restore on drop.
+    struct EnvDir<'a> {
+        prev: Option<String>,
+        _g: std::sync::MutexGuard<'a, ()>,
+    }
+
+    impl<'a> EnvDir<'a> {
+        fn set(dir: &str) -> Self {
+            let g = ENV_MUX.lock().unwrap_or_else(|p| p.into_inner());
+            let prev = std::env::var("SWANFLOW_CACHE_DIR").ok();
+            std::env::set_var("SWANFLOW_CACHE_DIR", dir);
+            Self { prev, _g: g }
+        }
+    }
+
+    impl Drop for EnvDir<'_> {
+        fn drop(&mut self) {
+            match self.prev.clone() {
+                Some(v) => std::env::set_var("SWANFLOW_CACHE_DIR", v),
+                None => std::env::remove_var("SWANFLOW_CACHE_DIR"),
+            }
+        }
+    }
+
     fn sample_entry(path: &str, wf_id: &str) -> WatchedEntry {
         let mut last_ready = std::collections::BTreeMap::new();
         last_ready.insert(
@@ -1446,8 +1476,7 @@ mod watched_persistence_tests {
             .join(format!("swanflow-watched-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("watched.json"), "{not valid json").unwrap();
-        let prev = std::env::var("SWANFLOW_CACHE_DIR").ok();
-        std::env::set_var("SWANFLOW_CACHE_DIR", &dir);
+        let _env = EnvDir::set(dir.to_str().unwrap());
 
         // 1. Garbage file -> empty list, no panic.
         assert!(load_watched_entries().is_empty());
@@ -1511,26 +1540,21 @@ mod watched_persistence_tests {
             .unwrap();
         assert_eq!(*restored, ts);
 
-        match prev {
-            Some(v) => std::env::set_var("SWANFLOW_CACHE_DIR", v),
-            None => std::env::remove_var("SWANFLOW_CACHE_DIR"),
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn concurrent_saves_never_lose_state() {
+        let dir = std::env::temp_dir().join(format!("swanflow_watched_race_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         // codex-review P1 (r2): concurrent save_watched_entries callers
         // used to share one .tmp path and could rename a STALE snapshot
         // over a newer persisted state. With SAVE_MUTEX + unique tmp
         // names + rename-time re-check, racing savers must converge to
         // the NEWEST list. Here: 8 tasks each add their own workflow
         // then save concurrently; the file must finally contain all 8.
-        let dir = std::env::temp_dir().join(format!("swanflow_watched_race_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var("SWANFLOW_CACHE_DIR").ok();
-        unsafe { std::env::set_var("SWANFLOW_CACHE_DIR", dir.to_str().unwrap()) };
+        let _env = EnvDir::set(dir.to_str().unwrap());
 
         let watched: Arc<Mutex<Vec<WatchedWorkflow>>> = Arc::new(Mutex::new(Vec::new()));
         let mut handles = Vec::new();
@@ -1567,10 +1591,6 @@ mod watched_persistence_tests {
             .collect();
         assert!(leftovers.is_empty(), "tmp files left behind: {leftovers:?}");
 
-        match prev {
-            Some(v) => std::env::set_var("SWANFLOW_CACHE_DIR", v),
-            None => std::env::remove_var("SWANFLOW_CACHE_DIR"),
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1646,8 +1666,7 @@ mod watched_persistence_tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var("SWANFLOW_CACHE_DIR").ok();
-        unsafe { std::env::set_var("SWANFLOW_CACHE_DIR", dir.to_str().unwrap()) };
+        let _env = EnvDir::set(dir.to_str().unwrap());
 
         let watched: Arc<Mutex<Vec<WatchedWorkflow>>> = Arc::new(Mutex::new(Vec::new()));
         let wf_id = uuid::Uuid::new_v4();
@@ -1705,10 +1724,6 @@ mod watched_persistence_tests {
         let entries = load_watched_entries();
         assert!(entries.is_empty(), "watched.json must show removal: {entries:?}");
 
-        match prev {
-            Some(v) => std::env::set_var("SWANFLOW_CACHE_DIR", v),
-            None => std::env::remove_var("SWANFLOW_CACHE_DIR"),
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

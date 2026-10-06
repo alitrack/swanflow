@@ -160,6 +160,11 @@ pub struct SwanFlowEngine {
     pub max_rows_per_node: u64,
     /// Max cache directory size in MB before eviction (0 = unlimited).
     pub max_cache_size_mb: u64,
+    /// ADR-014 Stage 1: reuse cached parquet materializations when the
+    /// digest chain is unchanged instead of re-executing. Opt-in —
+    /// resolved once from the CLI flag (`--skip-fresh`, highest) or the
+    /// legacy env var `SWANFLOW_SKIP_FRESH=1`.
+    pub skip_fresh: bool,
 }
 
 async fn sync_metadata_to_context(ctx: &Arc<SessionContext>, cache_dir: &str) {
@@ -337,7 +342,18 @@ impl SwanFlowEngine {
             node_timeout_seconds: 3600, // default 1 hour timeout
             max_rows_per_node: 10_000_000, // default 10M rows per node
             max_cache_size_mb: 1024, // default 1GB cache limit
+            skip_fresh: std::env::var("SWANFLOW_SKIP_FRESH")
+                .map(|v| v == "1")
+                .unwrap_or(false),
         }
+    }
+
+    /// Opt in to ADR-014 Stage 1 skip-if-fresh reuse. ORs with the
+    /// `SWANFLOW_SKIP_FRESH=1` env default — the CLI flag must not
+    /// clobber an env opt-in when absent.
+    pub fn with_skip_fresh(mut self, skip: bool) -> Self {
+        self.skip_fresh = skip || self.skip_fresh;
+        self
     }
 
     /// Create an engine with DuckDB as the query backend.
@@ -710,6 +726,7 @@ impl SwanFlowEngine {
         let workflow_pred_ids = Arc::new(wf_pred_map);
         let df_total_levels = stages.len();
         let df_max_cache = self.max_cache_size_mb;
+        let df_skip_fresh = self.skip_fresh;
 
         // ADR-014 Stage 1: node_id -> (self config, upstream tuples) for
         // asset digest computation at run-record time.
@@ -913,12 +930,10 @@ impl SwanFlowEngine {
                     // ── ADR-014 Stage 1: skip-if-fresh ─────────────────────
                     // When the node's digest chain is unchanged AND a cached
                     // parquet materialization exists, reuse it instead of
-                    // re-executing. Only enabled via SWANFLOW_SKIP_FRESH=1
-                    // (opt-in until proven in the wild).
-                    if std::env::var("SWANFLOW_SKIP_FRESH")
-                        .map(|v| v == "1")
-                        .unwrap_or(false)
-                    {
+                    // re-executing. Opt-in: `--skip-fresh` CLI flag or the
+                    // legacy SWANFLOW_SKIP_FRESH=1 env (resolved once at
+                    // engine construction).
+                    if df_skip_fresh {
                         let empty_cfg = String::new();
                         let empty_ups: Vec<(Uuid, String, String)> = Vec::new();
                         let (cfg, ups): (&String, &Vec<(Uuid, String, String)>) =
@@ -1439,6 +1454,7 @@ impl SwanFlowEngine {
                             node_timeout_seconds: yaml_timeout_secs,
                             max_rows_per_node: 0, // unlimited for sub-workflow (parent applies limits)
                             max_cache_size_mb: 0, // unlimited for sub-workflow
+                            skip_fresh: false, // sub-workflows re-execute (parent already reused)
                         };
 
                         match sub_engine.execute_workflow(sub_wf).await {
