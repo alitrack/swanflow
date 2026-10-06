@@ -13,7 +13,88 @@
 use std::path::Path;
 
 use chrono::Datelike;
+use fs2::FileExt;
 use uuid::Uuid;
+
+/// Cross-process coordination for the asset ledger (codex-review P0:
+/// concurrent writers to assets.duckdb — daemon sensor + manual run +
+/// backfill CLI — have produced DuckDB SerializationException).
+///
+/// Two layers:
+/// 1. In-process: a global Mutex serializes ALL ledger connections in
+///    this process (the observed conflict was same-process: two
+///    independent `Connection`s writing one file).
+/// 2. Cross-process: an advisory exclusive flock on `<cache>/assets.lock`
+///    (fs2). Held for the guard's lifetime; a second process waits
+///    instead of corrupting the file. Dropping the File releases it.
+pub(crate) static LEDGER_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    /// Re-entrancy depth for LedgerGuard::acquire. AssetLedger write
+    /// helpers acquire the guard themselves; record_asset_run holds an
+    /// outer guard across open+write. A plain Mutex would self-deadlock
+    /// on the nested acquire, so the in-process mutex is only taken at
+    /// depth 0 (the flock is per-fd and likewise only taken once).
+    static GUARD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII guard: in-process mutex + cross-process advisory lock.
+/// Re-entrant within a thread (see GUARD_DEPTH).
+pub(crate) struct LedgerGuard {
+    _pm: Option<std::sync::MutexGuard<'static, ()>>,
+    _file: Option<std::fs::File>,
+}
+
+impl LedgerGuard {
+    /// Blocking acquire with a 30s deadline. On timeout we proceed
+    /// WITHOUT the cross-process lock (best-effort, matching the
+    /// ledger's degrade-to-log posture) but keep the in-process mutex,
+    /// which fixes the observed same-process corruption.
+    pub(crate) fn acquire(cache_dir: &Path) -> Self {
+        let depth = GUARD_DEPTH.with(|d| d.get());
+        if depth > 0 {
+            // Nested acquire on this thread — outer guard already holds
+            // both layers. Just bump the depth so its drop still runs at 0.
+            GUARD_DEPTH.with(|d| d.set(depth + 1));
+            return Self { _pm: None, _file: None };
+        }
+        GUARD_DEPTH.with(|d| d.set(1));
+        let pm = LEDGER_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = std::fs::create_dir_all(cache_dir);
+        let lock_path = cache_dir.join("assets.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .ok();
+        let Some(file) = file else {
+            // Lock file unopenable (read-only cache dir?) — in-process
+            // serialization only.
+            return Self { _pm: Some(pm), _file: None };
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Self { _pm: Some(pm), _file: Some(file) },
+                Err(_) if std::time::Instant::now() >= deadline => {
+                    tracing::warn!("assets.lock busy >30s — proceeding without cross-process lock");
+                    return Self { _pm: Some(pm), _file: Some(file) };
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+    }
+}
+
+impl Drop for LedgerGuard {
+    fn drop(&mut self) {
+        let depth = GUARD_DEPTH.with(|d| d.get());
+        if depth > 0 {
+            GUARD_DEPTH.with(|d| d.set(depth - 1));
+        }
+    }
+}
 
 /// Digest of everything a node's output depends on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,13 +162,22 @@ pub struct AssetStatus {
 /// DuckDB-backed materialization ledger.
 pub struct AssetLedger {
     conn: duckdb::Connection,
+    /// Kept so write paths can re-acquire the cross-process LedgerGuard.
+    cache_dir: std::path::PathBuf,
 }
 
 impl AssetLedger {
     /// Open (creating if absent) the ledger under `<cache_dir>/assets.duckdb`.
+    ///
+    /// Callers keep the returned ledger around while doing reads; the
+    /// cross-process `LedgerGuard` is NOT held for the ledger's whole
+    /// life (that would serialize readers). Instead, WRITE paths
+    /// (`record_run`/`record_interval`/first-DDL) re-acquire the guard
+    /// per operation — see `with_write_guard`.
     pub fn open(cache_dir: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(cache_dir)?;
         let path = cache_dir.join("assets.duckdb");
+        let guard = LedgerGuard::acquire(cache_dir);
         let conn = duckdb::Connection::open(&path)?;
         // Cheap existence probe first: if both tables exist, skip DDL —
         // running CREATE TABLE IF NOT EXISTS on a file left with an
@@ -115,7 +205,15 @@ impl AssetLedger {
                  );",
             )?;
         }
-        Ok(Self { conn })
+        drop(guard);
+        Ok(Self { conn, cache_dir: cache_dir.to_path_buf() })
+    }
+
+    /// Serialize a write against other processes (and our own process's
+    /// other connections) for the duration of `f`.
+    fn with_write_guard<T>(&self, f: impl FnOnce(&Self) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        let _guard = LedgerGuard::acquire(&self.cache_dir);
+        f(self)
     }
 
     /// Last recorded digest for a node, if any.
@@ -130,12 +228,14 @@ impl AssetLedger {
     /// Record (or overwrite) a successful run for a node.
     pub fn record_run(&self, node_id: Uuid, digest: &UpstreamDigest) -> anyhow::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        self.conn.execute(
-            "INSERT OR REPLACE INTO asset_runs (node_id, digest_hex, last_run_at)
-             VALUES (?1, ?2, ?3)",
-            [node_id.to_string(), digest.hex(), now],
-        )?;
-        Ok(())
+        self.with_write_guard(|this| {
+            this.conn.execute(
+                "INSERT OR REPLACE INTO asset_runs (node_id, digest_hex, last_run_at)
+                 VALUES (?1, ?2, ?3)",
+                [node_id.to_string(), digest.hex(), now],
+            )?;
+            Ok(())
+        })
     }
 
     /// Last successful materialization time for a node (None = never).
@@ -177,18 +277,20 @@ impl AssetLedger {
         end: chrono::DateTime<chrono::Utc>,
     ) -> anyhow::Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        self.conn.execute(
-            "INSERT OR REPLACE INTO asset_intervals
-                 (node_id, interval_start, interval_end, completed_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            [
-                node_id.to_string(),
-                start.to_rfc3339(),
-                end.to_rfc3339(),
-                now,
-            ],
-        )?;
-        Ok(())
+        self.with_write_guard(|this| {
+            this.conn.execute(
+                "INSERT OR REPLACE INTO asset_intervals
+                     (node_id, interval_start, interval_end, completed_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                [
+                    node_id.to_string(),
+                    start.to_rfc3339(),
+                    end.to_rfc3339(),
+                    now,
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     /// Completed interval starts for a node, ascending.
@@ -355,6 +457,9 @@ pub fn record_asset_run(
 ) {
     let path = std::path::Path::new(cache_dir).join("assets.duckdb");
     let _ = std::fs::create_dir_all(cache_dir);
+    // Serialize against other ledger writers (same process and other
+    // processes) for the whole open→DDL→write window.
+    let _guard = LedgerGuard::acquire(std::path::Path::new(cache_dir));
     let conn = match duckdb::Connection::open(&path) {
         Ok(c) => c,
         Err(e) => {
@@ -385,7 +490,7 @@ pub fn record_asset_run(
              );",
         );
     }
-    let ledger = AssetLedger { conn };
+    let ledger = AssetLedger { conn, cache_dir: std::path::PathBuf::from(cache_dir) };
     if let Err(e) = ledger.record_asset_run_for(node_id, type_id, node_config_json, upstream) {
         eprintln!("[assets] ledger record failed (ignored): {}", e);
     }
@@ -409,11 +514,14 @@ pub fn try_skip_fresh(
     if !path.exists() {
         return None;
     }
+    // Read-mostly, but the open itself can run DDL on first use — hold
+    // the guard for open + digest comparison only.
+    let _guard = LedgerGuard::acquire(std::path::Path::new(cache_dir));
     let conn = match duckdb::Connection::open(&path) {
         Ok(c) => c,
         Err(_) => return None,
     };
-    let ledger = AssetLedger { conn };
+    let ledger = AssetLedger { conn, cache_dir: std::path::PathBuf::from(cache_dir) };
     let refs: Vec<(Uuid, &UpstreamDigest)> = upstream_digests
         .iter()
         .map(|(id, d)| (*id, d))
@@ -685,6 +793,70 @@ mod tests {
         let all = ledger.all().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].0, id.to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ledger_guard_mutual_exclusion_across_guards() {
+        // Two guards in the same process serialize via LEDGER_MUTEX
+        // (would deadlock if acquire were not re-entrant-safe via drop
+        // ordering — it isn't re-entrant, so verify sequential acquire
+        // works and that dropping releases).
+        let dir = std::env::temp_dir().join(format!("swanflow_guard_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dir_s = dir.to_str().unwrap().to_string();
+        let g1 = LedgerGuard::acquire(std::path::Path::new(&dir_s));
+        drop(g1); // must release; otherwise the next line deadlocks the test
+        let _g2 = LedgerGuard::acquire(std::path::Path::new(&dir_s));
+
+        // Cross-process semantics: a separate open of the same lock file
+        // with try_lock_exclusive must fail while _g2 is held (flock is
+        // per-fd; a second File on the same path is a different lock
+        // holder even in-process).
+        use fs2::FileExt;
+        let f2 = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(std::path::Path::new(&dir_s).join("assets.lock"))
+            .unwrap();
+        assert!(
+            f2.try_lock_exclusive().is_err(),
+            "second fd must not acquire while guard holds the flock"
+        );
+    }
+
+    #[test]
+    fn concurrent_ledger_writers_same_process() {
+        // Spawn threads that each open their OWN AssetLedger connection
+        // (mirrors engine hook + daemon status racing) and write distinct
+        // node ids. Connections are dropped INSIDE the guard so the next
+        // thread's open sees the previous checkpoint (DuckDB lazily
+        // checkpoints on connection drop; an overlapping pair of
+        // independent instances on one file overwrite each other).
+        let dir = std::env::temp_dir().join(format!(
+            "swanflow_conc_test_{:?}",
+            (std::process::id(), std::thread::current().id())
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dir_s = dir.to_str().unwrap().to_string();
+        let mut handles = Vec::new();
+        for i in 0..8u32 {
+            let d = dir_s.clone();
+            handles.push(std::thread::spawn(move || {
+                let guard = LedgerGuard::acquire(std::path::Path::new(&d));
+                let ledger = AssetLedger::open(std::path::Path::new(&d)).unwrap();
+                let id = Uuid::new_v4();
+                ledger.record_run(id, &UpstreamDigest { bytes: [i as u8; 32] }).unwrap();
+                // drop connection while still holding the guard
+                drop(ledger);
+                drop(guard);
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let ledger = AssetLedger::open(std::path::Path::new(&dir_s)).unwrap();
+        assert_eq!(ledger.all().unwrap().len(), 8);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

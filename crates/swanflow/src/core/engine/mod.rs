@@ -266,7 +266,27 @@ impl SwanFlowEngine {
 
         // Initialize metadata table in DuckDB directly
         let metadata_path = format!("{}/metadata.duckdb", cache_dir);
-        let conn = Connection::open(&metadata_path).expect("Failed to open DuckDB metadata");
+        // metadata.duckdb is single-writer across processes (DuckDB file
+        // lock). A concurrent run holds the lock for its whole engine
+        // lifetime, so retry with backoff instead of panicking — runs on
+        // one cache dir serialize rather than crash.
+        let conn = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            loop {
+                match Connection::open(&metadata_path) {
+                    Ok(c) => break c,
+                    Err(e) => {
+                        if std::time::Instant::now() >= deadline {
+                            panic!(
+                                "Failed to open DuckDB metadata after 120s (another swanflow \
+                                 process may be holding {metadata_path}): {e}"
+                            );
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                }
+            }
+        };
         conn.execute(
             "CREATE TABLE IF NOT EXISTS flow_metadata (
                 node_id TEXT PRIMARY KEY,

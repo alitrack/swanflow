@@ -71,6 +71,7 @@ hex = "0.4"
 redis = { version = "0.24", optional = true, features = ["tokio-comp"] }
 tokio-util = { version = "0.7.18", features = ["codec", "compat"] }
 swanflow-ai = { path = "../swanflow-ai", optional = true }
+fs2 = "0.4.3"
 
 [features]
 default = []
