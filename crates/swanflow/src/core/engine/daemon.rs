@@ -188,7 +188,7 @@ pub struct WatchedWorkflow {
 }
 
 /// Serializable form of one watched-workflow entry in watched.json.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
 struct WatchedEntry {
     path: String,
     workflow_id: String,
@@ -229,52 +229,103 @@ fn load_watched_entries() -> Vec<WatchedEntry> {
     }
 }
 
+/// Serialize watched.json persistence across concurrent callers (sensor
+/// tick racing register/unregister). Held for snapshot-check → write →
+/// rename so no stale snapshot can overwrite a newer persisted state.
+static SAVE_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Monotonic counter for unique temp-file names: two concurrent saves
+/// must never share a `.tmp` path (one's fsync+rename could act on the
+/// other's half-written file even with SAVE_MUTEX, e.g. across processes).
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Snapshot the watched list into its serializable form.
+async fn snapshot_entries(watched: &Arc<Mutex<Vec<WatchedWorkflow>>>) -> Vec<WatchedEntry> {
+    let w = watched.lock().await;
+    w.iter()
+        .filter_map(|ww| {
+            let path = ww.path.as_ref()?;
+            Some(WatchedEntry {
+                path: path.to_string_lossy().to_string(),
+                workflow_id: ww.workflow.id.to_string(),
+                last_ready: ww
+                    .last_ready
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), *v))
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
 /// Persist the watched list to watched.json (best-effort — a write failure
-/// is logged, never fatal: the in-memory list stays authoritative).
+/// is logged, never fatal).
+///
+/// codex-review P1 (r2): two races fixed here.
+/// 1. Fixed tmp name: concurrent savers shared `watched.json.tmp`; one
+///    could fsync/rename the other's half-written file. Now unique per
+///    call (pid + counter).
+/// 2. Stale overwrite: caller A snapshots, caller B mutates+saves, A
+///    renames its older snapshot over B's newer state. SAVE_MUTEX
+///    serializes the whole write; additionally the snapshot is re-taken
+///    under the file lock, and re-checked right before rename — if the
+///    live list moved on, we persist the NEWER state instead.
 async fn save_watched_entries(watched: &Arc<Mutex<Vec<WatchedWorkflow>>>) {
     let Some(p) = watched_registry_path() else {
         return;
     };
-    let entries: Vec<WatchedEntry> = {
-        let w = watched.lock().await;
-        w.iter()
-            .filter_map(|ww| {
-                let path = ww.path.as_ref()?;
-                Some(WatchedEntry {
-                    path: path.to_string_lossy().to_string(),
-                    workflow_id: ww.workflow.id.to_string(),
-                    last_ready: ww
-                        .last_ready
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), *v))
-                        .collect(),
-                })
-            })
-            .collect()
-    };
+    let _file_lock = SAVE_MUTEX.lock().await;
+    let mut entries = snapshot_entries(watched).await;
     if let Some(parent) = p.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
-    match serde_json::to_string_pretty(&entries) {
-        Ok(text) => {
-            // Atomic replace: write temp + fsync + rename. A crash mid-write
-            // must never leave a truncated watched.json (it would silently
-            // drop every watch on daemon restart).
-            let tmp = p.with_extension("json.tmp");
-            match tokio::fs::write(&tmp, &text).await {
-                Ok(()) => {
-                    if let Ok(f) = tokio::fs::File::open(&tmp).await {
-                        drop(f.sync_all().await);
+    let tmp = p.with_extension(format!(
+        "json.tmp.{}.{}",
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    for _attempt in 0..3 {
+        match serde_json::to_string_pretty(&entries) {
+            Ok(text) => {
+                // Atomic replace: write temp + fsync + rename. A crash mid-write
+                // must never leave a truncated watched.json (it would silently
+                // drop every watch on daemon restart).
+                match tokio::fs::write(&tmp, &text).await {
+                    Ok(()) => {
+                        if let Ok(f) = tokio::fs::File::open(&tmp).await {
+                            drop(f.sync_all().await);
+                        }
+                        // Stale-overwrite guard: if the live list changed since
+                        // our snapshot, persist the newer state instead of
+                        // renaming ours over it.
+                        let latest = snapshot_entries(watched).await;
+                        if latest != entries {
+                            tracing::debug!(
+                                "watched.json: list changed during save — persisting newer state"
+                            );
+                            entries = latest;
+                            continue; // rewrite tmp with the newer snapshot
+                        }
+                        if let Err(e) = tokio::fs::rename(&tmp, &p).await {
+                            tracing::warn!("failed to persist watched.json: {e}");
+                        }
+                        return;
                     }
-                    if let Err(e) = tokio::fs::rename(&tmp, &p).await {
+                    Err(e) => {
                         tracing::warn!("failed to persist watched.json: {e}");
+                        return;
                     }
                 }
-                Err(e) => tracing::warn!("failed to persist watched.json: {e}"),
+            }
+            Err(e) => {
+                tracing::warn!("failed to serialize watched.json: {e}");
+                return;
             }
         }
-        Err(e) => tracing::warn!("failed to serialize watched.json: {e}"),
     }
+    // Loop exhausted: three snapshot churns in a row — give up rather
+    // than spin; next mutation will save again.
+    let _ = tokio::fs::remove_file(&tmp).await;
 }
 
 impl Daemon {
@@ -1330,6 +1381,60 @@ mod watched_persistence_tests {
             .get("11111111-2222-3333-4444-555555555555")
             .unwrap();
         assert_eq!(*restored, ts);
+
+        match prev {
+            Some(v) => std::env::set_var("SWANFLOW_CACHE_DIR", v),
+            None => std::env::remove_var("SWANFLOW_CACHE_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_saves_never_lose_state() {
+        // codex-review P1 (r2): concurrent save_watched_entries callers
+        // used to share one .tmp path and could rename a STALE snapshot
+        // over a newer persisted state. With SAVE_MUTEX + unique tmp
+        // names + rename-time re-check, racing savers must converge to
+        // the NEWEST list. Here: 8 tasks each add their own workflow
+        // then save concurrently; the file must finally contain all 8.
+        let dir = std::env::temp_dir().join(format!("swanflow_watched_race_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = std::env::var("SWANFLOW_CACHE_DIR").ok();
+        unsafe { std::env::set_var("SWANFLOW_CACHE_DIR", dir.to_str().unwrap()) };
+
+        let watched: Arc<Mutex<Vec<WatchedWorkflow>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+        for i in 0..8u32 {
+            let w = watched.clone();
+            handles.push(tokio::spawn(async move {
+                let mut wf = Workflow::default();
+                wf.id = uuid::Uuid::new_v4();
+                wf.name = format!("racer-{i}");
+                w.lock().await.push(WatchedWorkflow {
+                    workflow: wf,
+                    last_ready: HashMap::new(),
+                    path: Some(std::path::PathBuf::from(format!("/tmp/racer-{i}.yaml"))),
+                    generation: i as u64 + 1,
+                });
+                save_watched_entries(&w).await;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Final ground truth: file must reflect the FULL in-memory list.
+        save_watched_entries(&watched).await;
+        let entries = load_watched_entries();
+        assert_eq!(entries.len(), 8, "all 8 watches must survive: {entries:?}");
+        // No leftover tmp files.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp files left behind: {leftovers:?}");
 
         match prev {
             Some(v) => std::env::set_var("SWANFLOW_CACHE_DIR", v),
