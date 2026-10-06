@@ -40,6 +40,12 @@ thread_local! {
     /// on the nested acquire, so the in-process mutex is only taken at
     /// depth 0 (the flock is per-fd and likewise only taken once).
     static GUARD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Identity of the cache dir the OUTERMOST guard locked (canonical
+    /// path). Nested acquires must target the SAME cache — a nested
+    /// guard for a different dir would inherit "exclusive" and write a
+    /// ledger its flock does not cover (codex-review P2 r2).
+    static GUARD_CACHE_KEY: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
     /// Whether the OUTERMOST guard on this thread actually holds the
     /// cross-process flock. Nested guards inherit this value; write
     /// paths refuse to proceed when it is false (codex-review P0:
@@ -77,16 +83,31 @@ impl LedgerGuard {
         if depth > 0 {
             // Nested acquire on this thread — outer guard owns both
             // layers; inherit its exclusivity so inner write checks see
-            // the outer truth.
+            // the outer truth. BUT only when it guards the SAME cache:
+            // a nested guard for a different cache dir would inherit
+            // "exclusive" and write a ledger its flock does not cover.
+            // Degrade to non-exclusive (write refused) instead.
+            let same_cache = GUARD_CACHE_KEY
+                .with(|k| k.borrow().as_ref().map(|c| c == cache_dir).unwrap_or(false));
+            let inherited_exclusive = if same_cache {
+                GUARD_EXCLUSIVE.with(|e| e.get())
+            } else {
+                tracing::error!(
+                    "nested LedgerGuard targets a different cache dir ({}) than the outer guard — treating as non-exclusive (write refused)",
+                    cache_dir.display()
+                );
+                false
+            };
             GUARD_DEPTH.with(|d| d.set(depth + 1));
             return Self {
                 _pm: None,
                 _file: None,
-                exclusive: GUARD_EXCLUSIVE.with(|e| e.get()),
+                exclusive: inherited_exclusive,
             };
         }
         GUARD_DEPTH.with(|d| d.set(1));
         GUARD_EXCLUSIVE.with(|e| e.set(false));
+        GUARD_CACHE_KEY.with(|k| *k.borrow_mut() = Some(cache_dir.to_path_buf()));
         let pm = LEDGER_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let _ = std::fs::create_dir_all(cache_dir);
         let lock_path = cache_dir.join("assets.lock");
@@ -129,6 +150,7 @@ impl Drop for LedgerGuard {
             GUARD_DEPTH.with(|d| d.set(depth - 1));
             if depth == 1 {
                 GUARD_EXCLUSIVE.with(|e| e.set(false));
+                GUARD_CACHE_KEY.with(|k| *k.borrow_mut() = None);
             }
         }
     }
@@ -1138,5 +1160,60 @@ mod tests {
         let ledger = AssetLedger::open(std::path::Path::new(&dir_s)).unwrap();
         assert_eq!(ledger.all().unwrap().len(), 8);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nested_guard_cache_identity() {
+        // codex-review P2 (r2): a nested LedgerGuard for a DIFFERENT cache
+        // dir used to blindly inherit the outer guard's exclusivity —
+        // writing a ledger the outer flock does not cover. It must be
+        // degraded to non-exclusive (write refused) instead, while a
+        // nested guard on the SAME cache still inherits.
+        let base = std::env::temp_dir().join(format!(
+            "swanflow_nest_{}",
+            std::process::id()
+        ));
+        let dir_a = base.join("a");
+        let dir_b = base.join("b");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        // Outer guard on A, properly acquired.
+        let outer = LedgerGuard::acquire_with_deadline(
+            &dir_a,
+            std::time::Duration::from_secs(5),
+        );
+        assert!(outer.exclusive());
+
+        // Nested guard, same cache -> inherits exclusivity.
+        let same = LedgerGuard::acquire_with_deadline(
+            &dir_a,
+            std::time::Duration::from_millis(50),
+        );
+        assert!(same.exclusive(), "same-cache nested guard must inherit");
+        drop(same);
+
+        // Nested guard, DIFFERENT cache -> must NOT inherit.
+        let cross = LedgerGuard::acquire_with_deadline(
+            &dir_b,
+            std::time::Duration::from_millis(50),
+        );
+        assert!(
+            !cross.exclusive(),
+            "cross-cache nested guard must be non-exclusive (write refused)"
+        );
+        drop(cross);
+        drop(outer);
+
+        // After the outer guard drops, a fresh guard on B acquires fine.
+        let fresh = LedgerGuard::acquire_with_deadline(
+            &dir_b,
+            std::time::Duration::from_millis(500),
+        );
+        assert!(fresh.exclusive(), "guard on B must acquire after outer dropped");
+        drop(fresh);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

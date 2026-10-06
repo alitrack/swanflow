@@ -717,11 +717,16 @@ async fn main() -> anyhow::Result<()> {
                         let label = match swanflow::core::engine::automation::parse_automation(dsl) {
                             Err(e) => format!("❌ parse error: {e}"),
                             Ok(cond) => {
+                                // The ledger FILE does not exist — that is a
+                                // definitive "never materialized" (maximally
+                                // stale), NOT an unreadable ledger. Only a
+                                // failed read of an existing file is
+                                // Unknown (codex-review P2 r2).
                                 let ctx = swanflow::core::engine::automation::EvalContext {
                                     now,
                                     last_materialized_at: None,
                                     last_eval_ready_at: Some(now),
-                                    ledger_unavailable: true, // no ledger in dry-run branch
+                                    ledger_unavailable: false,
                                 };
                                 match swanflow::core::engine::automation::evaluate(&cond, &ctx) {
                                     Some(true) => "🟢 ready".to_string(),
@@ -734,7 +739,43 @@ async fn main() -> anyhow::Result<()> {
                     }
                     return Ok(());
                 }
-                let ledger = AssetLedger::open(&cache_dir)?;
+                // Read-side degradation: a locked/busy ledger must not
+                // abort the whole status command (the old `?` exited the
+                // process with nothing shown). Show per-node unknown.
+                let ledger = match AssetLedger::open(&cache_dir) {
+                    Ok(l) => Some(l),
+                    Err(e) => {
+                        println!("⚠️  Asset ledger unavailable ({e}) — showing Unknown for freshness-dependent nodes.");
+                        None
+                    }
+                };
+                let Some(ledger) = ledger else {
+                    let now = chrono::Utc::now();
+                    for idx in workflow.graph.node_indices() {
+                        let node = &workflow.graph[idx];
+                        let Some(dsl) = node.config.get("automation").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let label = match swanflow::core::engine::automation::parse_automation(dsl) {
+                            Err(e) => format!("❌ parse error: {e}"),
+                            Ok(cond) => {
+                                let ctx = swanflow::core::engine::automation::EvalContext {
+                                    now,
+                                    last_materialized_at: None,
+                                    last_eval_ready_at: Some(now),
+                                    ledger_unavailable: true,
+                                };
+                                match swanflow::core::engine::automation::evaluate(&cond, &ctx) {
+                                    Some(true) => "🟢 ready".to_string(),
+                                    Some(false) => "⏸ hold".to_string(),
+                                    None => "❓ unknown (ledger unreadable)".to_string(),
+                                }
+                            }
+                        };
+                        println!("  ⚙️  {} automation: {dsl} — {label} (ledger locked or busy)", node.id);
+                    }
+                    return Ok(());
+                };
                 let rows = status_for_workflow(&ledger, &workflow)?;
                 let fresh = rows.iter().filter(|r| r.2 == swanflow::core::engine::assets::AssetVerdict::Fresh).count();
                 println!("{} node(s): {} fresh, {} action needed\n", rows.len(), fresh, rows.len() - fresh);
