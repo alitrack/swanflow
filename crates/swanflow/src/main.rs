@@ -313,6 +313,14 @@ enum DaemonCommands {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    /// List workflows registered with the daemon's automation sensor:
+    /// name, id, source path, generation, claim state and last-ready
+    /// timestamps.
+    Watched {
+        /// Custom socket path
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// List running workflows
     List {
         #[arg(long)]
@@ -1584,6 +1592,38 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             println!("{}", resp);
             Ok(())
         }
+        DaemonCommands::Watched { socket } => {
+            let resp = send_daemon_raw(&socket, "automation.list", serde_json::json!({})).await?;
+            // resp is the raw JSON DaemonResponse; pretty-print the
+            // watched rows as a compact table.
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp) {
+                if let Some(rows) = v.get("watched").and_then(|w| w.as_array()) {
+                    if rows.is_empty() {
+                        println!("No watched workflows.");
+                    }
+                    for r in rows {
+                        let name = r.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                        let id = r.get("workflow_id").and_then(|x| x.as_str()).unwrap_or("?");
+                        let path = r.get("path").and_then(|x| x.as_str()).unwrap_or("-");
+                        let gen = r.get("generation").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let pend = if r.get("pending_remove").and_then(|x| x.as_bool()).unwrap_or(false) { " [pending-remove]" } else { "" };
+                        let run = if r.get("running").and_then(|x| x.as_bool()).unwrap_or(false) { " [running]" } else { "" };
+                        println!("👁 {name}  ({id}){run}{pend}");
+                        println!("   path: {path}  generation: {gen}");
+                        if let Some(lr) = r.get("last_ready").and_then(|x| x.as_object()) {
+                            for (node, ts) in lr {
+                                println!("   last-ready {node}: {ts}");
+                            }
+                        }
+                    }
+                } else {
+                    println!("{}", resp);
+                }
+            } else {
+                println!("{}", resp);
+            }
+            Ok(())
+        }
         DaemonCommands::List { socket } => {
             let resp = send_daemon_raw(&socket, "workflow.list", serde_json::json!({})).await?;
             println!("{}", resp);
@@ -1671,6 +1711,9 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
         }
         DaemonCommands::Ping { .. } => {
             run_ssh(host, &["swanflow", "daemon", "ping"])?;
+        }
+        DaemonCommands::Watched { .. } => {
+            run_ssh(host, &["swanflow", "daemon", "watched"])?;
         }
         DaemonCommands::Watch { file, .. } => {
             let fname = file.file_name().and_then(|s| s.to_str()).unwrap_or("workflow.yaml");

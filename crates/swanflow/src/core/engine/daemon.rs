@@ -63,6 +63,8 @@ struct DaemonResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     workflows: Option<Vec<WorkflowInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    watched: Option<Vec<WatchedInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<WorkflowStatus>,
 }
 
@@ -74,6 +76,23 @@ struct WorkflowInfo {
     nodes_done: usize,
     nodes_error: usize,
     state: String, // "running" | "completed" | "error" | "cancelled"
+}
+
+/// One watched-workflow row for `automation.list` (daemon watched).
+#[derive(Debug, Serialize, Deserialize)]
+struct WatchedInfo {
+    workflow_id: String,
+    name: String,
+    /// Source file the entry was registered from (None = programmatic).
+    path: Option<String>,
+    /// Registration generation — bumps on re-watch; stale runs are dropped.
+    generation: u64,
+    /// True while an unregister is deferred behind a running sensor claim.
+    pending_remove: bool,
+    /// True while a sensor run holds this entry's claim.
+    running: bool,
+    /// node_id -> last time its automation evaluated ready.
+    last_ready: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -709,6 +728,7 @@ async fn handle_client(
                     error: Some(format!("Invalid JSON: {}", e)),
                     workflow_id: None,
                     workflows: None,
+                    watched: None,
                     status: None,
                 };
                 if let Err(e) = write_response(&mut writer, &resp).await {
@@ -734,6 +754,7 @@ async fn handle_client(
                     error: Some("Missing or invalid workflow_id".to_string()),
                     workflow_id: None,
                     workflows: None,
+                    watched: None,
                     status: None,
                 };
                 if let Err(e) = write_response(&mut writer, &resp).await {
@@ -771,6 +792,7 @@ async fn handle_method(
                     error: Some("Missing 'path' parameter".to_string()),
                     workflow_id: None,
                     workflows: None,
+                    watched: None,
                     status: None,
                 };
             }
@@ -785,6 +807,7 @@ async fn handle_method(
                         error: Some(format!("Failed to load workflow: {e}")),
                         workflow_id: None,
                         workflows: None,
+                        watched: None,
                         status: None,
                     }
                 }
@@ -800,6 +823,7 @@ async fn handle_method(
                     error: Some("Workflow has no nodes with an 'automation' condition".to_string()),
                     workflow_id: None,
                     workflows: None,
+                    watched: None,
                     status: None,
                 };
             }
@@ -818,6 +842,7 @@ async fn handle_method(
                             )),
                             workflow_id: None,
                             workflows: None,
+                            watched: None,
                             status: None,
                         };
                     }
@@ -839,6 +864,7 @@ async fn handle_method(
                             )),
                             workflow_id: None,
                             workflows: None,
+                            watched: None,
                             status: None,
                         };
                     }
@@ -881,6 +907,7 @@ async fn handle_method(
                 error: None,
                 workflow_id: Some(wf_id.to_string()),
                 workflows: None,
+                watched: None,
                 status: None,
             }
         }
@@ -891,6 +918,7 @@ async fn handle_method(
             error: None,
             workflow_id: None,
             workflows: None,
+            watched: None,
             status: None,
         },
 
@@ -913,6 +941,7 @@ async fn handle_method(
                     error: Some("Need 'path' or 'workflow_id' parameter".to_string()),
                     workflow_id: None,
                     workflows: None,
+                    watched: None,
                     status: None,
                 };
             }
@@ -975,6 +1004,7 @@ async fn handle_method(
                 },
                 workflow_id: wf_id.map(|id| id.to_string()),
                 workflows: None,
+                watched: None,
                 status: None,
             }
         }
@@ -988,6 +1018,7 @@ async fn handle_method(
                 error: None,
                 workflow_id: None,
                 workflows: None,
+                watched: None,
                 status: None,
             };
             tokio::spawn(async {
@@ -1014,6 +1045,7 @@ async fn handle_method(
                     error: Some("Missing 'path' parameter".to_string()),
                     workflow_id: None,
                     workflows: None,
+                    watched: None,
                     status: None,
                 };
             }
@@ -1025,6 +1057,7 @@ async fn handle_method(
                     error: None,
                     workflow_id: Some(wf_id.to_string()),
                     workflows: None,
+                    watched: None,
                     status: None,
                 },
                 Err(e) => DaemonResponse {
@@ -1033,8 +1066,41 @@ async fn handle_method(
                     error: Some(e.to_string()),
                     workflow_id: None,
                     workflows: None,
+                    watched: None,
                     status: None,
                 },
+            }
+        }
+
+        // ADR-014 Stage 3: list watched (sensor-registered) workflows with
+        // their generation, claim/pending_remove state and last_ready
+        // timestamps. No params.
+        "automation.list" => {
+            let w = watched.lock().await;
+            let list: Vec<WatchedInfo> = w
+                .iter()
+                .map(|e| WatchedInfo {
+                    workflow_id: e.workflow.id.to_string(),
+                    name: e.workflow.name.clone(),
+                    path: e.path.as_ref().map(|p| p.display().to_string()),
+                    generation: e.generation,
+                    pending_remove: e.pending_remove,
+                    running: e.running_claim.is_some(),
+                    last_ready: e
+                        .last_ready
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_rfc3339()))
+                        .collect(),
+                })
+                .collect();
+            DaemonResponse {
+                id: req.id.clone(),
+                ok: Some(true),
+                error: None,
+                workflow_id: None,
+                workflows: None,
+                watched: Some(list),
+                status: None,
             }
         }
 
@@ -1060,6 +1126,7 @@ async fn handle_method(
                 error: None,
                 workflow_id: None,
                 workflows: Some(list),
+                watched: None,
                 status: None,
             }
         }
@@ -1082,6 +1149,7 @@ async fn handle_method(
                             error: None,
                             workflow_id: None,
                             workflows: None,
+                            watched: None,
                             status: Some(WorkflowStatus {
                                 id: id.to_string(),
                                 name: wf.name.clone(),
@@ -1104,6 +1172,7 @@ async fn handle_method(
                             error: Some(format!("Workflow {} not found", id)),
                             workflow_id: None,
                             workflows: None,
+                            watched: None,
                             status: None,
                         }
                     }
@@ -1114,6 +1183,7 @@ async fn handle_method(
                     error: Some("Missing or invalid 'workflow_id'".to_string()),
                     workflow_id: None,
                     workflows: None,
+                    watched: None,
                     status: None,
                 },
             }
@@ -1137,6 +1207,7 @@ async fn handle_method(
                             error: None,
                             workflow_id: Some(id.to_string()),
                             workflows: None,
+                            watched: None,
                             status: None,
                         }
                     } else {
@@ -1146,6 +1217,7 @@ async fn handle_method(
                             error: Some(format!("Workflow {} not found", id)),
                             workflow_id: None,
                             workflows: None,
+                            watched: None,
                             status: None,
                         }
                     }
@@ -1156,6 +1228,7 @@ async fn handle_method(
                     error: Some("Missing or invalid 'workflow_id'".to_string()),
                     workflow_id: None,
                     workflows: None,
+                    watched: None,
                     status: None,
                 },
             }
@@ -1167,6 +1240,7 @@ async fn handle_method(
             error: Some(format!("Unknown method: {}", req.method)),
             workflow_id: None,
             workflows: None,
+            watched: None,
             status: None,
         },
     }
