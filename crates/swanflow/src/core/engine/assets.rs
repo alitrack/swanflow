@@ -31,7 +31,7 @@ pub(crate) static LEDGER_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(())
 
 /// Current digest algorithm version (bump when compute_digest's framing
 /// or inputs change — mirrors the version tag inside compute_digest).
-pub const DIGEST_VERSION: u32 = 2;
+pub const DIGEST_VERSION: u32 = 3;
 
 thread_local! {
     /// Re-entrancy depth for LedgerGuard::acquire. AssetLedger write
@@ -211,23 +211,45 @@ fn canonicalize_json_str(s: &str) -> String {
     }
 }
 
-/// Compute a node's digest from its config JSON and its upstream
-/// dependencies' digests (transitive staleness: any upstream change
-/// bubbles down).
+/// Compute a node's digest from its config JSON, its RENDERED config and
+/// its upstream dependencies' digests (transitive staleness: any upstream
+/// change bubbles down).
+///
+/// `rendered_config` is the template-resolved config that execution
+/// actually consumed — `TemplateEngine::render_json(&node.config, &ctx)`
+/// with the SAME context on the record side and the skip side (see the
+/// call-site comments in engine/mod.rs). Empty string = rendering context
+/// unavailable on this path (degrades to the historical raw-config-only
+/// semantics for that node; callers that cannot render MUST pass "" and
+/// document why). Only variables that truly affect the rendered result
+/// change the digest: a config referencing `{{iteration}}` renders
+/// differently per iteration (digest differs — correct), one without
+/// references renders identically (digest stable — also correct, since
+/// outputs are identical).
 pub fn compute_digest(
     node_id: Uuid,
     type_id: &str,
     config_json: &str,
+    rendered_config: &str,
     upstream: &[(Uuid, &UpstreamDigest)],
 ) -> UpstreamDigest {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     // Version tag + length-prefixed fields (framing v2): raw concatenation
     // of type/config bytes is ambiguous — ("ab","c") and ("a","bc") hash
-    // identically. Note: v2 framing + canonicalized config invalidate
-    // digests recorded by older builds; affected nodes re-materialize once.
-    h.update(b"swanflow-digest-v2");
+    // identically. v2 framing + canonicalized config invalidated digests
+    // recorded by older builds (those nodes re-materialized once); v3
+    // (rendered-config field, DIGEST_VERSION=3) invalidates them a second
+    // and final time — EVERY recorded digest changes once and affected
+    // nodes re-materialize once. (With rendered_config="" the new field
+    // contributes an empty length-prefixed no-op, so for such nodes the
+    // byte change is purely the version tag.)
+    h.update(b"swanflow-digest-v3");
     let canon = canonicalize_json_str(config_json);
+    // v3: canonicalize the rendered config the same way as the raw config
+    // so merely re-ordering JSON keys in a rendered value cannot produce a
+    // phantom-stale digest (rendered output is always valid JSON).
+    let canon_rendered = canonicalize_json_str(rendered_config);
     let mut upd = |h: &mut Sha256, b: &[u8]| {
         h.update(&(b.len() as u64).to_le_bytes());
         h.update(b);
@@ -235,6 +257,13 @@ pub fn compute_digest(
     upd(&mut h, node_id.as_bytes());
     upd(&mut h, type_id.as_bytes());
     upd(&mut h, canon.as_bytes());
+    // v3: rendered config — the template-resolved config execution
+    // actually used. Without it, a config referencing {{iteration}} /
+    // {{input}} / a context variable would hash identically across
+    // iterations/runs even though its outputs differ, and skip-if-fresh
+    // would reuse stale materializations. Framed after the canonical raw
+    // config and before the interval env fields.
+    upd(&mut h, canon_rendered.as_bytes());
     // codex-review P0 (domain C): backfill binds ${interval_start}/
     // ${interval_end} from env at execution time, but the raw config is
     // identical across days — without the interval in the digest every
@@ -596,15 +625,26 @@ impl AssetLedger {
     ///
     /// Best-effort engine hook: failures are logged to stderr, never
     /// propagated.
+    ///
+    /// `rendered_config` is the template-resolved config this run
+    /// actually executed (same render the skip side uses — record/skip
+    /// symmetry); pass "" when the execution path had no rendering
+    /// context (see compute_digest's docs).
     pub fn record_asset_run_for(
         &self,
         node_id: Uuid,
         type_id: &str,
         node_config_json: &str,
+        rendered_config: &str,
         upstream: &[(Uuid, String, String)],
     ) -> anyhow::Result<()> {
         // Prefer each upstream's *recorded* digest (captures transitive
         // staleness); fall back to hashing its identity+config.
+        // Prefer each upstream's *recorded* digest (captures transitive
+        // staleness); fall back to hashing its identity+RAW config with
+        // rendered="" — the upstream's own rendered config is already
+        // baked into the upstream's OWN recorded digest, so hashing it
+        // again in the fallback would double-count.
         let ups: Vec<(Uuid, UpstreamDigest)> = upstream
             .iter()
             .map(|(id, ty, cfg)| {
@@ -613,24 +653,27 @@ impl AssetLedger {
                     .ok()
                     .flatten()
                     .and_then(|hex| parse_digest_hex(&hex))
-                    .unwrap_or_else(|| compute_digest(*id, ty, cfg, &[]));
+                    .unwrap_or_else(|| compute_digest(*id, ty, cfg, "", &[]));
                 (*id, recorded)
             })
             .collect();
         let refs: Vec<(Uuid, &UpstreamDigest)> =
             ups.iter().map(|(id, d)| (*id, d)).collect();
-        let digest = compute_digest(node_id, type_id, node_config_json, &refs);
+        let digest = compute_digest(node_id, type_id, node_config_json, rendered_config, &refs);
         self.record_run(node_id, &digest)
     }
 }
 
 /// Engine hook: open the ledger (creating lazily) and record a node run.
 /// Best-effort — errors are logged, never propagated.
+/// `rendered_config` is forwarded to `record_asset_run_for` (v3 digest
+/// field); pass "" when the execution path had no rendering context.
 pub fn record_asset_run(
     cache_dir: &str,
     node_id: Uuid,
     type_id: &str,
     node_config_json: &str,
+    rendered_config: &str,
     upstream: &[(Uuid, String, String)],
 ) {
     let path = std::path::Path::new(cache_dir).join("assets.duckdb");
@@ -681,7 +724,9 @@ pub fn record_asset_run(
     // no-op write-wise.
     let _ = conn.execute_batch("CHECKPOINT");
     let ledger = AssetLedger { conn, cache_dir: std::path::PathBuf::from(cache_dir) };
-    if let Err(e) = ledger.record_asset_run_for(node_id, type_id, node_config_json, upstream) {
+    if let Err(e) =
+        ledger.record_asset_run_for(node_id, type_id, node_config_json, rendered_config, upstream)
+    {
         eprintln!("[assets] ledger record failed (ignored): {}", e);
     }
     // record_asset_run_for flushed via with_write_guard; drop the
@@ -696,11 +741,15 @@ pub fn record_asset_run(
 ///
 /// `None` means "execute normally". Best-effort like the write side:
 /// ledger/duckdb errors degrade to executing the node.
+/// `rendered_config` must be produced by the SAME render the record side
+/// used (same function, same context) — otherwise the recomputed digest
+/// will never match the recorded one and the node will never skip.
 pub fn try_skip_fresh(
     cache_dir: &str,
     node_id: Uuid,
     type_id: &str,
     node_config_json: &str,
+    rendered_config: &str,
     upstream: &[(Uuid, String, String)],
     upstream_digests: &[(Uuid, UpstreamDigest)],
 ) -> Option<String> {
@@ -732,7 +781,7 @@ pub fn try_skip_fresh(
         .iter()
         .map(|(id, d)| (*id, d))
         .collect();
-    let recomputed = compute_digest(node_id, type_id, node_config_json, &refs);
+    let recomputed = compute_digest(node_id, type_id, node_config_json, rendered_config, &refs);
     let recorded = ledger.recorded_digest(node_id).ok()??;
     if recorded != recomputed.hex() {
         return None;
@@ -755,17 +804,21 @@ pub fn try_skip_fresh(
 }
 
 /// Pure digest computation helper for chain bookkeeping (no ledger).
+/// `rendered_config` must match what the record side hashed (same
+/// function + same context) so the in-run digest map stays byte-equal to
+/// the ledger digest.
 pub fn recompute_digest(
     node_id: Uuid,
     type_id: &str,
     node_config_json: &str,
+    rendered_config: &str,
     upstream_digests: &[(Uuid, UpstreamDigest)],
 ) -> Option<UpstreamDigest> {
     let refs: Vec<(Uuid, &UpstreamDigest)> = upstream_digests
         .iter()
         .map(|(id, d)| (*id, d))
         .collect();
-    Some(compute_digest(node_id, type_id, node_config_json, &refs))
+    Some(compute_digest(node_id, type_id, node_config_json, rendered_config, &refs))
 }
 
 /// Per-node staleness verdict for `assets status`.
@@ -826,10 +879,22 @@ pub fn status_for_workflow(
             .collect();
         let refs: Vec<(Uuid, &UpstreamDigest)> =
             upstream.iter().map(|(id, d)| (*id, d)).collect();
+        // v3: render with the same context the staged executor renders
+        // with (workflow.context at compile time — see compiler.rs
+        // run_preflight and the precomputed maps in engine/mod.rs), so
+        // `assets status` verdicts stay symmetric with the digests the
+        // engine records/skips on. (Sub-workflow nodes are not in this
+        // top-level graph and are not verdicted here.)
+        let rendered = crate::core::templating::TemplateEngine::render_json(
+            &node.config,
+            &workflow.context,
+        )
+        .to_string();
         let digest = compute_digest(
             node.id,
             &node.type_id,
             &node.config.to_string(),
+            &rendered,
             &refs,
         );
         digest_map.insert(node.id, digest.clone());
@@ -926,11 +991,11 @@ mod tests {
         let dir_s = dir.to_str().unwrap().to_string();
 
         // No ledger yet -> no skip
-        assert!(try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", &[], &[]).is_none());
+        assert!(try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]).is_none());
 
         // Record a run, then skip should find a matching parquet.
         let ledger = AssetLedger::open(std::path::Path::new(&dir_s)).unwrap();
-        ledger.record_asset_run_for(Uuid::nil(), "t", "{}", &[]).unwrap();
+        ledger.record_asset_run_for(Uuid::nil(), "t", "{}", "", &[]).unwrap();
         let parquet = dir.join("dummy.parquet");
         std::fs::write(&parquet, b"x").unwrap();
         let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
@@ -938,7 +1003,7 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS flow_metadata (node_id TEXT PRIMARY KEY, table_name TEXT, parquet_path TEXT, schema_json TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
              INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES ('00000000-0000-0000-0000-000000000000', 't', 'dummy.parquet', '{}');",
         ).unwrap();
-        let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", &[], &[]);
+        let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]);
         assert!(got.is_none(), "relative parquet_path must not skip: {:?}", got);
 
         // Absolute path (as MaterializingStream records) -> skip
@@ -948,11 +1013,90 @@ mod tests {
         ))
         .unwrap();
         drop(meta); // release the file lock before re-opening inside try_skip_fresh
-        let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", &[], &[]);
+        let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]);
         assert_eq!(got.as_deref(), Some(abs.as_str()));
 
         // Changed config -> no skip
-        assert!(try_skip_fresh(&dir_s, Uuid::nil(), "t", "{\"a\":1}", &[], &[]).is_none());
+        assert!(try_skip_fresh(&dir_s, Uuid::nil(), "t", "{\"a\":1}", "", &[], &[]).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn digest_depends_on_rendered_config() {
+        // v3: the rendered config (template-resolved values execution
+        // actually used) is part of the digest. Same raw config +
+        // different rendered config -> different digest (this is the fix
+        // for the stale-reuse hole where {{iteration}}/{{input}} changed
+        // outputs while the raw config stayed byte-identical).
+        let id = Uuid::new_v4();
+        let raw = r#"{"query":"SELECT '{{iteration}}' AS v"}"#;
+        let r1 = compute_digest(id, "t", raw, r#"{"query":"SELECT '1' AS v"}"#, &[]);
+        let r2 = compute_digest(id, "t", raw, r#"{"query":"SELECT '2' AS v"}"#, &[]);
+        assert_ne!(r1.hex(), r2.hex(), "same raw config, different rendered -> different digest");
+        // Deterministic: same rendered bytes -> same digest.
+        let r1b = compute_digest(id, "t", raw, r#"{"query":"SELECT '1' AS v"}"#, &[]);
+        assert_eq!(r1.hex(), r1b.hex());
+        // Empty rendered context (context unavailable) must not collide
+        // with a populated render.
+        let e = compute_digest(id, "t", raw, "", &[]);
+        assert_ne!(e.hex(), r1.hex(), "empty rendered context must not equal a populated one");
+        // Rendered key order must not matter (canonicalized like raw config).
+        let k1 = compute_digest(id, "t", "{}", r#"{"a":1,"b":2}"#, &[]);
+        let k2 = compute_digest(id, "t", "{}", r#"{"b":2,"a":1}"#, &[]);
+        assert_eq!(k1.hex(), k2.hex(), "rendered key order must not change the digest");
+    }
+
+    #[test]
+    fn try_skip_fresh_rendered_context_mismatch() {
+        // v3 roundtrip: a node recorded with rendered config R1 must NOT
+        // skip when re-checked with rendered config R2 (e.g. the next
+        // loop iteration's render), even though the raw config is
+        // unchanged; the same rendered context still skips.
+        let dir = std::env::temp_dir().join(format!("swanflow_skiprender_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_s = dir.to_str().unwrap().to_string();
+
+        let ledger = AssetLedger::open(std::path::Path::new(&dir_s)).unwrap();
+        let raw = r#"{"query":"SELECT '{{iteration}}' AS v"}"#;
+        ledger
+            .record_asset_run_for(Uuid::nil(), "t", raw, r#"{"query":"SELECT '1' AS v"}"#, &[])
+            .unwrap();
+        let parquet = dir.join("dummy.parquet");
+        std::fs::write(&parquet, b"x").unwrap();
+        let abs = parquet.to_str().unwrap().to_string();
+        let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
+        meta.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS flow_metadata (node_id TEXT PRIMARY KEY, table_name TEXT, parquet_path TEXT, schema_json TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+             INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES ('00000000-0000-0000-0000-000000000000', 't', '{abs}', '{{}}');",
+        ))
+        .unwrap();
+        drop(meta); // release the file lock before re-opening inside try_skip_fresh
+
+        // Same rendered context -> skip allowed.
+        let got = try_skip_fresh(
+            &dir_s,
+            Uuid::nil(),
+            "t",
+            raw,
+            r#"{"query":"SELECT '1' AS v"}"#,
+            &[],
+            &[],
+        );
+        assert_eq!(got.as_deref(), Some(abs.as_str()));
+
+        // Different rendered context (next iteration) -> NO skip.
+        let got = try_skip_fresh(
+            &dir_s,
+            Uuid::nil(),
+            "t",
+            raw,
+            r#"{"query":"SELECT '2' AS v"}"#,
+            &[],
+            &[],
+        );
+        assert!(got.is_none(), "rendered-context change must invalidate the skip: {got:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -960,8 +1104,8 @@ mod tests {
     #[test]
     fn digest_depends_on_config() {
         let id = Uuid::new_v4();
-        let a = compute_digest(id, "core.sql.duckdb", "{\"query\":\"SELECT 1\"}", &[]);
-        let b = compute_digest(id, "core.sql.duckdb", "{\"query\":\"SELECT 2\"}", &[]);
+        let a = compute_digest(id, "core.sql.duckdb", "{\"query\":\"SELECT 1\"}", "", &[]);
+        let b = compute_digest(id, "core.sql.duckdb", "{\"query\":\"SELECT 2\"}", "", &[]);
         assert_ne!(a, b);
     }
 
@@ -969,8 +1113,8 @@ mod tests {
     fn digest_transitive_upstream() {
         let id = Uuid::new_v4();
         let up = Uuid::new_v4();
-        let d1 = compute_digest(id, "t", "c", &[(up, &d(1))]);
-        let d2 = compute_digest(id, "t", "c", &[(up, &d(2))]);
+        let d1 = compute_digest(id, "t", "c", "", &[(up, &d(1))]);
+        let d2 = compute_digest(id, "t", "c", "", &[(up, &d(2))]);
         assert_ne!(d1, d2, "upstream digest change must propagate");
     }
 
@@ -979,8 +1123,8 @@ mod tests {
         let id = Uuid::new_v4();
         let u1 = Uuid::new_v4();
         let u2 = Uuid::new_v4();
-        let a = compute_digest(id, "t", "c", &[(u1, &d(1)), (u2, &d(2))]);
-        let b = compute_digest(id, "t", "c", &[(u2, &d(2)), (u1, &d(1))]);
+        let a = compute_digest(id, "t", "c", "", &[(u1, &d(1)), (u2, &d(2))]);
+        let b = compute_digest(id, "t", "c", "", &[(u2, &d(2)), (u1, &d(1))]);
         assert_eq!(a, b);
     }
 
@@ -1007,15 +1151,15 @@ mod tests {
         // P2: preserve_order bakes insertion order into config.to_string();
         // merely re-ordering keys must NOT change the digest (phantom stale).
         let id = Uuid::nil();
-        let a = compute_digest(id, "t", r#"{"x":1,"y":{"b":2,"a":3}}"#, &[]);
-        let b = compute_digest(id, "t", r#"{"y":{"a":3,"b":2},"x":1}"#, &[]);
+        let a = compute_digest(id, "t", r#"{"x":1,"y":{"b":2,"a":3}}"#, "", &[]);
+        let b = compute_digest(id, "t", r#"{"y":{"a":3,"b":2},"x":1}"#, "", &[]);
         assert_eq!(a.hex(), b.hex(), "key order must not matter");
         // But a real content change must still be detected.
-        let c = compute_digest(id, "t", r#"{"x":1,"y":{"b":2,"a":4}}"#, &[]);
+        let c = compute_digest(id, "t", r#"{"x":1,"y":{"b":2,"a":4}}"#, "", &[]);
         assert_ne!(a.hex(), c.hex());
         // Non-JSON config degrades gracefully (hashed as-is).
-        let d = compute_digest(id, "t", "plain-sql: SELECT 1", &[]);
-        let e = compute_digest(id, "t", "plain-sql: SELECT 2", &[]);
+        let d = compute_digest(id, "t", "plain-sql: SELECT 1", "", &[]);
+        let e = compute_digest(id, "t", "plain-sql: SELECT 2", "", &[]);
         assert_ne!(d.hex(), e.hex());
     }
 
@@ -1024,8 +1168,8 @@ mod tests {
         // P2: length-prefix prevents ("ab","c") vs ("a","bc") collisions.
         let id = Uuid::nil();
         // type_id "ab" + config "c" vs type_id "a" + config "bc"
-        let a = compute_digest(id, "ab", "c", &[]);
-        let b = compute_digest(id, "a", "bc", &[]);
+        let a = compute_digest(id, "ab", "c", "", &[]);
+        let b = compute_digest(id, "a", "bc", "", &[]);
         assert_ne!(a.hex(), b.hex(), "framing must disambiguate field splits");
     }
 
@@ -1078,22 +1222,22 @@ mod tests {
         // (empty SHA-256 updates are no-ops, so old ledger rows still hit).
         std::env::remove_var("SWANFLOW_INTERVAL_START");
         std::env::remove_var("SWANFLOW_INTERVAL_END");
-        let base = compute_digest(id, "t", "{}", &[(id, &d1)]);
+        let base = compute_digest(id, "t", "{}", "", &[(id, &d1)]);
 
         std::env::set_var("SWANFLOW_INTERVAL_START", "2026-10-01T00:00:00+00:00");
         std::env::set_var("SWANFLOW_INTERVAL_END", "2026-10-02T00:00:00+00:00");
-        let day1 = compute_digest(id, "t", "{}", &[(id, &d1)]);
+        let day1 = compute_digest(id, "t", "{}", "", &[(id, &d1)]);
 
         std::env::set_var("SWANFLOW_INTERVAL_START", "2026-10-02T00:00:00+00:00");
         std::env::set_var("SWANFLOW_INTERVAL_END", "2026-10-03T00:00:00+00:00");
-        let day2 = compute_digest(id, "t", "{}", &[(id, &d1)]);
+        let day2 = compute_digest(id, "t", "{}", "", &[(id, &d1)]);
 
         std::env::remove_var("SWANFLOW_INTERVAL_START");
         std::env::remove_var("SWANFLOW_INTERVAL_END");
 
         assert_ne!(day1.hex(), day2.hex(), "different days must differ");
         assert_ne!(base.hex(), day1.hex(), "interval run must differ from no-interval run");
-        assert_eq!(base.hex(), compute_digest(id, "t", "{}", &[(id, &d1)]).hex());
+        assert_eq!(base.hex(), compute_digest(id, "t", "{}", "", &[(id, &d1)]).hex());
     }
 
     #[test]

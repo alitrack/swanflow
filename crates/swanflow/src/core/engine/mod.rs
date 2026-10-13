@@ -475,6 +475,33 @@ impl SwanFlowEngine {
             })
             .collect();
 
+        // ADR-014 v3: rendered config per node for the digest chain. The
+        // DuckDB path renders node configs at COMPILE time
+        // (compiler.rs run_preflight) against the static `workflow.context`
+        // — there is no step_context in this executor, so the rendered
+        // bytes compilation actually used ARE this precomputation (same
+        // TemplateEngine::render_json, same context). Precomputing keeps
+        // the record hook below byte-identical to the compile-time render
+        // (record/skip symmetry). Pass "" only if rendering were truly
+        // unavailable — it is not on this path.
+        let duckdb_rendered_configs: std::collections::HashMap<Uuid, String> = workflow
+            .graph
+            .node_indices()
+            .filter_map(|idx| {
+                workflow
+                    .graph
+                    .node_weight(idx)
+                    .map(|n| (
+                        n.id,
+                        crate::core::templating::TemplateEngine::render_json(
+                            &n.config,
+                            &workflow.context,
+                        )
+                        .to_string(),
+                    ))
+            })
+            .collect();
+
         tokio::spawn(async move {
             let cm = checkpoint::CheckpointManager::new(&duckdb_cache_dir);
 
@@ -587,11 +614,19 @@ impl SwanFlowEngine {
                             // the asset ledger. Best-effort — ledger failures
                             // must never fail the run.
                             if let Some((cfg, ups)) = duckdb_level_upstreams.get(&node_id) {
+                                // v3: rendered config — precomputed with the
+                                // same render the compile performed (see
+                                // duckdb_rendered_configs).
+                                let rendered = duckdb_rendered_configs
+                                    .get(&node_id)
+                                    .cloned()
+                                    .unwrap_or_default();
                                 assets::record_asset_run(
                                     &duckdb_cache_dir,
                                     node_id,
                                     &node_type,
                                     cfg,
+                                    &rendered,
                                     ups,
                                 );
                             }
@@ -747,6 +782,35 @@ impl SwanFlowEngine {
                     })
                     .collect();
                 (node.id, (node.config.to_string(), ups))
+            })
+            .collect();
+
+        // ADR-014 v3: rendered config per node for the digest chain.
+        // The staged executor has NO step_context in scope at the skip /
+        // record checkpoints below — on this path configs are rendered at
+        // COMPILE time (compiler.rs run_preflight) against the static
+        // `workflow.context`, so the rendered bytes execution actually
+        // consumed ARE this precomputation (same TemplateEngine::render
+        //_json, same context). Per-iteration step contexts ({{iteration}}
+        // etc.) exist only in the legacy-yaml path, which has no ledger
+        // call sites; a sub-workflow's rendering context is its own
+        // (static) sub-context. Precomputing keeps the skip checkpoint and
+        // the record hook byte-identical (record/skip symmetry).
+        let df_rendered_configs: std::collections::HashMap<Uuid, String> = workflow
+            .graph
+            .node_indices()
+            .filter_map(|idx| {
+                workflow
+                    .graph
+                    .node_weight(idx)
+                    .map(|n| (
+                        n.id,
+                        crate::core::templating::TemplateEngine::render_json(
+                            &n.config,
+                            &workflow.context,
+                        )
+                        .to_string(),
+                    ))
             })
             .collect();
 
@@ -941,6 +1005,20 @@ impl SwanFlowEngine {
                                 Some((c, u)) => (c, u),
                                 None => (&empty_cfg, &empty_ups),
                             };
+                        // v3: the rendered config this skip checkpoint
+                        // compares against — same render as compile time
+                        // (staged path render context = workflow.context;
+                        // no step_context exists in this executor, and no
+                        // iteration-level context is available here either:
+                        // loop sub-workflows are flattened at compile time
+                        // and render against their own static context. The
+                        // render is therefore a pure function of the
+                        // workflow definition, so "" is never needed on
+                        // this path).
+                        let rendered = df_rendered_configs
+                            .get(&node_id)
+                            .cloned()
+                            .unwrap_or_default();
                         let upstream_digests: Vec<(Uuid, assets::UpstreamDigest)> = ups
                             .iter()
                             .filter_map(|(uid, _uty, _ucfg)| {
@@ -957,6 +1035,7 @@ impl SwanFlowEngine {
                             node_id,
                             &node_type,
                             cfg,
+                            &rendered,
                             ups,
                             &upstream_digests,
                         );
@@ -993,6 +1072,7 @@ impl SwanFlowEngine {
                                         node_id,
                                         &node_type,
                                         cfg,
+                                        &rendered,
                                         &upstream_digests,
                                     ) {
                                         if let Ok(mut m) = df_digest_map.lock() {
@@ -1075,11 +1155,20 @@ impl SwanFlowEngine {
                                     if let Some((cfg, ups)) =
                                         df_level_upstreams.get(&node_id)
                                     {
+                                        // v3: rendered config — same
+                                        // precomputed render the skip
+                                        // checkpoint uses (record/skip
+                                        // symmetry).
+                                        let rendered = df_rendered_configs
+                                            .get(&node_id)
+                                            .cloned()
+                                            .unwrap_or_default();
                                         assets::record_asset_run(
                                             &df_cache_dir,
                                             node_id,
                                             &node_type,
                                             cfg,
+                                            &rendered,
                                             ups,
                                         );
                                         // Chain bookkeeping for downstream
@@ -1102,6 +1191,7 @@ impl SwanFlowEngine {
                                             node_id,
                                             &node_type,
                                             cfg,
+                                            &rendered,
                                             &upstream_digests,
                                         ) {
                                             if let Ok(mut m) = df_digest_map.lock() {
