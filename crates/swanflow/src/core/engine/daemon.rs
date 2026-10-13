@@ -40,6 +40,68 @@ pub fn pid_path() -> PathBuf {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Daemon process identity — PID-reuse guard for start/stop
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Parse raw `/proc/<pid>/cmdline` bytes into argv.
+///
+/// The kernel stores argv NUL-separated (with a trailing NUL); this
+/// splits on NUL, drops empty chunks, and tolerates non-UTF8 args.
+fn parse_cmdline(raw: &[u8]) -> Vec<String> {
+    raw.split(|&b| b == 0)
+        .filter(|chunk| !chunk.is_empty())
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+        .collect()
+}
+
+/// Returns true if `args` (a process argv) identifies a running
+/// swanflow daemon: both the `daemon` subcommand and `--foreground`
+/// are present. Exact-argument matching, so a path like
+/// `/tmp/daemon.sock` cannot false-positive. A dead daemon's recycled
+/// PID will have a different argv, which is what keeps us from
+/// killing (or deferring to) an innocent process.
+fn cmdline_is_daemon(args: &[String]) -> bool {
+    let has_subcommand = args.iter().any(|a| a == "daemon");
+    let has_foreground = args.iter().any(|a| a == "--foreground");
+    has_subcommand && has_foreground
+}
+
+/// Returns true if `pid` is alive and is a swanflow daemon process.
+///
+/// On Linux this verifies process identity by reading
+/// `/proc/<pid>/cmdline` and requiring both the `daemon` subcommand
+/// and `--foreground` (the forked background daemon's argv), so a
+/// recycled PID re-assigned to an innocent process is never treated
+/// as the daemon. On other platforms there is no `/proc`, so this
+/// degrades to a liveness probe (`kill -0 <pid>`).
+pub fn is_swanflow_daemon(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let raw = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+            Ok(raw) => raw,
+            // Process is gone (or /proc unavailable) — not a daemon.
+            Err(_) => return false,
+        };
+        cmdline_is_daemon(&parse_cmdline(&raw))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No /proc on non-Linux: degrade to a liveness probe.
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Protocol types
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1965,5 +2027,100 @@ mod watched_persistence_tests {
         assert!(last2[0].contains("run 'wf'"), "tail window: {last2:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// PID-identity guard tests (start/stop double-daemon + PID-reuse fix)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+#[cfg(test)]
+mod daemon_pid_identity_tests {
+    use super::*;
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_cmdline_splits_on_nul_and_drops_trailing() {
+        // Typical /proc/<pid>/cmdline: NUL-separated, with a trailing NUL.
+        let raw = b"swanflow\0daemon\0start\0--foreground\0";
+        let args = parse_cmdline(raw);
+        assert_eq!(args, vec!["swanflow", "daemon", "start", "--foreground"]);
+    }
+
+    #[test]
+    fn parse_cmdline_handles_missing_trailing_nul() {
+        let raw = b"swanflow\0daemon\0start\0--foreground";
+        let args = parse_cmdline(raw);
+        assert_eq!(args, vec!["swanflow", "daemon", "start", "--foreground"]);
+    }
+
+    #[test]
+    fn parse_cmdline_empty_input() {
+        assert!(parse_cmdline(b"").is_empty());
+    }
+
+    #[test]
+    fn cmdline_is_daemon_requires_both_args() {
+        // A forked background daemon child: subcommand + --foreground.
+        assert!(cmdline_is_daemon(&argv(&[
+            "swanflow",
+            "daemon",
+            "start",
+            "--foreground"
+        ])));
+        // Missing --foreground (e.g. the interactive `daemon start` parent):
+        assert!(!cmdline_is_daemon(&argv(&["swanflow", "daemon", "start"])));
+        // Missing the `daemon` subcommand (an innocent process that
+        // happens to take a --foreground flag):
+        assert!(!cmdline_is_daemon(&argv(&["bash", "--foreground"])));
+        // Innocent process whose arg list merely contains the word daemon:
+        assert!(!cmdline_is_daemon(&argv(&["vim", "daemon"])));
+        // Empty argv:
+        assert!(!cmdline_is_daemon(&argv(&[])));
+    }
+
+    #[test]
+    fn cmdline_is_daemon_full_forked_argv() {
+        // Realistic argv of the forked daemon child, incl. extra flags.
+        let args = argv(&[
+            "/usr/bin/swanflow",
+            "daemon",
+            "start",
+            "--foreground",
+            "--socket",
+            "/home/u/.swanflow/daemon.sock",
+            "--tick",
+            "5",
+        ]);
+        assert!(cmdline_is_daemon(&args));
+    }
+
+    #[test]
+    fn cmdline_is_daemon_no_substring_false_positive() {
+        // "daemon" appears only as a substring of a path arg — exact
+        // matching must NOT count it.
+        let args = argv(&["/usr/bin/swanflow", "run", "/tmp/daemon.sock"]);
+        assert!(!cmdline_is_daemon(&args));
+    }
+
+    #[test]
+    fn parse_then_decide_roundtrip() {
+        // Simulate the full /proc read: raw cmdline bytes -> argv -> verdict.
+        let raw = b"/usr/bin/swanflow\0daemon\0start\0--foreground\0--socket\0/tmp/x.sock\0";
+        assert!(cmdline_is_daemon(&parse_cmdline(raw)));
+        let innocent = b"/bin/bash\0-c\0swanflow run x.json\0";
+        assert!(!cmdline_is_daemon(&parse_cmdline(innocent)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn is_swanflow_daemon_rejects_nonpositive_and_dead_pid() {
+        // pid <= 0 short-circuits; an out-of-range PID has no /proc entry.
+        assert!(!is_swanflow_daemon(0));
+        assert!(!is_swanflow_daemon(-1));
+        assert!(!is_swanflow_daemon(i32::MAX));
     }
 }

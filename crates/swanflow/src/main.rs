@@ -1474,6 +1474,43 @@ async fn main() -> anyhow::Result<()> {
 // Daemon client helper — talk to the SwanFlow daemon over Unix socket
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+/// Liveness probe for `daemon start`: returns the PID of an already
+/// running swanflow daemon, or None when it is safe to fork a new one.
+///
+/// 1. PID file: the recorded PID must be alive *and* verified as a
+///    swanflow daemon via /proc/<pid>/cmdline (guards against PID
+///    reuse). Stale files (dead process / reused PID / unparseable
+///    content) are removed so start/stop behave sanely afterwards.
+/// 2. Socket fallback: the daemon always writes its PID file on
+///    startup, so a reachable socket with no valid PID file can only
+///    mean the file was deleted out from under a running daemon (or the
+///    daemon predates PID files) — still refuse to fork a second one.
+///    In that case the PID is unknown and reported as 0.
+async fn probe_running_daemon(socket_path: &std::path::Path) -> Option<i32> {
+    let pid_file = swanflow::core::engine::daemon::pid_path();
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            if swanflow::core::engine::daemon::is_swanflow_daemon(pid) {
+                return Some(pid);
+            }
+            println!(
+                "⚠ Removed stale daemon pid file ({}) — PID {pid} is not a running daemon.",
+                pid_file.display()
+            );
+        } else {
+            println!(
+                "⚠ Removed stale daemon pid file ({}) — unparseable content.",
+                pid_file.display()
+            );
+        }
+        let _ = std::fs::remove_file(&pid_file);
+    }
+    if tokio::net::UnixStream::connect(socket_path).await.is_ok() {
+        return Some(0);
+    }
+    None
+}
+
 async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> anyhow::Result<()> {
     if let Some(ref host) = remote {
         return handle_remote_daemon(cmd, host).await;
@@ -1507,7 +1544,24 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
 
             let socket_path = socket.clone()
                 .unwrap_or_else(swanflow::core::engine::daemon::default_socket_path);
-            let pid_path = swanflow::core::engine::daemon::pid_path();
+
+            // Double-daemon guard: refuse to fork another daemon if one is
+            // already running (two daemons would tick watched.json in
+            // parallel and execute the same workflows concurrently). The
+            // forked daemon writes its own PID to pid_path() on startup,
+            // so this probe only reads — it never writes the PID file.
+            if let Some(pid) = probe_running_daemon(&socket_path).await {
+                if pid > 0 {
+                    println!("✅ Daemon already running (PID: {pid})");
+                } else {
+                    println!(
+                        "✅ Daemon already running (socket {} is active)",
+                        socket_path.display()
+                    );
+                }
+                println!("   Socket: {}", socket_path.display());
+                return Ok(());
+            }
 
             // Fork to background
             let exe = std::env::current_exe()?;
@@ -1554,13 +1608,20 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             Ok(())
         }
         DaemonCommands::Stop { socket } => {
-            // Try to kill by PID first
+            // Try to kill by PID first — but only after verifying the
+            // recorded PID is actually a swanflow daemon process, so a
+            // recycled PID re-assigned to an innocent process is never
+            // killed (its stale pid file is just removed instead).
             let pid_path = swanflow::core::engine::daemon::pid_path();
             if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    let _ = std::process::Command::new("kill")
-                        .arg(pid.to_string())
-                        .output();
+                    if swanflow::core::engine::daemon::is_swanflow_daemon(pid) {
+                        let _ = std::process::Command::new("kill")
+                            .arg(pid.to_string())
+                            .output();
+                    } else {
+                        println!("⚠ Stale pid file removed (pid {pid} not a daemon)");
+                    }
                     let _ = std::fs::remove_file(&pid_path);
                 }
             }
