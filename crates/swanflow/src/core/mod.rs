@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod sql_collapse_probe;
 pub mod compiler;
 pub mod connection_config;
 pub mod datasource;
