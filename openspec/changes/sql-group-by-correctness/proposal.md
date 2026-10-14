@@ -7,7 +7,7 @@ SwanFlow 的 `core.sql` 节点（`SqlProxyLogical` UDLN，`planner.rs` 对共享
 **本轮实跑探针的关键发现（必须写进 design）**：
 
 - 用 `MemTable` + `into_view("input_0")` + `ctx.sql("GROUP BY")` **精确镜像 planner 的 late-binding 形状**后，坍缩**不复现**——string（含 arrow 57 的 `Utf8View`，DuckDB 读回的形态）与 int 都正确聚成 3 组（a=2,b=2,c=1）。
-- 结论：坍缩**不是裸 string 列属性**，而是 **workflow 形状依赖**（stage 物化顺序 / 共享 ctx 在 fan_out 竞争下被重新注册 / `input_0` view 跨 stage 生命周期）。单元级复现不出来。
+- 证据只支持：坍缩**不是裸 string 列属性**。它**是否 workflow 形状依赖**（stage 物化顺序 / 共享 ctx 在 fan_out 竞争下被重新注册 / `input_0` view 跨 stage 生命周期）仍待验证——该单元 fixture 绕过了 `SqlProxyLogical` 元数据同步、stage 物化与共享 ctx 重注册，5 行样本不足以排除数据相关缺陷。单元级复现不出来是事实，但"形状依赖"是**候选假设**而非结论。
 
 这意味着修复单不能"直接改一行"了事，必须先把**触发条件**钉死，否则修错地方。
 

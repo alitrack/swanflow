@@ -21,10 +21,16 @@ pub const LARGE_GRAPH_THRESHOLD: usize = 20;
 /// A rendered node in the portal.
 #[derive(Debug, Clone)]
 pub struct NodeDoc {
-    /// Stable 8-char anchor id (first 8 of the node UUID).
+    /// Unique anchor — the full node UUID. (The old first-8-char form collides:
+    /// `examples/branching_flow.yaml` has three nodes sharing a `00000000`
+    /// prefix, so truncated anchors merged into one.)
     pub anchor: String,
-    /// Display id (short uuid).
+    /// Display id (short uuid prefix) — human-readable cells only.
     pub id: String,
+    /// Mermaid-safe unique node id (full UUID, hyphens stripped, `n`-prefixed so
+    /// it always starts with a letter). Distinct for every node, so the diagram
+    /// never merges two vertices even when their 8-char prefixes collide.
+    pub mermaid_id: String,
     pub type_id: String,
     pub mode: String,
     pub error_mode: String,
@@ -49,6 +55,12 @@ pub struct EdgeDoc {
     pub target_anchor: String,
     pub target_id: String,
     pub target_type: String,
+    /// Mermaid-unique endpoint ids (full-UUID based). Used ONLY for the
+    /// `--mermaid` diagram so edges reference the same vertices the subgraphs
+    /// declare (the display `source_id`/`target_id` are short prefixes that
+    /// can collide).
+    pub source_mermaid_id: String,
+    pub target_mermaid_id: String,
     pub source_port: u32,
     pub target_port: u32,
 }
@@ -140,11 +152,30 @@ pub fn build_doc(workflow: &Workflow) -> Result<DocModel, String> {
         std::collections::HashMap::new();
     let mut idx_to_type: std::collections::HashMap<NodeIndex, String> =
         std::collections::HashMap::new();
+    let mut idx_to_mermaid: std::collections::HashMap<NodeIndex, String> =
+        std::collections::HashMap::new();
 
     for idx in &order {
-        let n = graph.node_weight(*idx).unwrap();
+        // StableGraph::node_weight returns Option; the index came straight from
+        // toposort(graph), so a None here is a petgraph invariant break — report
+        // it rather than unwrap-panic (keeps build_doc the module's only fallible
+        // chokepoint instead of panicking mid-render).
+        let n = match graph.node_weight(*idx) {
+            Some(n) => n,
+            None => return Err(format!(
+                "toposort returned an invalid node index (petgraph invariant)"
+            )),
+        };
         let full_id = n.id.to_string();
+        // Short prefix is display-only; the anchor and Mermaid id use the FULL
+        // UUID so distinct nodes never collide (branching_flow has three nodes
+        // whose first 8 chars are all "00000000").
         let short_id = full_id[..8.min(full_id.len())].to_string();
+        let anchor = format!("node-{full_id}");
+        // Mermaid node id: full UUID, hyphens stripped, "n" prefixed so it
+        // always begins with a letter (Mermaid identifiers can't start with a
+        // digit). Unique per node, so vertices never merge.
+        let mermaid_id = format!("n{}", full_id.replace('-', ""));
         let in_d = *in_deg.get(idx).unwrap_or(&0);
         let out_d = *out_deg.get(idx).unwrap_or(&0);
         let group = if in_d == 0 {
@@ -154,16 +185,18 @@ pub fn build_doc(workflow: &Workflow) -> Result<DocModel, String> {
         } else {
             Group::Step
         };
-        idx_to_anchor.insert(*idx, format!("node-{short_id}"));
+        idx_to_anchor.insert(*idx, anchor.clone());
         idx_to_id.insert(*idx, short_id.clone());
         idx_to_type.insert(*idx, n.type_id.clone());
+        idx_to_mermaid.insert(*idx, mermaid_id.clone());
         let upstream: Vec<String> = graph
             .edges_directed(*idx, Direction::Incoming)
             .map(|e| idx_to_type.get(&e.source()).cloned().unwrap_or_default())
             .collect();
         nodes.push(NodeDoc {
-            anchor: format!("node-{short_id}"),
+            anchor,
             id: short_id,
+            mermaid_id,
             type_id: n.type_id.clone(),
             mode: mode_str(&n.mode),
             error_mode: error_mode_str(&n.error_mode),
@@ -181,8 +214,16 @@ pub fn build_doc(workflow: &Workflow) -> Result<DocModel, String> {
     // Edges.
     let mut edges: Vec<EdgeDoc> = Vec::new();
     for e in graph.edge_indices() {
-        let (s, t) = graph.edge_endpoints(e).unwrap();
-        let ew = graph.edge_weight(e).unwrap();
+        // edge_endpoints/edge_weight return Option; both come from our own
+        // edge_indices() iteration, so a None is a petgraph invariant break.
+        let (s, t) = match graph.edge_endpoints(e) {
+            Some(st) => st,
+            None => return Err("petgraph edge_endpoints invariant break".to_string()),
+        };
+        let ew = match graph.edge_weight(e) {
+            Some(ew) => ew,
+            None => return Err("petgraph edge_weight invariant break".to_string()),
+        };
         edges.push(EdgeDoc {
             source_anchor: idx_to_anchor.get(&s).cloned().unwrap_or_default(),
             source_id: idx_to_id.get(&s).cloned().unwrap_or_default(),
@@ -190,6 +231,8 @@ pub fn build_doc(workflow: &Workflow) -> Result<DocModel, String> {
             target_anchor: idx_to_anchor.get(&t).cloned().unwrap_or_default(),
             target_id: idx_to_id.get(&t).cloned().unwrap_or_default(),
             target_type: idx_to_type.get(&t).cloned().unwrap_or_default(),
+            source_mermaid_id: idx_to_mermaid.get(&s).cloned().unwrap_or_default(),
+            target_mermaid_id: idx_to_mermaid.get(&t).cloned().unwrap_or_default(),
             source_port: ew.source_port,
             target_port: ew.target_port,
         });
@@ -465,28 +508,43 @@ fn render_mermaid(h: &mut String, doc: &DocModel) {
     if !src.is_empty() {
         m.push_str("  subgraph Sources\n");
         for n in &src {
-            m.push_str(&format!("    {}[\"{}\"]\n", n.id, n.type_id.replace('"', "'")));
+            m.push_str(&format!(
+                "    {}[\"{}\"]\n",
+                n.mermaid_id,
+                n.type_id.replace('"', "'")
+            ));
         }
         m.push_str("  end\n");
     }
     if !step.is_empty() {
         m.push_str("  subgraph Steps\n");
         for n in &step {
-            m.push_str(&format!("    {}[\"{}\"]\n", n.id, n.type_id.replace('"', "'")));
+            m.push_str(&format!(
+                "    {}[\"{}\"]\n",
+                n.mermaid_id,
+                n.type_id.replace('"', "'")
+            ));
         }
         m.push_str("  end\n");
     }
     if !sink.is_empty() {
         m.push_str("  subgraph Sinks\n");
         for n in &sink {
-            m.push_str(&format!("    {}[\"{}\"]\n", n.id, n.type_id.replace('"', "'")));
+            m.push_str(&format!(
+                "    {}[\"{}\"]\n",
+                n.mermaid_id,
+                n.type_id.replace('"', "'")
+            ));
         }
         m.push_str("  end\n");
     }
     for e in &doc.edges {
+        // Mermaid edge-label syntax is `A -->|label| B`: the label lives in the
+        // pipe between the arrow and the target. (The old `A --> B |label|`
+        // form is not valid flowchart grammar and would fail to render.)
         m.push_str(&format!(
-            "  {} --> {} |p{}→p{}|\n",
-            e.source_id, e.target_id, e.source_port, e.target_port
+            "  {} -->|p{}→p{}| {}\n",
+            e.source_mermaid_id, e.source_port, e.target_port, e.target_mermaid_id
         ));
     }
     let escaped = escape_html(&m);
@@ -599,14 +657,53 @@ mod tests {
         assert!(!html.contains("<b>sales</b>"));
     }
 
-    /// Default output is fully self-contained: no http(s) references.
+    /// Default output loads no external resources: no `<script src>`, `<link>`,
+    /// `<img src>`, `@import url()`, or `url(http…)` constructs. (Mermaid's CDN
+    /// `<script src>` only appears under `--mermaid`.) This is the real
+    /// self-contained guarantee — NOT the absence of the `http` substring, which
+    /// legitimately appears in inert, escaped config text (see the next test).
     #[test]
-    fn default_output_has_no_external_refs() {
+    fn default_output_loads_no_external_resources() {
         let wf = sample_workflow();
         let doc = build_doc(&wf).unwrap();
         let html = render_html(&doc, false);
-        assert!(!html.contains("http://"));
-        assert!(!html.contains("https://"));
+        assert!(!html.contains("<script src"));
+        assert!(!html.contains("<link "));
+        assert!(!html.contains("<img "));
+        assert!(!html.contains("@import url"));
+        assert!(!html.contains("url(http"));
+    }
+
+    /// A node config that contains a URL renders as inert, escaped text in the
+    /// config cell — the page still loads no external resource, because the URL
+    /// is data (inside `<pre class="json">`), not a `<script>`/`<img>`/`<link>`
+    /// directive. This is what "no external resource loading" means (vs. a
+    /// literal "no http substring", which a config URL would trip).
+    #[test]
+    fn config_url_is_inert_text_not_a_resource() {
+        let mut wf = sample_workflow();
+        // Point the sink node's config at a URL. Collect the sink index first
+        // (immutable borrow of the graph) so the later mutation is legal.
+        use petgraph::Direction as Dir;
+        let sink_idx = wf
+            .graph
+            .node_indices()
+            .find(|idx| wf.graph.edges_directed(*idx, Dir::Outgoing).count() == 0);
+        if let Some(idx) = sink_idx {
+            wf.graph.node_weight_mut(idx).unwrap().config =
+                serde_json::json!({ "url": "https://example.com/api" });
+        }
+        let doc = build_doc(&wf).unwrap();
+        let html = render_html(&doc, false);
+        // The URL is present as escaped text in the config cell...
+        assert!(html.contains("https://example.com/api"));
+        // ...but the page still loads no external resource.
+        assert!(!html.contains("<script src"));
+        assert!(!html.contains("<img "));
+        assert!(!html.contains("<link "));
+        assert!(!html.contains("url(http"));
+        // Config URLs are never turned into real links.
+        assert!(!html.contains("<a href=\"http"));
     }
 
     /// Mermaid output includes a renderable diagram + CDN script.

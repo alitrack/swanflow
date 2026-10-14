@@ -4,10 +4,15 @@
 The `swanflow docs` command SHALL render a workflow's lineage into a single
 self-contained HTML file with no local resource dependencies.
 
-#### Scenario: Default export has zero external references
+#### Scenario: Default export loads no external resources
 - **WHEN** `swanflow docs <workflow.yaml>` is run without `--mermaid`
 - **THEN** the output file SHALL be a single `.html` file
-- **AND** it SHALL contain no `http://` or `https://` references (no CDN, no external CSS/JS/images).
+- **AND** it SHALL contain no external resource-loading directives — no `<script src>`,
+  no `<link href>`, no `<img src>`, no `@import url(...)`, no `url(http…)`. The page
+  must not fetch anything at load time (the Mermaid CDN `<script src>` appears only
+  under `--mermaid`).
+- **AND** workflow-derived text that merely *contains* a URL (e.g. a node `config`
+  string) is inert, HTML-escaped text and does not count as a resource dependency.
 
 #### Scenario: Default export shows lineage, nodes, and edges
 - **WHEN** the generated HTML is opened in a browser

@@ -14,8 +14,10 @@
 （`cargo test -p swanflow --lib sql_collapse_probe -- --nocapture`），
 镜像 `planner.rs:341-365` 的 late-binding 形状。
 
-**推论**：skill 里"string GROUP BY 坍缩成 1 行 NULL"的复现**不成立**于裸 `ctx.sql` 路径。坍缩必由
-**workflow 执行形状**触发，候选成因（按怀疑度排序）：
+**推论**：skill 里"string GROUP BY 坍缩成 1 行 NULL"的复现**不成立**于裸 `ctx.sql` 路径。
+这排除了"纯 string 列属性"，但**不能**断定成因（探针绕过了 stage 物化 / 共享 ctx 重注册 /
+`SqlProxyLogical` 元数据同步，5 行样本不足以排除数据相关缺陷）。坍缩**若**存在，更可能由
+**workflow 执行形状**触发，候选成因（按怀疑度排序，均需 A1-A3 钉死）：
 
 1. **stage 物化**：`core.sql` 节点的输入不是直接 `MemTable`，而是上游 stage 物化后
    经 `input_0` view 读回；若物化阶段把 batch 合并/重投影改变了 `Utf8View` 的

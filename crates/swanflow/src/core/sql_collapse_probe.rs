@@ -9,14 +9,16 @@
 //! and an integer column: 3 groups (a=2,b=2,c=1), never a single collapsed
 //! NULL row.
 //!
-//! STATUS (2026-10-14): the isolated MemTable+view shape does NOT reproduce
-//! the collapse (string and int both group correctly). The collapse is
-//! therefore workflow-shape-dependent (stage materialization / shared-ctx
-//! re-registration), not a bare string-column property. The change
-//! `sql-group-by-correctness` pins the triggering condition at workflow
-//! level before the fix is considered done. This test stays as the
-//! unit-level guardrail and is promoted to a permanent regression test on
-//! fix-land (drop `#[cfg(test)]` gating if it ever leaves the probe module).
+//! STATUS (2026-10-14, corrected after codex review): this isolated
+//! MemTable+view shape does NOT reproduce the historical collapse — string
+//! (Utf8View) and integer GROUP BY both partition correctly here. That does
+//! NOT prove the collapse is workflow-shape-dependent: this fixture bypasses
+//! `SqlProxyLogical` metadata sync, stage materialization, and the shared-ctx
+//! `input_0` re-registration, which are where real NULL-producing aggregation
+//! defects could surface. Five rows cannot exclude a data-dependent defect.
+//! The `sql-group-by-correctness` change keeps the competing hypotheses open
+//! and will pin the triggering condition at workflow level (A1-A3) before the
+//! fix is considered done. This test stays as the unit-level guardrail.
 
 use datafusion::arrow::array::{Int32Array, Int64Array, StringViewArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -79,19 +81,45 @@ async fn probe_string_vs_int_groupby() {
     eprintln!("\n[PROBE] GROUP BY string(category) -> {} group(s): {:?}", s.len(), s);
     eprintln!("[PROBE] GROUP BY int(region)     -> {} group(s): {:?}", i.len(), i);
 
-    // Guardrail: BOTH the string (Utf8View) and integer columns must
-    // partition into exactly 3 groups with the expected counts. A collapse to
-    // a single NULL/empty-key row (the historical `core.sql` bug) trips this.
-    assert_eq!(i.len(), 3, "int GROUP BY sanity (3 groups) failed, got {i:?}");
+    // Guardrail: BOTH the string (Utf8View) and integer columns must partition
+    // into the EXACT ordered key/count tuples (a=2,b=2,c=1 and 1=2,2=2,3=1)
+    // with no NULL/empty keys. Asserting only on the group count would let a
+    // wrong-but-plausible distribution (e.g. counts (1,1,3) over keys a,b,c)
+    // or a single NULL-key collapse pass.
+    let s_expect: Vec<(&str, i32)> = vec![("a", 2), ("b", 2), ("c", 1)];
+    let i_expect: Vec<(&str, i32)> = vec![("1", 2), ("2", 2), ("3", 1)];
+
     assert_eq!(
-        s.len(),
-        3,
-        "string GROUP BY collapsed or mis-grouped (want 3 groups a=2,b=2,c=1), got {s:?}"
+        s,
+        s_expect
+            .iter()
+            .map(|(k, n)| (k.to_string(), *n))
+            .collect::<Vec<_>>(),
+        "string GROUP BY must be exactly (a=2,b=2,c=1); got {s:?}"
+    );
+    assert_eq!(
+        i,
+        i_expect
+            .iter()
+            .map(|(k, n)| (k.to_string(), *n))
+            .collect::<Vec<_>>(),
+        "int GROUP BY must be exactly (1=2,2=2,3=1); got {i:?}"
+    );
+    // No NULL/empty keys in either column (a collapse would yield a single
+    // empty-string key).
+    assert!(
+        !s.iter().any(|(k, _)| k.is_empty()),
+        "string GROUP BY produced a NULL/empty key: {s:?}"
     );
     assert!(
-        !s.iter().any(|(c, _)| c.is_empty()),
-        "string GROUP BY produced an empty/NULL key (collapsed): {s:?}"
+        !i.iter().any(|(k, _)| k.is_empty()),
+        "int GROUP BY produced a NULL/empty key: {i:?}"
     );
-    let total: i32 = s.iter().map(|(_, n)| *n).sum();
-    assert_eq!(total, 5, "string GROUP BY lost rows (want 5 total), got {total}");
+    // Row counts are non-null and the total is preserved (5 input rows).
+    assert!(s.iter().all(|(_, n)| *n > 0), "string GROUP BY has a zero/null count: {s:?}");
+    assert!(i.iter().all(|(_, n)| *n > 0), "int GROUP BY has a zero/null count: {i:?}");
+    let s_total: i32 = s.iter().map(|(_, n)| *n).sum();
+    let i_total: i32 = i.iter().map(|(_, n)| *n).sum();
+    assert_eq!(s_total, 5, "string GROUP BY lost rows (want 5 total), got {s_total}");
+    assert_eq!(i_total, 5, "int GROUP BY lost rows (want 5 total), got {i_total}");
 }
