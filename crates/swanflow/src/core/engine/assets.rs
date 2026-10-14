@@ -296,6 +296,59 @@ pub struct AssetStatus {
     pub status: String, // "materialized" | "stale-config" | "stale-upstream" | "never-run"
 }
 
+/// Structural-unreadability signatures for the ledger file: states the
+/// file cannot recover from on its own — written by a newer DuckDB
+/// build (storage-version bump), a non-DuckDB file, a truncated file,
+/// or a block-checksum failure.
+///
+/// Deliberately does NOT match transient errors (e.g. "Could not set
+/// lock" / "Resource temporarily unavailable"): a backup on a transient
+/// failure would destroy a GOOD file another process is holding.
+fn ledger_open_error_is_structural(msg: &str) -> bool {
+    msg.contains("version number")
+        || msg.contains("not a valid DuckDB database file")
+        || msg.contains("Corrupt database file")
+        || msg.contains("Could not read enough bytes")
+}
+
+/// Open the ledger file, recovering from a structurally-unreadable file
+/// by backing it up (plus any orphaned WAL) under a
+/// `.corrupt-<pid>-<nanos>` suffix and opening a fresh one. Transient
+/// errors propagate unchanged.
+///
+/// The old behavior on a version-bumped/corrupt ledger was to log
+/// "open failed (ignored)" and silently disable the entire asset layer
+/// (incremental skip, freshness, backfill) for every subsequent run
+/// while the CLI still printed "Execution Finished." Recovery keeps a
+/// byte-exact backup so nothing is lost without consent.
+///
+/// Callers must hold the cross-process `LedgerGuard` for the whole
+/// replace-reopen window (all current callers do).
+fn open_ledger_connection(path: &Path) -> anyhow::Result<duckdb::Connection> {
+    match duckdb::Connection::open(path) {
+        Ok(conn) => Ok(conn),
+        Err(e) => {
+            let msg = e.to_string();
+            if !ledger_open_error_is_structural(&msg) {
+                return Err(e.into());
+            }
+            let base = path.file_name().and_then(|f| f.to_str()).unwrap_or("assets.duckdb");
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let backup = path.with_file_name(format!("{base}.corrupt-{}-{nanos}", std::process::id()));
+            if let Err(w) = std::fs::rename(path, &backup) {
+                eprintln!("[assets] ledger unreadable ({}) and backup FAILED — file left in place: {w}", msg.lines().next().unwrap_or(&msg));
+                return Err(anyhow::anyhow!("asset ledger unreadable and backup failed: {msg}"));
+            }
+            let wal = path.with_file_name(format!("{base}.wal"));
+            if wal.exists() {
+                let _ = std::fs::rename(&wal, path.with_file_name(format!("{base}.wal.corrupt-{}-{nanos}", std::process::id())));
+            }
+            eprintln!("[assets] ledger unreadable ({}); backed up to {} and opening a fresh ledger — previous run history in the ledger is gone.", msg.lines().next().unwrap_or(&msg), backup.display());
+            duckdb::Connection::open(path).map_err(|e2| anyhow::anyhow!("asset ledger rebuilt after corruption but re-open failed: {e2}"))
+        }
+    }
+}
+
 /// DuckDB-backed materialization ledger.
 pub struct AssetLedger {
     conn: duckdb::Connection,
@@ -322,7 +375,7 @@ impl AssetLedger {
             // execute-normally), never by proceeding uncoordinated.
             anyhow::bail!("assets.lock not acquired — refusing ledger open");
         }
-        let conn = duckdb::Connection::open(&path)?;
+        let conn = open_ledger_connection(&path)?;
         // Cheap existence probe first: if both tables exist, skip DDL —
         // running CREATE TABLE IF NOT EXISTS on a file left with an
         // un-checkpointed WAL (previous process died between write and
@@ -379,7 +432,7 @@ impl AssetLedger {
             anyhow::bail!("assets.lock not acquired — refusing ledger write");
         }
         let path = self.cache_dir.join("assets.duckdb");
-        let scoped = duckdb::Connection::open(&path)?;
+        let scoped = open_ledger_connection(&path)?;
         // First-use DDL (existence probe pattern from open()).
         if scoped
             .execute_batch("SELECT 1 FROM asset_runs LIMIT 1; SELECT 1 FROM asset_intervals LIMIT 1")
@@ -686,8 +739,10 @@ pub fn record_asset_run(
         eprintln!("[assets] ledger lock unavailable — run not recorded");
         return;
     }
-    let conn = match duckdb::Connection::open(&path) {
+    let conn = match open_ledger_connection(&path) {
         Ok(c) => c,
+        // Transient (non-structural) failure only — structural errors
+        // already backed up + rebuilt inside the helper.
         Err(e) => {
             eprintln!("[assets] ledger open failed (ignored): {}", e);
             return;
@@ -765,8 +820,11 @@ pub fn try_skip_fresh(
         // (no skip decision based on an uncoordinated read).
         return None;
     }
-    let conn = match duckdb::Connection::open(&path) {
+    let conn = match open_ledger_connection(&path) {
         Ok(c) => c,
+        // Transient failure: fail safe to executing the node (no skip
+        // decision based on an uncoordinated read). Structural failures
+        // already backed up + rebuilt inside the helper.
         Err(_) => return None,
     };
     let ledger = AssetLedger { conn, cache_dir: std::path::PathBuf::from(cache_dir) };
@@ -1359,5 +1417,38 @@ mod tests {
         drop(fresh);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ledger_corrupt_file_is_backed_up_and_rebuilt() {
+        // A structurally-unreadable ledger (non-DuckDB bytes — e.g. clobbered
+        // by a wrong build or a version-bumped file the current binary can't
+        // read) must be backed up + reopened fresh, not silently disabled.
+        let dir = std::env::temp_dir().join(format!(
+            "swanflow_corrupt_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Drop a non-DuckDB file at the ledger path.
+        std::fs::write(dir.join("assets.duckdb"), b"this is not a duckdb file").unwrap();
+
+        // open_ledger_connection must recover: usable connection now, and a
+        // .corrupt-* backup of the bad file must exist.
+        let conn = open_ledger_connection(std::path::Path::new(&dir.join("assets.duckdb"))).expect("corrupt ledger must be recovered");
+        // A usable connection now (open_ledger_connection does NOT run DDL —
+        // the caller does; just prove the file is openable).
+        conn.execute_batch("SELECT 1").unwrap();
+        let backed_up = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("assets.duckdb.corrupt-")
+            });
+        assert!(backed_up, "corrupt ledger must be backed up with a .corrupt- suffix");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
