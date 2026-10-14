@@ -46,7 +46,7 @@ impl DbRead for MockDb {
     async fn query(&self, _sql: &str) -> CoreResult<SendableRecordBatchStream> {
         let schema = Arc::new(datafusion::arrow::datatypes::Schema::empty());
         use datafusion::physical_plan::stream::RecordBatchReceiverStream;
-        let mut builder = RecordBatchReceiverStream::builder(schema, 4);
+        let builder = RecordBatchReceiverStream::builder(schema, 4);
         drop(builder.tx());
         Ok(builder.build())
     }
@@ -164,7 +164,7 @@ impl MockKeyStore {
         }
     }
 
-    pub fn with_entry(mut self, key: &str, value: &str) -> Self {
+    pub fn with_entry(self, key: &str, value: &str) -> Self {
         self.store.lock().unwrap().insert(key.to_string(), value.to_string());
         self
     }
@@ -268,7 +268,7 @@ impl MockBlobStore {
         }
     }
 
-    pub fn with_blob(mut self, key: &str, data: Vec<u8>) -> Self {
+    pub fn with_blob(self, key: &str, data: Vec<u8>) -> Self {
         self.blobs.lock().unwrap().insert(key.to_string(), data);
         self
     }
