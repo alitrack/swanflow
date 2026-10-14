@@ -47,6 +47,18 @@ enum Commands {
         /// Path to the workflow file
         file: PathBuf,
     },
+    /// Render a workflow's lineage as a self-contained single-file HTML portal
+    /// (no execution, no external resources by default)
+    Docs {
+        /// Path to the workflow file
+        file: PathBuf,
+        /// Output HTML path (default: `<workflow-name>-docs.html`)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Add a Mermaid lineage diagram (CDN; degrades to raw text offline)
+        #[arg(long)]
+        mermaid: bool,
+    },
     /// MCP (Model Context Protocol) commands for interacting with MCP servers
     Mcp {
         #[command(subcommand)]
@@ -441,6 +453,38 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
             println!("✅ Execution Finished.");
+        }
+        Commands::Docs {
+            file,
+            output,
+            mermaid,
+        } => {
+            let workflow = load_workflow(file)?;
+            let doc =
+                swanflow::docs_portal::build_doc(&workflow).map_err(|e| anyhow::anyhow!(e))?;
+            let html = swanflow::docs_portal::render_html(&doc, mermaid);
+            let path = output.unwrap_or_else(|| {
+                let slug: String = workflow
+                    .name
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+                    .collect();
+                let slug = slug.trim_matches('-').to_string();
+                let base = if slug.is_empty() {
+                    "workflow".to_string()
+                } else {
+                    slug
+                };
+                std::path::PathBuf::from(format!("{base}-docs.html"))
+            });
+            swanflow::docs_portal::write_doc(&path, &html)?;
+            println!(
+                "✅ Docs portal: {} ({} nodes, {} edges{})",
+                path.display(),
+                doc.node_count,
+                doc.edge_count,
+                if mermaid { ", mermaid" } else { "" }
+            );
         }
         Commands::Inspect { file } => {
             let workflow = load_workflow(file)?;

@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod agent;
 pub mod core;
+pub mod docs_portal;
 pub mod hotl;
 pub mod mcp;
 pub mod nodes;
