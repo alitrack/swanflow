@@ -836,7 +836,7 @@ impl SwanFlowEngine {
                 if level < resume_from {
                     continue;
                 }
-                println!("DEBUG: Executing Stage Level {}", level);
+                eprintln!("DEBUG: Executing Stage Level {}", level);
                 terminals
                     .sort_by(|a, b| a.node_id.cmp(&b.node_id).then_with(|| a.port.cmp(&b.port)));
 
@@ -918,7 +918,7 @@ impl SwanFlowEngine {
                             continue;
                         }
                     }
-                    println!(
+                    eprintln!(
                         "DEBUG: Stage Execution for level {}, node {}, port {}",
                         level, node_id, port
                     );
@@ -1264,7 +1264,7 @@ impl SwanFlowEngine {
                                 crate::core::retry::DEFAULT_BASE_DELAY_MS,
                                 0,
                             );
-                            println!("DEBUG: Level {} node {} port {} planning failed, retrying after sync (backoff {}ms)...", level, node_id, port, retry_delay_ms);
+                            eprintln!("DEBUG: Level {} node {} port {} planning failed, retrying after sync (backoff {}ms)...", level, node_id, port, retry_delay_ms);
                             sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
                             tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
 

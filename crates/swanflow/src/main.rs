@@ -41,6 +41,13 @@ enum Commands {
         /// digest chain is unchanged (equivalent to SWANFLOW_SKIP_FRESH=1)
         #[arg(long)]
         skip_fresh: bool,
+
+        /// Emit machine-readable JSON Lines on stdout: one JSON object per
+        /// NodeEvent plus a final `{"event":"finished",...}` line. Human-
+        /// readable progress goes to stderr so stdout stays parseable by
+        /// agents and scripts.
+        #[arg(long)]
+        json: bool,
     },
     /// Inspect a workflow's inferred schemas without executing it
     Inspect {
@@ -172,6 +179,11 @@ enum AgentCommands {
         /// Also print the inferred schemas for each node.
         #[arg(long)]
         explain: bool,
+
+        /// Emit machine-readable JSON Lines on stdout for the execution
+        /// phase (same schema as `swanflow run --json`).
+        #[arg(long)]
+        json: bool,
     },
 
     /// Run the AI AnalystAgent against a natural-language request and emit a
@@ -415,12 +427,19 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file, legacy_yaml, skip_fresh } => {
+        Commands::Run { file, legacy_yaml, skip_fresh, json } => {
             let workflow = load_workflow(file)?;
-            println!(
-                "🚀 Loading Workflow: {} (ID: {})",
-                workflow.name, workflow.id
-            );
+            if json {
+                println!(
+                    "{{\"event\":\"workflow\",\"name\":{},\"id\":\"{}\"}}",
+                    serde_json::to_string(&workflow.name).unwrap_or_default(),
+                    workflow.id
+                );
+            } else {
+                eprintln!("🚀 Loading Workflow: {} (ID: {})",
+                    workflow.name, workflow.id
+                );
+            }
 
             let registry = Arc::new(NodeRegistry::default());
             let engine = SwanFlowEngine::new(registry).with_skip_fresh(skip_fresh);
@@ -431,12 +450,19 @@ async fn main() -> anyhow::Result<()> {
                 engine.execute_workflow(&workflow).await?
             };
 
-            println!("📊 Execution Started...");
             let mut failed = false;
+            if !json {
+                eprintln!("📊 Execution Started...");
+            }
             while let Some(event) = rx.recv().await {
+                if json {
+                    println!("{}", serde_json::to_string(&event).unwrap_or_default());
+                }
                 match event {
                     NodeEvent::StateChanged { node_id, state } => {
-                        println!("  Node[{}] -> {:?}", node_id, state);
+                        if !json {
+                            println!("  Node[{}] -> {:?}", node_id, state);
+                        }
                         if matches!(state, NodeState::Error(_)) {
                             failed = true;
                         }
@@ -448,11 +474,18 @@ async fn main() -> anyhow::Result<()> {
                     _ => {}
                 }
             }
-            if failed {
+            if json {
+                println!("{{\"event\":\"finished\",\"ok\":{}}}", !failed);
+                if failed {
+                    std::process::exit(1);
+                }
+            } else if failed {
                 println!("❌ Execution Finished with errors.");
                 std::process::exit(1);
             }
-            println!("✅ Execution Finished.");
+            if !json {
+                println!("✅ Execution Finished.");
+            }
         }
         Commands::Docs {
             file,
@@ -527,7 +560,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Agent { command } => match command {
-            AgentCommands::Approve { file, yes, dry_run, explain } => {
+            AgentCommands::Approve { file, yes, dry_run, explain, json } => {
                 use swanflow::hotl::ApprovalGate;
 
                 let workflow = load_workflow(file)?;
@@ -571,32 +604,58 @@ async fn main() -> anyhow::Result<()> {
                     return Ok(());
                 }
 
-                // Interactive (or --yes) approval gate on stdout/stdin.
+                // Interactive (or --yes) approval gate. Under --json the
+                // human-readable summary goes to stderr so stdout stays a
+                // clean JSON Lines stream.
                 let gate = if yes {
                     ApprovalGate::auto_approve()
                 } else {
                     ApprovalGate::new()
                 };
                 let stdin = std::io::stdin();
-                let stdout = std::io::stdout();
                 let mut lock_in = stdin.lock();
-                let mut lock_out = stdout.lock();
-                let approved = gate.review(&workflow, &mut lock_in, &mut lock_out)?;
+                let approved = if json {
+                    let stderr = std::io::stderr();
+                    let mut lock_err = stderr.lock();
+                    gate.review(&workflow, &mut lock_in, &mut lock_err)?
+                } else {
+                    let stdout = std::io::stdout();
+                    let mut lock_out = stdout.lock();
+                    let approved = gate.review(&workflow, &mut lock_in, &mut lock_out)?;
+                    drop(lock_out);
+                    approved
+                };
                 drop(lock_in);
-                drop(lock_out);
 
                 if !approved {
-                    println!("❌ Execution cancelled by human reviewer.");
+                    if json {
+                        println!("{{\"event\":\"finished\",\"ok\":false,\"reason\":\"cancelled\"}}");
+                    } else {
+                        println!("❌ Execution cancelled by human reviewer.");
+                    }
                     return Ok(());
                 }
 
-                println!("✅ Approved — executing workflow: {} ({})", workflow.name, workflow.id);
+                if json {
+                    println!(
+                        "{{\"event\":\"workflow\",\"name\":{},\"id\":\"{}\"}}",
+                        serde_json::to_string(&workflow.name).unwrap_or_default(),
+                        workflow.id
+                    );
+                } else {
+                    println!("✅ Approved — executing workflow: {} ({})", workflow.name, workflow.id);
+                }
                 let mut rx = engine.execute_workflow(&workflow).await?;
                 let mut failed = false;
                 while let Some(event) = rx.recv().await {
+                    if json {
+                        println!("{}", serde_json::to_string(&event).unwrap_or_default());
+                    }
                     match event {
                         NodeEvent::StateChanged { node_id, state } => {
-                            println!("  Node[{}] -> {:?}\n", node_id, state);
+                            if !json {
+                                println!("  Node[{}] -> {:?}\n", node_id, state);
+                            }
                             if matches!(state, NodeState::Error(_)) {
                                 failed = true;
                             }
@@ -608,11 +667,17 @@ async fn main() -> anyhow::Result<()> {
                         _ => {}
                     }
                 }
-                if failed {
+                if json {
+                    println!("{{\"event\":\"finished\",\"ok\":{}}}", !failed);
+                } else if failed {
                     println!("❌ Execution Finished with errors.");
+                }
+                if failed {
                     std::process::exit(1);
                 }
-                println!("✅ Execution Finished.");
+                if !json {
+                    println!("✅ Execution Finished.");
+                }
             }
             AgentCommands::Analyze { prompt, model, endpoint, api_key, out } => {
                 use swanflow::agent::AnalystAgent;
