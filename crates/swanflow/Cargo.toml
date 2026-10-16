@@ -28,6 +28,11 @@ test = false
 swanflow-core = { path = "../swanflow-core" }
 swanflow-knime = { path = "../swanflow-knime" }
 swanflow-plugin-sdk = { path = "../swanflow-plugin-sdk" }
+# Leiden community detection for core.ai.community_batches (UA port batch 3).
+# default-features = false: no rayon (forces the deterministic sequential
+# algorithm paths), no serde/petgraph/gryf adapters — the node feeds the
+# built-in GraphDataBuilder directly.
+leiden-rs = { version = "0.8.1", default-features = false }
 datafusion = "52.1.0"
 sqlparser = "0.59"
 arrow = { version = "57.0", features = ["ffi"] }

@@ -59,6 +59,7 @@ impl NodeRegistry {
     /// require runtime configuration (API keys, tool names) and are used as
     /// helpers rather than direct workflow nodes.
     pub fn register_core_nodes(&mut self) {
+        use crate::nodes::ai::communities::CommunityBatchesNode;
         use crate::nodes::ai::contracts::{CitationTrackerNode, StructuredIoContractNode};
         use crate::nodes::ai::graph::{
             ContextFuserNode, EntityExtractorNode, GraphRetrieverNode, ResearchLoopMetaNode,
@@ -193,6 +194,7 @@ impl NodeRegistry {
         self.register_node(Arc::new(McpToolNode));
         self.register_node(Arc::new(StructuredIoContractNode));
         self.register_node(Arc::new(CitationTrackerNode));
+        self.register_node(Arc::new(CommunityBatchesNode));
         self.register_node(Arc::new(EmbeddingGeneratorNode));
         self.register_node(Arc::new(QueryPlanningNode));
         self.register_node(Arc::new(SemanticChunkerNode));
