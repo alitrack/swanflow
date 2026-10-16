@@ -7,6 +7,7 @@ pub mod daemon;
 pub mod flow_vars;
 pub mod health;
 pub mod incremental;
+pub mod webhook_server;
 pub mod datafusion_backend;
 pub mod duckdb_backend;
 

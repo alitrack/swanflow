@@ -284,6 +284,12 @@ enum DaemonCommands {
         /// Automation sensor tick period in seconds (default: 30)
         #[arg(long)]
         tick: Option<u64>,
+        /// Enable webhook ingress (push triggers): HTTP listener bound
+        /// here feeds `on_webhook(...)` automation conditions, e.g.
+        /// `--webhook-bind 127.0.0.1:8748` then
+        /// `curl -X POST http://127.0.0.1:8748/hooks/refresh`
+        #[arg(long)]
+        webhook_bind: Option<String>,
         /// Enable embedded Quack server so any DuckDB client can ATTACH
         #[arg(long)]
         quack: bool,
@@ -323,6 +329,17 @@ enum DaemonCommands {
     Watch {
         /// Path to workflow file (.yaml/.json) with `automation` conditions
         file: PathBuf,
+        /// Custom socket path
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Push a webhook event into the daemon's automation sensor
+    /// (ADR-014 Stage 4): the next tick fires every watched workflow
+    /// whose `on_webhook(path)` matches. Requires the daemon to run
+    /// with `--webhook-bind` (or the socket-trigger fallback).
+    Trigger {
+        /// Webhook path to fire, e.g. /hooks/refresh
+        path: String,
         /// Custom socket path
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -874,6 +891,7 @@ async fn main() -> anyhow::Result<()> {
                                     last_materialized_at: None,
                                     last_eval_ready_at: Some(now),
                                     ledger_unavailable: false,
+                                    webhook_fired: std::collections::HashSet::new(),
                                 };
                                 match swanflow::core::engine::automation::evaluate(&cond, &ctx) {
                                     Some(true) => "🟢 ready".to_string(),
@@ -911,6 +929,7 @@ async fn main() -> anyhow::Result<()> {
                                     last_materialized_at: None,
                                     last_eval_ready_at: Some(now),
                                     ledger_unavailable: true,
+                                    webhook_fired: std::collections::HashSet::new(),
                                 };
                                 match swanflow::core::engine::automation::evaluate(&cond, &ctx) {
                                     Some(true) => "🟢 ready".to_string(),
@@ -963,6 +982,7 @@ async fn main() -> anyhow::Result<()> {
                                 // since the daemon's last tick.
                                 last_eval_ready_at: Some(now),
                                 ledger_unavailable,
+                                webhook_fired: std::collections::HashSet::new(),
                             };
                             let lag = mat.map(|t| (now - t).num_minutes()).unwrap_or(i64::MAX);
                             let lag_s = if lag == i64::MAX { "never".into() } else { format!("{lag}m ago") };
@@ -1641,7 +1661,7 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
     }
 
     match cmd {
-        DaemonCommands::Start { socket, tick, quack, quack_bind, quack_token, foreground } => {
+        DaemonCommands::Start { socket, tick, webhook_bind, quack, quack_bind, quack_token, foreground } => {
             if foreground {
                 // Forked child — run daemon in foreground
                 let registry = Arc::new(NodeRegistry::default());
@@ -1652,6 +1672,9 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
                 }
                 if let Some(secs) = tick {
                     daemon = daemon.with_tick_secs(secs);
+                }
+                if let Some(bind) = webhook_bind {
+                    daemon = daemon.with_webhook_bind(bind);
                 }
                 if quack {
                     let mut qc = swanflow::core::engine::daemon::QuackConfig::default();
@@ -1702,6 +1725,9 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             if let Some(secs) = tick {
                 child.arg("--tick").arg(secs.to_string());
             }
+            if let Some(ref bind) = webhook_bind {
+                child.arg("--webhook-bind").arg(bind);
+            }
             if quack {
                 child.arg("--quack").arg("--quack-bind").arg(&quack_bind);
                 if let Some(ref t) = quack_token {
@@ -1718,6 +1744,9 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
                 Ok(_) => {
                     println!("✅ SwanFlow daemon started (PID: {})", pid);
                     println!("   Socket: {}", socket_path.display());
+                    if let Some(ref bind) = webhook_bind {
+                        println!("   Webhook: http://{bind}/ (POST /hooks/... → on_webhook)");
+                    }
                     if quack {
                         let token_display = quack_token.as_deref().unwrap_or("<auto-generated>");
                         println!("   Quack:  quack://{}/ (token: {})", quack_bind, token_display);
@@ -1770,6 +1799,16 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             let resp = send_daemon_raw(&socket, "automation.register", serde_json::json!({"path": abs.to_string_lossy().to_string()})).await?;
             println!("{}", resp);
             println!("⚙️  The daemon sensor re-evaluates automation conditions every 30s.");
+            Ok(())
+        }
+        DaemonCommands::Trigger { path, socket } => {
+            // Validate the path shape client-side for a friendlier error
+            // than a silent 404-equivalent on the daemon side.
+            swanflow::core::engine::automation::parse_webhook_path(&path)
+                .map_err(|e| anyhow::anyhow!("invalid webhook path: {e}"))?;
+            let resp = send_daemon_raw(&socket, "automation.webhook", serde_json::json!({"path": path})).await?;
+            println!("{}", resp);
+            println!("🔔 Pushed. Matching on_webhook conditions fire on the next sensor tick.");
             Ok(())
         }
         DaemonCommands::Unwatch { target, socket } => {
@@ -1952,6 +1991,9 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
         DaemonCommands::Unwatch { target, .. } => {
             // Target is a remote path or UUID — forwarded verbatim.
             run_ssh(host, &["swanflow", "daemon", "unwatch", &target])?;
+        }
+        DaemonCommands::Trigger { path, .. } => {
+            run_ssh(host, &["swanflow", "daemon", "trigger", &path])?;
         }
         DaemonCommands::List { .. } => {
             run_ssh(host, &["swanflow", "daemon", "list"])?;

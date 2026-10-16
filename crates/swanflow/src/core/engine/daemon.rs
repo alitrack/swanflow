@@ -250,6 +250,10 @@ pub struct Daemon {
     watched: Arc<Mutex<Vec<WatchedWorkflow>>>,
     /// Sensor tick period (default 30s). Exposed for tests.
     tick_secs: u64,
+    /// ADR-014 Stage 4: webhook ingress bind address. When set, the
+    /// daemon starts an HTTP listener that turns POST/GET pushes into
+    /// automation events for `on_webhook(...)` conditions.
+    webhook_bind: Option<String>,
 }
 
 /// A workflow registered with the daemon's automation sensor.
@@ -491,12 +495,20 @@ impl Daemon {
             quack_config: None,
             watched: Arc::new(Mutex::new(Vec::new())),
             tick_secs: 30,
+            webhook_bind: None,
         }
     }
 
     /// Override the sensor tick period (ADR-014 Stage 3).
     pub fn with_tick_secs(mut self, secs: u64) -> Self {
         self.tick_secs = secs;
+        self
+    }
+
+    /// Enable the webhook ingress listener (ADR-014 Stage 4) on
+    /// `bind` (e.g. "127.0.0.1:8748" / "0.0.0.0:8748").
+    pub fn with_webhook_bind(mut self, bind: String) -> Self {
+        self.webhook_bind = Some(bind);
         self
     }
 
@@ -595,6 +607,23 @@ impl Daemon {
             }
         }
 
+        // ── ADR-014 Stage 4: webhook ingress (push triggers) ──
+        // Optional HTTP listener feeding on_webhook(...) conditions.
+        // Starting it is best-effort-but-loud: a bind failure (port
+        // taken) aborts daemon start — silently running without push
+        // triggers would mislead every on_webhook user.
+        let webhook_queue: Option<Arc<crate::core::engine::webhook_server::WebhookQueue>> =
+            match &self.webhook_bind {
+                Some(bind) => Some(
+                    crate::core::engine::webhook_server::spawn_webhook_listener(bind)
+                        .await
+                        .map_err(|e| {
+                            format!("webhook ingress failed to bind '{bind}': {e}")
+                        })?,
+                ),
+                None => None,
+            };
+
         // ── ADR-014 Stage 3: automation sensor loop ──
         // Every tick, evaluate registered workflows' automation conditions
         // (stateless evaluator + daemon-owned last_ready state) and execute
@@ -604,11 +633,12 @@ impl Daemon {
             let engine = self.engine.clone();
             let watched = self.watched.clone();
             let tick = std::time::Duration::from_secs(self.tick_secs.max(1));
+            let sensor_webhook_queue = webhook_queue.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(tick);
                 loop {
                     interval.tick().await;
-                    sensor_tick(&engine, &watched).await;
+                    sensor_tick(&engine, &watched, sensor_webhook_queue.as_ref()).await;
                 }
             });
         }
@@ -623,8 +653,11 @@ impl Daemon {
             let engine = self.engine.clone();
             let workflows = self.workflows.clone();
             let watched = self.watched.clone();
+            let webhook_queue = webhook_queue.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_client(stream, engine, workflows, watched, peer).await {
+                if let Err(e) =
+                    handle_client(stream, engine, workflows, watched, webhook_queue, peer).await
+                {
                     tracing::warn!("Client error: {}", e);
                 }
             });
@@ -643,21 +676,35 @@ impl Daemon {
 async fn sensor_tick(
     engine: &Arc<SwanFlowEngine>,
     watched: &Arc<Mutex<Vec<WatchedWorkflow>>>,
+    webhook_queue: Option<&Arc<crate::core::engine::webhook_server::WebhookQueue>>,
 ) {
-    use crate::core::engine::automation::{evaluate, parse_automation, EvalContext};
+    use crate::core::engine::automation::{evaluate, parse_automation, webhook_paths, EvalContext};
     use chrono::Utc;
 
     let now = Utc::now();
+    // ADR-014 Stage 4: pending webhook arrivals, snapshotted once per
+    // tick. Consume-after-claim: a path is only removed from the queue
+    // after the run it triggered is claimed — an unclaimed firing
+    // (stale generation, deferred removal) leaves the event pending so
+    // it re-fires next tick. Never lose a push.
+    let webhook_fired = match webhook_queue {
+        Some(q) => q.fired_set().await,
+        None => std::collections::HashSet::new(),
+    };
     // Snapshot decisions under the lock, execute outside it (runs can be
     // long; we must not block watch registration on an execution). Each
     // snapshot carries the entry's (workflow id, generation) — re-checked
     // before executing so an unregister / re-watch that happened while we
     // were busy drops the stale run instead of executing it.
-    let mut to_run: Vec<(uuid::Uuid, u64, Workflow, Vec<Uuid>)> = Vec::new();
+    let mut to_run: Vec<(uuid::Uuid, u64, Workflow, Vec<Uuid>, Vec<String>)> = Vec::new();
     {
         let mut w = watched.lock().await;
         for ww in w.iter_mut() {
             let mut ready_nodes = Vec::new();
+            // Webhook paths consumed if THIS node's evaluation fires and
+            // the subsequent run is claimed (stamped below, consumed in
+            // the run loop).
+            let mut fired_hooks: Vec<String> = Vec::new();
             for idx in ww.workflow.graph.node_indices() {
                 let node = &ww.workflow.graph[idx];
                 let Some(dsl) = node.config.get("automation").and_then(|v| v.as_str()) else {
@@ -685,11 +732,21 @@ async fn sensor_tick(
                     last_materialized_at: mat,
                     last_eval_ready_at: ww.last_ready.get(&node.id).copied(),
                     ledger_unavailable,
+                    webhook_fired: webhook_fired.clone(),
                 };
                 match evaluate(&cond, &ctx) {
                     // Fire only on definite true. Unknown (ledger unreadable
                     // etc.) skips this tick and retries — never fires blind.
-                    Some(true) => ready_nodes.push(node.id),
+                    Some(true) => {
+                        ready_nodes.push(node.id);
+                        // Stage 4: remember which webhook paths this node
+                        // consumed (dedup) — consumed only after claim.
+                        for p in webhook_paths(&cond) {
+                            if webhook_fired.contains(&p) && !fired_hooks.contains(&p) {
+                                fired_hooks.push(p);
+                            }
+                        }
+                    }
                     Some(false) => {}
                     None => tracing::debug!(
                         "automation sensor: '{}' node {n} Unknown — skipping this tick",
@@ -701,12 +758,18 @@ async fn sensor_tick(
                 for id in &ready_nodes {
                     ww.last_ready.insert(*id, now);
                 }
-                to_run.push((ww.workflow.id, ww.generation, ww.workflow.clone(), ready_nodes));
+                to_run.push((
+                    ww.workflow.id,
+                    ww.generation,
+                    ww.workflow.clone(),
+                    ready_nodes,
+                    fired_hooks,
+                ));
             }
         }
     }
 
-    for (wf_id, generation, workflow, ready_nodes) in to_run {
+    for (wf_id, generation, workflow, ready_nodes, fired_hooks) in to_run {
         // Claim + re-check under ONE lock acquisition (codex-review P1 r2):
         // the old code checked (id, generation) and released the lock, then
         // `save_watched_entries().await` yielded — an unregister landing in
@@ -758,6 +821,15 @@ async fn sensor_tick(
             );
             sensor_clear_claim(watched, wf_id, generation).await;
             continue;
+        }
+        // Stage 4 consume-after-claim: the run is claimed and current —
+        // NOW the webhook events it fired on are consumed. Before this
+        // point every failure path left them pending (re-fire next
+        // tick); after it the run owns them.
+        if let Some(q) = webhook_queue {
+            for p in &fired_hooks {
+                q.consume(p).await;
+            }
         }
         tracing::info!(
             "automation sensor: {} node(s) ready in '{}' — executing",
@@ -854,6 +926,7 @@ async fn handle_client(
     engine: Arc<SwanFlowEngine>,
     workflows: Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
     watched: Arc<Mutex<Vec<WatchedWorkflow>>>,
+    webhook_queue: Option<Arc<crate::core::engine::webhook_server::WebhookQueue>>,
     peer: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
@@ -911,7 +984,7 @@ async fn handle_client(
             return Ok(());
         }
 
-        let resp = handle_method(&req, &engine, &workflows, &watched).await;
+        let resp = handle_method(&req, &engine, &workflows, &watched, webhook_queue.as_ref()).await;
         if let Err(e) = write_response(&mut writer, &resp).await {
             eprintln!("[daemon] WARNING: write response to client {} failed: {}", peer, e);
         }
@@ -925,8 +998,62 @@ async fn handle_method(
     engine: &Arc<SwanFlowEngine>,
     workflows: &Arc<Mutex<HashMap<Uuid, RunningWorkflow>>>,
     watched: &Arc<Mutex<Vec<WatchedWorkflow>>>,
+    webhook_queue: Option<&Arc<crate::core::engine::webhook_server::WebhookQueue>>,
 ) -> DaemonResponse {
     match req.method.as_str() {
+        // ADR-014 Stage 4: push a webhook event through the Unix-socket
+        // API (same queue the HTTP listener feeds). Params:
+        // {"path": "/hooks/refresh"}. Works with or without the HTTP
+        // listener — the CLI's `daemon trigger` lands here.
+        "automation.webhook" => {
+            let path = req.params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if path.is_empty() {
+                return DaemonResponse {
+                    id: req.id.clone(),
+                    ok: Some(false),
+                    error: Some("Missing 'path' parameter".to_string()),
+                    workflow_id: None,
+                    workflows: None,
+                    watched: None,
+                    logs: None,
+                    status: None,
+                };
+            }
+            match webhook_queue {
+                Some(q) => {
+                    let pending = q.record(path).await;
+                    tracing::info!("webhook (socket) arrived: {path} (pending={pending})");
+                    daemon_log(&format!("webhook path={path} pending={pending}"));
+                    DaemonResponse {
+                        id: req.id.clone(),
+                        ok: Some(true),
+                        error: None,
+                        workflow_id: None,
+                        workflows: None,
+                        watched: None,
+                        logs: None,
+                        status: None,
+                    }
+                }
+                // No queue = webhook ingress not enabled: record nowhere.
+                // This is a misconfiguration (triggering against a daemon
+                // started without --webhook-bind), so fail loudly.
+                None => DaemonResponse {
+                    id: req.id.clone(),
+                    ok: Some(false),
+                    error: Some(
+                        "webhook ingress not enabled — start the daemon with --webhook-bind"
+                            .to_string(),
+                    ),
+                    workflow_id: None,
+                    workflows: None,
+                    watched: None,
+                    logs: None,
+                    status: None,
+                },
+            }
+        }
+
         // ADR-014 Stage 3: register a workflow file with the automation
         // sensor. Params: {"path": "<workflow.yaml>"} (swanflow YAML/JSON,
         // NOT knwf).
