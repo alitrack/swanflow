@@ -274,7 +274,7 @@ impl Default for NodeRegistry {
 mod shell_marker_tests {
     use super::*;
 
-    /// The 9 AI governance nodes audited 2026-09-28 as pure pass-through shells
+    /// The 8 AI governance nodes audited 2026-09-28 as pure pass-through shells
     /// (propose_plan == identity clone; helpers dead code — see
     /// swanflow-workflows/docs/shell_nodes_audit.md). Their spec descriptions
     /// must carry the shell prefix so registry consumers can flag them.
@@ -291,7 +291,8 @@ mod shell_marker_tests {
             "core.ai.run_state_store",
             "core.ai.observability_audit_ledger",
             "core.ai.query_planning",
-            "core.ai.structured_io_contract",
+            // core.ai.structured_io_contract: real node since UA port batch 2
+            // (2026-10-16) — the 4-layer LLM-output validation gate.
             "core.ai.tool_executor",
             "core.flow.python_udf",
         ];

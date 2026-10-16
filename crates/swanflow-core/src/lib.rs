@@ -18,4 +18,4 @@ pub use nodes::{
     OptionDesignMetadata, OptionValueType, Plugin, PortDesignMetadata, PortSpec, TypedNodeBehavior,
 };
 pub use registry::NodeRegistry;
-pub use validation::SchemaValidator;
+pub use validation::{InstanceValidator, SchemaValidator};

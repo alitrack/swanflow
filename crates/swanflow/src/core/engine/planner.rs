@@ -166,6 +166,22 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 ),
             )));
         }
+        // core.ai.structured_io_contract: real since 2026-10-16 (UA port
+        // batch 2; was a pass-through shell) — the 4-layer validation gate
+        // for raw LLM JSON output (sanitize → alias-map/auto-fix →
+        // per-element JSON Schema check; fail-soft drop-and-count default).
+        if let Some(sio) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::contracts::StructuredIoContractLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::contracts::StructuredIoContractExec::new(
+                    sio.contract.clone(),
+                    Arc::new(sio.schema.as_arrow().clone()),
+                    physical_inputs[0].clone(),
+                ),
+            )));
+        }
         // core.ai.fact_claim_verifier: real implementation since 2026-09-28
         // (was a pass-through shell; see swanflow-workflows/docs/shell_nodes_audit.md).
         // Scores claim tokens against the evidence corpus of the input batch.
