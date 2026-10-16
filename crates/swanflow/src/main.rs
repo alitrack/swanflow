@@ -592,10 +592,25 @@ async fn main() -> anyhow::Result<()> {
 
                 println!("✅ Approved — executing workflow: {} ({})", workflow.name, workflow.id);
                 let mut rx = engine.execute_workflow(&workflow).await?;
+                let mut failed = false;
                 while let Some(event) = rx.recv().await {
-                    if let NodeEvent::StateChanged { node_id, state } = event {
-                        println!("  Node[{}] -> {:?}\n", node_id, state);
+                    match event {
+                        NodeEvent::StateChanged { node_id, state } => {
+                            println!("  Node[{}] -> {:?}\n", node_id, state);
+                            if matches!(state, NodeState::Error(_)) {
+                                failed = true;
+                            }
+                        }
+                        NodeEvent::Error { message, .. } => {
+                            eprintln!("  ❌ Error: {}", message);
+                            failed = true;
+                        }
+                        _ => {}
                     }
+                }
+                if failed {
+                    println!("❌ Execution Finished with errors.");
+                    std::process::exit(1);
                 }
                 println!("✅ Execution Finished.");
             }
