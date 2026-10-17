@@ -1,0 +1,46 @@
+name: "cdc_push_pipeline"
+id: "66666666-0000-0000-0000-000000000001"
+graph:
+  nodes:
+    # ── N1: CDC 变更抽取（纯 DuckDB 方案）──
+    # 源 = source_orders/snap.parquet（push 前由导出脚本从"上游 DuckDB"刷出）
+    # 已同步集合 = N2 上次物化产物（引擎缓存 cache/{n2_id}_0.parquet，cache_key
+    # = {node_id}_{port} 稳定可预测——CDC 状态零外部存储，全在引擎物化里）。
+    # 变更判定 = anti-join on (id, updated_at)：源行与上次快照不同或不存在
+    # => insert_or_update。首跑（seed 空 parquet）时 synced 全空=初始全量同步。
+    - id: "66666666-0000-0000-0000-0000000000a1"
+      type_id: "core.sql.duckdb"
+      config:
+        query: |
+          WITH source AS (
+            SELECT id, status, amount, updated_at
+            FROM read_parquet('/tmp/sf_cdc_e2e/source_orders/*.parquet')
+          ),
+          synced AS (
+            SELECT id, status, amount, updated_at
+            FROM read_parquet('/tmp/sf_cdc_e2e/cache/66666666-0000-0000-0000-0000000000a2_0.parquet')
+          )
+          SELECT s.id, s.status, s.amount, s.updated_at,
+                 'insert_or_update' AS op,
+                 strftime(NOW(), '%Y-%m-%dT%H:%M:%S') AS extracted_at
+          FROM source s
+          WHERE NOT EXISTS (
+            SELECT 1 FROM synced c WHERE c.id = s.id AND c.updated_at = s.updated_at
+          )
+        automation: 'on_webhook("/hooks/cdc")'
+      state: "Configured"
+      sub_workflow: null
+    # ── N2: 目标表落地（append + partition_by=id 幂等 upsert：同 id 重跑只留最新版）──
+    - id: "66666666-0000-0000-0000-0000000000a2"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "/tmp/sf_cdc_e2e/cdc_target.duckdb"
+        table: "orders"
+        mode: "append"
+        partition_by: "id"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
