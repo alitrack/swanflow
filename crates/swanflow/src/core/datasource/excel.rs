@@ -916,7 +916,15 @@ impl ExcelWritingStream {
                             }
                         };
                         if let Err(e) = write_res {
-                            tracing::warn!("Failed to write cell: {}", e);
+                            // P2-13: cell write failures fail the export.
+                            // Warn-and-continue produced a "successful"
+                            // workbook with missing data.
+                            return Err(datafusion::error::DataFusionError::Execution(
+                                format!(
+                                    "failed to write cell ({}, {}): {}",
+                                    row_offset, col_idx, e
+                                ),
+                            ));
                         }
                     }
                     row_offset += 1;
@@ -1229,23 +1237,38 @@ impl ExcelTemplateWritingStream {
         // 2. Create new workbook using rust_xlsxwriter
         let mut workbook_writer = Workbook::new();
         let worksheet = workbook_writer.add_worksheet();
-        worksheet.set_name(&self.sheet).ok();
+        if let Err(e) = worksheet.set_name(&self.sheet) {
+            // P2-13: cell/header write failures fail the export.
+            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+        }
 
         // Copy template content (simplified)
         for (r, row) in range.rows().enumerate() {
             for (c, cell) in row.iter().enumerate() {
                 match cell {
                     Data::String(s) => {
-                        worksheet.write(r as u32, c as u16, s).ok();
+                        if let Err(e) = worksheet.write(r as u32, c as u16, s) {
+                            // P2-13: cell/header write failures fail the export.
+                            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+                        }
                     }
                     Data::Float(f) => {
-                        worksheet.write(r as u32, c as u16, *f).ok();
+                        if let Err(e) = worksheet.write(r as u32, c as u16, *f) {
+                            // P2-13: cell/header write failures fail the export.
+                            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+                        }
                     }
                     Data::Int(i) => {
-                        worksheet.write(r as u32, c as u16, *i as f64).ok();
+                        if let Err(e) = worksheet.write(r as u32, c as u16, *i as f64) {
+                            // P2-13: cell/header write failures fail the export.
+                            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+                        }
                     }
                     Data::Bool(b) => {
-                        worksheet.write(r as u32, c as u16, *b).ok();
+                        if let Err(e) = worksheet.write(r as u32, c as u16, *b) {
+                            // P2-13: cell/header write failures fail the export.
+                            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+                        }
                     }
                     _ => {}
                 }
@@ -1278,7 +1301,10 @@ impl ExcelTemplateWritingStream {
                                 }
                             }
                         };
-                        worksheet.write(*r, *c, val).ok();
+                        if let Err(e) = worksheet.write(*r, *c, val) {
+                            // P2-13: cell/header write failures fail the export.
+                            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+                        }
                     }
                 }
             }
@@ -1492,12 +1518,18 @@ impl ExcelReportWritingStream {
 
         let mut workbook = Workbook::new();
         let worksheet = workbook.add_worksheet();
-        worksheet.set_name("Data").ok();
+        if let Err(e) = worksheet.set_name("Data") {
+            // P2-13: cell/header write failures fail the export.
+            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+        }
 
         let mut row_offset = 0;
         let schema = self.all_batches[0][0].schema();
         for (col_idx, field) in schema.fields().iter().enumerate() {
-            worksheet.write(0, col_idx as u16, field.name()).ok();
+            if let Err(e) = worksheet.write(0, col_idx as u16, field.name()) {
+                // P2-13: cell/header write failures fail the export.
+                return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+            }
         }
         row_offset += 1;
 

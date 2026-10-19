@@ -1150,6 +1150,18 @@ impl SwanFlowEngine {
                         .with_query_planner(query_planner_clone.clone())
                         .build();
 
+                    // P2-15: honor ErrorMode::Retry with a REAL retry loop
+                    // (ADR-013 §4). The old code logged "retry exhausted"
+                    // without a single retry attempt. Attempts use the
+                    // unified backoff policy (core/retry.rs).
+                    let retry_max: usize = match &error_mode {
+                        crate::core::graph::ErrorMode::Retry(max) => (*max).max(1) as usize,
+                        _ => 1,
+                    };
+                    let mut attempt_no: usize = 0;
+                    'retry_loop: loop {
+                    attempt_no += 1;
+                    let _ = attempt_no; // used in logs below via error arms
                     match state.create_physical_plan(&logical_plan).await {
                         Ok(physical_plan) => {
 
@@ -1305,6 +1317,22 @@ impl SwanFlowEngine {
                                                 );
                                             }
                                             crate::core::graph::ErrorMode::Retry(max) => {
+                                                if attempt_no < retry_max {
+                                                    let delay_ms =
+                                                        crate::core::retry::backoff_delay_ms(
+                                                            crate::core::retry::DEFAULT_BASE_DELAY_MS,
+                                                            (attempt_no - 1) as u64,
+                                                        );
+                                                    println!(
+                                                        "DEBUG: node {} failed, retrying ({}/{}), backoff {}ms",
+                                                        node_id, attempt_no, retry_max, delay_ms
+                                                    );
+                                                    tokio::time::sleep(
+                                                        std::time::Duration::from_millis(delay_ms),
+                                                    )
+                                                    .await;
+                                                    continue 'retry_loop;
+                                                }
                                                 println!(
                                                     "DEBUG: node {} retry exhausted ({}), surfacing error",
                                                     node_id, max
@@ -1444,6 +1472,22 @@ impl SwanFlowEngine {
                                                 );
                                             }
                                             crate::core::graph::ErrorMode::Retry(max) => {
+                                                if attempt_no < retry_max {
+                                                    let delay_ms =
+                                                        crate::core::retry::backoff_delay_ms(
+                                                            crate::core::retry::DEFAULT_BASE_DELAY_MS,
+                                                            (attempt_no - 1) as u64,
+                                                        );
+                                                    println!(
+                                                        "DEBUG: node {} failed, retrying ({}/{}), backoff {}ms",
+                                                        node_id, attempt_no, retry_max, delay_ms
+                                                    );
+                                                    tokio::time::sleep(
+                                                        std::time::Duration::from_millis(delay_ms),
+                                                    )
+                                                    .await;
+                                                    continue 'retry_loop;
+                                                }
                                                 println!(
                                                     "DEBUG: node {} retry exhausted ({}), surfacing error",
                                                     node_id, max
@@ -1469,6 +1513,7 @@ impl SwanFlowEngine {
                             }
                         }
                     }
+                    } // end 'retry_loop (P2-15)
                 }
 
                 // Final Sync after this level to be absolutely sure

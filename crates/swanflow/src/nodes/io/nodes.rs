@@ -358,6 +358,30 @@ impl NodeBehavior for HttpFetchNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let url = cfg::required_string(config, "url")?;
+        // P2-12: SSRF guard. The fetch runs inside the engine process;
+        // workflow files are UNTRUSTED input (SECURITY.md threat model), so
+        // metadata/loopback/link-local targets are rejected unless the
+        // operator explicitly allows them via SWANFLOW_ALLOW_PRIVATE_FETCH=1.
+        if std::env::var("SWANFLOW_ALLOW_PRIVATE_FETCH").as_deref() != Ok("1") {
+            if let Some(host) = extract_url_host(&url) {
+                let h = host.to_lowercase();
+                let blocked = h == "metadata.google.internal"
+                    || h.starts_with("169.254.")
+                    || h.starts_with("127.")
+                    || h == "localhost"
+                    || h == "[::1]"
+                    || h.starts_with("10.")
+                    || h.starts_with("192.168.")
+                    || private_172(&h);
+                if blocked {
+                    return Err(anyhow!(
+                        "url host '{}' is in the private/metadata range; \
+                         set SWANFLOW_ALLOW_PRIVATE_FETCH=1 to allow",
+                        host
+                    ));
+                }
+            }
+        }
         let _method = cfg::optional_string(config, "method").unwrap_or_else(|| "GET".to_string());
         let _timeout_secs = cfg::optional_number(config, "timeout_secs").unwrap_or(30.0);
 
@@ -973,6 +997,31 @@ enum DbDriver {
     DuckDBSqlite,
     DuckDBMysql,
     ClickHouseConnector,
+}
+
+/// Extract the host portion of a http(s) URL (P2-12 SSRF guard).
+fn extract_url_host(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // strip userinfo
+    let hostport = authority.rsplit('@').next()?;
+    // strip port (and handle bracketed IPv6)
+    if let Some(rest) = hostport.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return Some(rest[..end].to_string());
+    }
+    Some(hostport.split(':').next()?.to_string())
+}
+
+/// 172.16.0.0/12 private range check (P2-12).
+fn private_172(host: &str) -> bool {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() == 4 {
+        if let (Ok(a), Ok(b)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>()) {
+            return a == 172 && (16..=31).contains(&b);
+        }
+    }
+    false
 }
 
 /// Redact userinfo (user:password@) from a URL for safe display in logs
