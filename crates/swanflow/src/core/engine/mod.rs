@@ -1285,11 +1285,14 @@ impl SwanFlowEngine {
                                                 )
                                                 .await
                                             {
+                                                // P2-10: a proposed repair is ADVISORY only — we do not
+                                                // apply it and do not re-run. Never suppress the error
+                                                // event (the old handled=true turned loud failures into
+                                                // silent continues).
                                                 println!(
-                                                    "[Intelligence] proposed repair {:?} for node {} — apply and re-run",
+                                                    "[Intelligence] proposed repair {:?} for node {} (advisory, not applied)",
                                                     repair, node_id
                                                 );
-                                                handled = true;
                                             }
                                         }
                                     }
@@ -1377,11 +1380,11 @@ impl SwanFlowEngine {
                                                         )
                                                         .await
                                                     {
+                                                        // P2-10: advisory only — never suppress the error event.
                                                         println!(
-                                                            "[Intelligence] proposed repair {:?} for node {} — apply and re-run",
+                                                            "[Intelligence] proposed repair {:?} for node {} (advisory, not applied)",
                                                             repair, node_id
                                                         );
-                                                        handled = true;
                                                     }
                                                 }
                                             }
@@ -1421,11 +1424,14 @@ impl SwanFlowEngine {
                                                 )
                                                 .await
                                             {
+                                                // P2-10: a proposed repair is ADVISORY only — we do not
+                                                // apply it and do not re-run. Never suppress the error
+                                                // event (the old handled=true turned loud failures into
+                                                // silent continues).
                                                 println!(
-                                                    "[Intelligence] proposed repair {:?} for node {} — apply and re-run",
+                                                    "[Intelligence] proposed repair {:?} for node {} (advisory, not applied)",
                                                     repair, node_id
                                                 );
-                                                handled = true;
                                             }
                                         }
                                     }
@@ -1933,7 +1939,11 @@ impl SwanFlowEngine {
             // Execute the fan-out parent itself FIRST so its output is
             // registered (node_<id> table) — children reference it as
             // input_0 via their incoming edges.
-            let _ = Self::compile_and_execute_node(
+            // P2-7: the parent's error_mode must be honored. Blindly
+            // discarding the result degraded a Fail-mode parent error into
+            // "continue", leaving children to run against missing/stale
+            // parent output.
+            if let Err(parent_err) = Self::compile_and_execute_node(
                 node,
                 workflow,
                 node_idx,
@@ -1944,7 +1954,36 @@ impl SwanFlowEngine {
                 tx,
                 hook,
             )
-            .await;
+            .await
+            {
+                match &node.error_mode {
+                    crate::core::graph::ErrorMode::Fail => {
+                        let _ = tx.send(NodeEvent::Error {
+                            node_id: node.id,
+                            message: format!(
+                                "fan-out parent failed, aborting run: {}",
+                                parent_err
+                            ),
+                        });
+                        return Err(parent_err);
+                    }
+                    crate::core::graph::ErrorMode::Skip => {
+                        println!(
+                            "DEBUG: fan-out parent {} error swallowed (error_mode=skip)",
+                            node.id
+                        );
+                    }
+                    crate::core::graph::ErrorMode::Retry(_) => {
+                        // Parent executes once here; retry exhaustion at the
+                        // caller. Surface the error instead of degrading.
+                        let _ = tx.send(NodeEvent::Error {
+                            node_id: node.id,
+                            message: format!("fan-out parent failed: {}", parent_err),
+                        });
+                        return Err(parent_err);
+                    }
+                }
+            }
 
             // Execute children in parallel, honoring each child's error_mode
             // (elastic fan-out, borrowed from Forge research #2026081102).
