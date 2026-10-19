@@ -492,15 +492,13 @@ impl QueryEngine for DuckDBEngine {
                     if let Some(proxy) =
                         crate::nodes::sql::SqlProxyLogical::from_extension(ext)
                     {
-                        // r4 C4: the DuckDB staged executor registers upstream
+// r4 C4 (pass-2): the DuckDB staged executor registers upstream
                         // outputs as node_<uuid> tables, but SqlProxy SQL
-                        // references input_0..N aliases. Without aliasing, the
-                        // SQL would either fail to resolve or (worse) silently
-                        // target an unrelated table. Emit TEMP VIEW aliases for
-                        // every input whose upstream node id we can recover
-                        // from the input LogicalPlan (TableScan on node_<uuid>).
-                        let mut prologue = String::new();
-                        let mut resolved = 0usize;
+                        // references input_0..N aliases. Alias them as CTEs so
+                        // the compiled result stays a SINGLE statement —
+                        // execute_sql rejects multi-statement strings.
+                        // (WITH input_0 AS (SELECT * FROM node_x), ... <query>)
+                        let mut ctes: Vec<String> = Vec::new();
                         for (i, input_plan) in proxy.inputs.iter().enumerate() {
                             let mut upstream_table: Option<String> = None;
                             walk_plan_tables(input_plan, &mut |name| {
@@ -510,28 +508,41 @@ impl QueryEngine for DuckDBEngine {
                                     upstream_table = Some(name.to_string());
                                 }
                             });
-                            if let Some(src) = upstream_table {
-                                prologue.push_str(&format!(
-                                    "CREATE OR REPLACE TEMP VIEW input_{i} AS SELECT * FROM {src}; "
-                                ));
-                                resolved += 1;
+                            match upstream_table {
+                                Some(src) => ctes.push(format!(
+                                    "input_{i} AS (SELECT * FROM {src})"
+                                )),
+                                None => {
+                                    // Cannot recover an upstream table: fail
+                                    // loudly instead of running SQL against an
+                                    // unresolved input_0 (silent wrong data).
+                                    return Err(
+                                        datafusion::error::DataFusionError::Plan(
+                                            "SqlProxy on the DuckDB backend requires resolvable node_<uuid> inputs for input_0..N aliasing".to_string(),
+                                        ),
+                                    );
+                                }
                             }
                         }
-                        if resolved == proxy.inputs.len() && !proxy.inputs.is_empty() {
-                            let inlined =
-                                crate::core::engine::planner::inline_placeholders(
-                                    &proxy.query,
-                                    &proxy.params,
-                                );
-                            return Ok(format!("{}{}", prologue, inlined));
+                        let inlined =
+                            crate::core::engine::planner::inline_placeholders(
+                                &proxy.query,
+                                &proxy.params,
+                            );
+                        if ctes.is_empty() {
+                            // No inputs (source SQL node): query as-is.
+                            return Ok(inlined);
                         }
-                        // Cannot recover every upstream table (e.g. complex
-                        // input plans): fail loudly instead of running SQL
-                        // against unresolved input_0 (silent wrong data).
-                        return Err(datafusion::error::DataFusionError::Plan(
-                            "SqlProxy on the DuckDB backend requires resolvable                              node_<uuid> inputs for input_0..N aliasing"
-                                .to_string(),
-                        ));
+                        let cte_list = ctes.join(", ");
+                        let q_trim = inlined.trim_start();
+                        if q_trim.len() >= 4
+                            && q_trim[..4].eq_ignore_ascii_case("WITH")
+                        {
+                            // Existing WITH: splice our CTEs in after the keyword.
+                            let rest = &q_trim[4..];
+                            return Ok(format!("WITH {},{}", cte_list, rest));
+                        }
+                        return Ok(format!("WITH {} {}", cte_list, inlined));
                     }
                 }
                 if ext.node.name() == "MissingNodePlaceholder" {
