@@ -983,13 +983,38 @@ impl SwanFlowEngine {
                         )])
                         .expect("collect batch build");
                         let table_name = crate::core::node_table_name(node_id);
-                        if let Ok(df) = ctx_shared.read_batches(vec![batch]) {
-                            let _ = ctx_shared.register_table(&table_name, df.into_view());
-                            let _ = tx.send(NodeEvent::Materialized {
-                                node_id,
-                                table_name,
-                                parquet_path: "".to_string(),
+                        // r4 C3: same hard-fail contract as the main staged path.
+                        let mat = ctx_shared
+                            .read_batches(vec![batch])
+                            .and_then(|df| {
+                                ctx_shared
+                                    .register_table(&table_name, df.into_view())
+                                    .map(|_| ())
                             });
+                        match mat {
+                            Ok(()) => {
+                                let _ = tx.send(NodeEvent::Materialized {
+                                    node_id,
+                                    table_name,
+                                    parquet_path: "".to_string(),
+                                });
+                            }
+                            Err(e) => {
+                                let diagnostic = NodeDiagnostic::new(
+                                    node_id,
+                                    node_type.clone(),
+                                    NodeErrorClass::Execution,
+                                    format!("Collect materialization failed: {}", e),
+                                );
+                                let _ = tx.send(NodeEvent::Error {
+                                    node_id,
+                                    message: diagnostic.to_event_message(),
+                                });
+                                // r4 C3: collect-mode materialization failure is
+                                // a hard error, same as the main staged path.
+                                run_hard_failed = true;
+                                continue;
+                            }
                         }
                         println!(
                             "DEBUG: Collect stage {} gathered {} cells",
@@ -1365,6 +1390,11 @@ impl SwanFlowEngine {
                                                     node_id,
                                                     message: diagnostic.to_event_message(),
                                                 });
+                                                // r4 C2: this exec-fail branch
+                                                // (initial planning failed, replan
+                                                // succeeded, execution failed) also
+                                                // hard-fails the run.
+                                                run_hard_failed = true;
                                             }
                                         }
                                     }

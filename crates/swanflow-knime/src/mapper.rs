@@ -362,7 +362,7 @@ impl KnimeNodeMapper {
             |s| {
                 let cols_str = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
                 let cols: Vec<&str> = cols_str.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
-                let cols_list = cols.iter().map(|c| format!("'{}'", c)).collect::<Vec<_>>().join(", ");
+                let cols_list = cols.iter().map(|c| sq_lit(c)).collect::<Vec<_>>().join(", ");
                 json!({"query": format!("UNPIVOT input_0 ON COLUMNS({}) INTO NAME key VALUE val", cols_list)})
             });
 

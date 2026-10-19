@@ -477,6 +477,20 @@ impl ExecutionPlan for DuckDBScanExec {
                 .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
             for ext in &extensions {
+                // r4 C5: by-name INSTALLs must pass the shared allowlist.
+                if !(ext.contains('/') || ext.contains('\\') || ext.ends_with(".duckdb_extension")) {
+                    let name = ext.trim();
+                    let safe = !name.is_empty()
+                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        && crate::nodes::sql_duckdb::ALLOWED_INSTALLABLE_EXTENSIONS
+                            .contains(&name);
+                    if !safe {
+                        return Err(datafusion::error::DataFusionError::Plan(format!(
+                            "extension '{}' is not in the installable allowlist",
+                            ext
+                        )));
+                    }
+                }
                 if ext.contains('/') || ext.contains('\\') || ext.ends_with(".duckdb_extension") {
                     conn.execute(&format!("LOAD '{}';", ext), [])
                         .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;

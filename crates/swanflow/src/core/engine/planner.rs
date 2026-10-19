@@ -629,47 +629,47 @@ impl QueryPlanner for SwanFlowQueryPlanner {
 /// - String literals are single-quote-escaped; other types use their Display
 ///   form (numbers, booleans, `NULL`).
 pub fn inline_placeholders(query: &str, params: &[ScalarValue]) -> String {
-    let mut out = query.to_string();
-    for i in (0..params.len()).rev() {
-        let placeholder = format!("${}", i + 1);
-        let val_str = match &params[i] {
-            ScalarValue::Utf8(Some(s)) => format!("'{}'", s.replace('\'', "''")),
-            other => format!("{}", other),
-        };
-        out = replace_placeholder_desc(&out, &placeholder, &val_str);
+    // P1-1 fix (r4 C1 hardening): SINGLE-PASS inliner. We scan the query once;
+    // every $N token found in the ORIGINAL text is replaced by its param value
+    // in the output buffer. Inserted values are never rescanned — not within
+    // one call and not across loop iterations — so a param whose value itself
+    // contains "$1"/"$2" text cannot be re-expanded (the old multi-pass
+    // descending replace only guaranteed that within one call).
+    let mut out = String::with_capacity(query.len() + 16);
+    let mut rest = query;
+    while !rest.is_empty() {
+        if rest.starts_with('$') {
+            // parse the maximal ASCII digit run after the $
+            let digits: String = rest[1..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                let n: usize = digits.parse().unwrap_or(usize::MAX);
+                if n >= 1 && n <= params.len() {
+                    let param = &params[n - 1];
+                    match param {
+                        ScalarValue::Utf8(Some(s)) => {
+                            out.push('\'');
+                            out.push_str(&s.replace('\'', "''"));
+                            out.push('\'');
+                        }
+                        other => out.push_str(&format!("{}", other)),
+                    }
+                    rest = &rest[1 + digits.len()..];
+                    continue;
+                }
+                // out-of-range placeholder: keep literally (schema probe may
+                // legitimately contain $ tokens outside params range)
+            }
+        }
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
     }
     out
 }
 
-fn replace_placeholder_desc(haystack: &str, placeholder: &str, replacement: &str) -> String {
-    // P1-1 fix: the previous byte-index scanner sliced `haystack[i..]` after
-    // `i += 1`, which panics (byte index not on a char boundary) as soon as
-    // the haystack contains any non-ASCII character (CJK comments, values).
-    // This version walks char boundaries explicitly.
-    let mut result = String::with_capacity(haystack.len());
-    let mut rest = haystack;
-    while !rest.is_empty() {
-        if rest.starts_with(placeholder) {
-            let after = &rest[placeholder.len()..];
-            let followed_by_digit = after
-                .as_bytes()
-                .first()
-                .map(|b| b.is_ascii_digit())
-                .unwrap_or(false);
-            if !followed_by_digit {
-                // Append only the replacement (re-scanning stops after it, so
-                // a value that itself contains "$N" is never inlined again).
-                result.push_str(replacement);
-                rest = after;
-                continue;
-            }
-        }
-        let ch = rest.chars().next().unwrap();
-        result.push(ch);
-        rest = &rest[ch.len_utf8()..];
-    }
-    result
-}
 
 /// Schema-discovery entry point used by nodes::sql (SqlProxyLogical build).
 /// Same inlining as physical planning, so discovered schema == executed SQL.
@@ -751,6 +751,17 @@ mod inline_placeholder_tests {
             inline_placeholders_for_schema(query, &params),
             inline_placeholders(query, &params)
         );
+    }
+
+    #[test]
+    fn value_containing_lower_placeholder_text_is_not_reexpanded() {
+        // r4 C1: param $2 = "$1" must NOT be expanded by the $1 pass.
+        let params = vec![
+            ScalarValue::Utf8(Some("Greeting".to_string())),
+            ScalarValue::Utf8(Some("$1".to_string())),
+        ];
+        let out = inline_placeholders("SELECT $1, $2 FROM t", &params);
+        assert_eq!(out, "SELECT 'Greeting', '$1' FROM t");
     }
 
     #[test]

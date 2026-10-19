@@ -36,6 +36,22 @@ impl fmt::Debug for DuckDBEngine {
     }
 }
 
+/// Depth-first walk of a LogicalPlan collecting table names referenced by
+/// TableScan nodes (used to recover node_<uuid> upstream tables for SqlProxy
+/// input aliasing on the DuckDB backend).
+fn walk_plan_tables(
+    plan: &datafusion::logical_expr::LogicalPlan,
+    f: &mut dyn FnMut(&str),
+) {
+    use datafusion::logical_expr::LogicalPlan;
+    if let LogicalPlan::TableScan(scan) = plan {
+        f(scan.table_name.table());
+    }
+    for input in plan.inputs() {
+        walk_plan_tables(input, f);
+    }
+}
+
 impl DuckDBEngine {
     /// Open or create a DuckDB database at the given path.
     /// Use `":memory:"` for an in-memory database.
@@ -476,13 +492,57 @@ impl QueryEngine for DuckDBEngine {
                     if let Some(proxy) =
                         crate::nodes::sql::SqlProxyLogical::from_extension(ext)
                     {
-                        let inlined =
-                            crate::core::engine::planner::inline_placeholders(
-                                &proxy.query,
-                                &proxy.params,
-                            );
-                        return Ok(inlined);
+                        // r4 C4: the DuckDB staged executor registers upstream
+                        // outputs as node_<uuid> tables, but SqlProxy SQL
+                        // references input_0..N aliases. Without aliasing, the
+                        // SQL would either fail to resolve or (worse) silently
+                        // target an unrelated table. Emit TEMP VIEW aliases for
+                        // every input whose upstream node id we can recover
+                        // from the input LogicalPlan (TableScan on node_<uuid>).
+                        let mut prologue = String::new();
+                        let mut resolved = 0usize;
+                        for (i, input_plan) in proxy.inputs.iter().enumerate() {
+                            let mut upstream_table: Option<String> = None;
+                            walk_plan_tables(input_plan, &mut |name| {
+                                if upstream_table.is_none()
+                                    && name.starts_with("node_")
+                                {
+                                    upstream_table = Some(name.to_string());
+                                }
+                            });
+                            if let Some(src) = upstream_table {
+                                prologue.push_str(&format!(
+                                    "CREATE OR REPLACE TEMP VIEW input_{i} AS SELECT * FROM {src}; "
+                                ));
+                                resolved += 1;
+                            }
+                        }
+                        if resolved == proxy.inputs.len() && !proxy.inputs.is_empty() {
+                            let inlined =
+                                crate::core::engine::planner::inline_placeholders(
+                                    &proxy.query,
+                                    &proxy.params,
+                                );
+                            return Ok(format!("{}{}", prologue, inlined));
+                        }
+                        // Cannot recover every upstream table (e.g. complex
+                        // input plans): fail loudly instead of running SQL
+                        // against unresolved input_0 (silent wrong data).
+                        return Err(datafusion::error::DataFusionError::Plan(
+                            "SqlProxy on the DuckDB backend requires resolvable                              node_<uuid> inputs for input_0..N aliasing"
+                                .to_string(),
+                        ));
                     }
+                }
+                if ext.node.name() == "MissingNodePlaceholder" {
+                    // r4 C7a: placeholders must fail loudly on this backend too.
+                    // A single-input pass-through silently forwarded the input,
+                    // defeating the fail-closed mapper contract for KNIME
+                    // writer nodes (output would appear to succeed).
+                    return Err(datafusion::error::DataFusionError::Plan(
+                        "missing-node placeholder cannot execute on the DuckDB backend"
+                            .to_string(),
+                    ));
                 }
                 if ext.node.inputs().len() == 1 {
                     // Wrapper nodes (MaterializerLogical, StateProbeLogical,
