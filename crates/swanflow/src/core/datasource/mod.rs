@@ -21,8 +21,8 @@ use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream,
+    coalesce_partitions::CoalescePartitionsExec, DisplayAs, DisplayFormatType,
+    ExecutionPlan, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use futures::Stream;
 use futures::StreamExt;
@@ -770,6 +770,14 @@ impl DuckDBWriteSinkExec {
         inputs: Vec<Arc<dyn ExecutionPlan>>,
         out_schema: SchemaRef,
     ) -> Self {
+        // CoalescePartitionsExec discipline (Bug-7 family, mirrors
+        // DuckSqlExec::new): we execute every input at partition 0 only,
+        // so multi-partition inputs (UnionExec etc.) must be coalesced
+        // first or partitions 1..N are silently dropped.
+        let inputs: Vec<Arc<dyn ExecutionPlan>> = inputs
+            .into_iter()
+            .map(|i| Arc::new(CoalescePartitionsExec::new(i)) as Arc<dyn ExecutionPlan>)
+            .collect();
         let cache = PlanProperties::new(
             EquivalenceProperties::new(out_schema.clone()),
             datafusion::physical_plan::Partitioning::UnknownPartitioning(1),
@@ -1212,6 +1220,55 @@ mod duckdb_write_sink_tests {
             ],
         )
         .unwrap()]
+    }
+
+    fn temp_db_path() -> (String, std::path::PathBuf) {
+        let db = std::env::temp_dir()
+            .join(format!("swan_sink_union_{}.db", uuid::Uuid::new_v4()));
+        let s = db.to_str().unwrap().to_string();
+        (s, db)
+    }
+
+    #[tokio::test]
+    async fn multi_partition_union_input_rows_all_persisted() {
+        use datafusion::physical_plan::collect;
+        use datafusion::prelude::*;
+        use std::sync::Arc;
+
+        // Multi-partition input: 3-branch UNION ALL physical plan is a
+        // UnionExec with 3 output partitions (Bug-7 family regression).
+        let ctx = SessionContext::new();
+        let df = ctx
+            .sql("SELECT 'a' AS v UNION ALL SELECT 'b' UNION ALL SELECT 'c'")
+            .await
+            .unwrap();
+        let logical = df.into_optimized_plan().unwrap();
+        let phys = ctx.state().create_physical_plan(&logical).await.unwrap();
+        assert_eq!(
+            phys.properties().output_partitioning().partition_count(),
+            3,
+            "precondition: UNION ALL must be multi-partition here"
+        );
+
+        let (db_str, db_path) = temp_db_path();
+        let schema = phys.schema();
+        let sink = Arc::new(DuckDBWriteSinkExec::new(
+            db_str.clone(),
+            "union_out".to_string(),
+            WriteMode::Replace,
+            vec![phys],
+            schema,
+        ));
+        let out = collect(sink, ctx.task_ctx()).await.unwrap();
+        let total: usize = out.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 3, "sink must forward every input row");
+
+        // Durable readback on a fresh connection: all 3 rows in DuckDB.
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM union_out", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3, "DuckDBWriteSinkExec must not drop partitions 1..N");
     }
 
     #[test]
