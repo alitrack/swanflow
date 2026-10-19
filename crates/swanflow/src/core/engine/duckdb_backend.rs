@@ -538,9 +538,23 @@ impl QueryEngine for DuckDBEngine {
                         if q_trim.len() >= 4
                             && q_trim[..4].eq_ignore_ascii_case("WITH")
                         {
-                            // Existing WITH: splice our CTEs in after the keyword.
-                            let rest = &q_trim[4..];
-                            return Ok(format!("WITH {},{}", cte_list, rest));
+                            // Existing WITH: splice our CTEs in after the
+                            // keyword. WITH RECURSIVE needs RECURSIVE to stay
+                            // immediately after WITH (r4 pass-3): splice after
+                            // the RECURSIVE keyword in that case.
+                            let rest_all = &q_trim[4..];
+                            let rest_trim = rest_all.trim_start();
+                            if rest_trim.len() >= 9
+                                && rest_trim[..9].eq_ignore_ascii_case("RECURSIVE")
+                            {
+                                let after_rec = &rest_trim[9..];
+                                return Ok(format!(
+                                    "WITH RECURSIVE {},{}",
+                                    cte_list,
+                                    after_rec
+                                ));
+                            }
+                            return Ok(format!("WITH {},{}", cte_list, rest_all));
                         }
                         return Ok(format!("WITH {} {}", cte_list, inlined));
                     }
