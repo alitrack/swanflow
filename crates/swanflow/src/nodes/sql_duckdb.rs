@@ -300,16 +300,63 @@ impl Stream for DuckSqlStream {
     }
 }
 
+/// Extensions installable BY NAME from the official/community registry.
+/// P1-5 fix: an arbitrary `extensions: ["<identifier>"]` value used to reach
+/// `INSTALL <identifier>` directly — identifier injection could pull and
+/// execute unsigned remote code (RCE) from attacker-controlled mirrors.
+/// Only this curated allowlist may be installed by name; everything else
+/// must be a local `.duckdb_extension` path (relative paths rejected).
+pub const ALLOWED_INSTALLABLE_EXTENSIONS: &[&str] = &[
+    "httpfs",
+    "parquet",
+    "json",
+    "icu",
+    "full_text_search",
+    "fts",
+    "spatial",
+    "sqlite",
+    "sqlite_scanner",
+    "aws",
+    "azure",
+    "postgres",
+    "postgres_scanner",
+    "mysql",
+    "mysql_scanner",
+    "tpcds",
+    "tpch",
+];
+
+fn is_safe_extension_name(ext: &str) -> bool {
+    let e = ext.trim();
+    !e.is_empty()
+        && e.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && ALLOWED_INSTALLABLE_EXTENSIONS.contains(&e)
+}
+
 /// Load configured extensions on a scratch DuckDB connection. Path entries
-/// (ending in `.duckdb_extension`) require an unsigned-allowed connection.
+/// (ending in `.duckdb_extension`) require an unsigned-allowed connection and
+/// must be absolute paths (P1-5: relative-path chicanery rejected).
 fn load_extensions(conn: &duckdb::Connection, extensions: &[String]) -> duckdb::Result<()> {
     for ext in extensions {
         if ext.ends_with(".duckdb_extension") {
+            let path = std::path::Path::new(ext);
+            if !path.is_absolute() {
+                return Err(duckdb::Error::InvalidParameterName(format!(
+                    "extension path must be absolute: {ext}"
+                )));
+            }
             let path = ext.replace('\'', "''");
             conn.execute(&format!("LOAD '{path}'"), [])?;
+        } else if is_safe_extension_name(ext) {
+            let name = ext.trim();
+            conn.execute(&format!("INSTALL {name};"), [])?;
+            conn.execute(&format!("LOAD {name};"), [])?;
         } else {
-            let _ = conn.execute(&format!("INSTALL {ext};"), []);
-            conn.execute(&format!("LOAD {ext};"), [])?;
+            // P1-5: unknown/unsafe identifiers are rejected, not executed.
+            return Err(duckdb::Error::InvalidParameterName(format!(
+                "extension '{ext}' is not in the installable allowlist; \
+use an absolute path to a local .duckdb_extension file instead"
+            )));
         }
     }
     Ok(())
@@ -547,6 +594,26 @@ impl NodeBehavior for DuckSqlNode {
         let q = cfg::required_string(config, "query")?;
         if q.trim().is_empty() {
             return Err(anyhow!("query must not be empty"));
+        }
+        // P1-5: validate extension entries at config time (fail at validate,
+        // not deep in execution). Local paths must be absolute; names must be
+        // allowlisted. This mirrors load_extensions, but earlier.
+        if let Some(exts) = config.get("extensions").and_then(|v| v.as_array()) {
+            for ext in exts.iter().filter_map(|v| v.as_str()) {
+                if ext.ends_with(".duckdb_extension") {
+                    if !std::path::Path::new(ext).is_absolute() {
+                        return Err(anyhow!(
+                            "extensions: local .duckdb_extension path must be absolute: {}",
+                            ext
+                        ));
+                    }
+                } else if !is_safe_extension_name(ext) {
+                    return Err(anyhow!(
+                        "extensions: '{}' is not in the installable allowlist",
+                        ext
+                    ));
+                }
+            }
         }
         // Guard: block writes to the engine's own metadata database via
         // sneaky statements embedded in the COPY payload.

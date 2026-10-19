@@ -462,9 +462,31 @@ impl QueryEngine for DuckDBEngine {
                 }
             }
             LP::Extension(ext) => {
-                // For SwanFlow-specific logical nodes (MaterializerLogical, StateProbeLogical, etc.)
-                // we pass through to the inner plan — the extension nodes are no-ops for SQL compilation.
+                // P1-4 fix: extension nodes are NOT all no-ops. Treating every
+                // single-input extension as a pass-through silently dropped
+                // whole SQL transforms (e.g. SqlProxy carries a real query —
+                // compiling it as its input made the node a no-op and user
+                // SQL/writes vanished from the DuckDB pipeline).
+                // Pass-through is only correct for pure wrapper nodes; a
+                // node that carries its own computation must be compiled,
+                // and unknown carriers must fail loudly instead of
+                // disappearing.
+                if ext.node.name() == "SqlProxy" {
+                    // Deferred import: nodes module is part of the same crate.
+                    if let Some(proxy) =
+                        crate::nodes::sql::SqlProxyLogical::from_extension(ext)
+                    {
+                        let inlined =
+                            crate::core::engine::planner::inline_placeholders(
+                                &proxy.query,
+                                &proxy.params,
+                            );
+                        return Ok(inlined);
+                    }
+                }
                 if ext.node.inputs().len() == 1 {
+                    // Wrapper nodes (MaterializerLogical, StateProbeLogical,
+                    // etc.) transparently forward to their single input.
                     self.compile_to_sql(&ext.node.inputs()[0])
                 } else {
                     Err(datafusion::error::DataFusionError::NotImplemented(format!(

@@ -85,6 +85,18 @@ impl UserDefinedLogicalNodeCore for SqlProxyLogical {
     }
 }
 
+impl SqlProxyLogical {
+    /// Downcast an extension node back to a concrete SqlProxyLogical.
+    /// Used by the DuckDB SQL backend to compile the carried query
+    /// (P1-4: previously the backend treated SqlProxy as a no-op wrapper
+    /// and silently dropped the user's SQL).
+    pub fn from_extension(
+        ext: &datafusion::logical_expr::Extension,
+    ) -> Option<&SqlProxyLogical> {
+        ext.node.as_any().downcast_ref::<SqlProxyLogical>()
+    }
+}
+
 pub struct SqlNode;
 
 #[async_trait]
@@ -128,7 +140,7 @@ impl NodeBehavior for SqlNode {
         inputs: Vec<LogicalPlan>,
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
-        let mut query = cfg::required_string(config, "query")?;
+        let query = cfg::required_string(config, "query")?;
 
         let params = if let Some(p_array) = cfg::optional_array(config, "params") {
             p_array
@@ -149,17 +161,22 @@ impl NodeBehavior for SqlNode {
             vec![]
         };
 
-        // WORKAROUND for DataFusion 52.1.0 sql() limitation with $1 placeholders:
-        // We will do a safe-ish string replacement for the logical planning phase.
-        // In a real production system, we'd use prepared statements if DataFusion supported them via sql().
-        for (i, param) in params.iter().enumerate() {
-            let placeholder = format!("${}", i + 1);
-            let val_str = match param {
-                ScalarValue::Utf8(Some(s)) => format!("'{}'", s.replace("'", "''")),
-                _ => format!("{}", param),
-            };
-            query = query.replace(&placeholder, &val_str);
-        }
+        // P1-1 fix: params must NOT be inlined here. The previous ascending
+        // String::replace first pass silently corrupted queries:
+        //   (a) `$1` clobbered the `$1` prefix inside `$10`/`$11`
+        //       (`b = $10` became `b = <v1>0` -> silently wrong data);
+        //   (b) values containing `$N` text were re-matched (chained replace).
+        // The proxy keeps the RAW query + params; the single authoritative
+        // inline happens at physical planning time in
+        // engine::planner::inline_placeholders (descending order,
+        // digit-boundary aware). Schema discovery below uses the same
+        // inlined query via planner::inline_placeholders so the schema
+        // matches what will actually execute.
+        let inlined = if params.is_empty() {
+            query.clone()
+        } else {
+            crate::core::engine::planner::inline_placeholders_for_schema(&query, &params)
+        };
 
         // Attempt early schema discovery if possible
         let ctx = datafusion::prelude::SessionContext::new();
@@ -169,7 +186,7 @@ impl NodeBehavior for SqlNode {
             ctx.register_table(&table_name, df.into_view()).ok();
         }
 
-        let schema: DFSchemaRef = match ctx.sql(&query).await {
+        let schema: DFSchemaRef = match ctx.sql(&inlined).await {
             Ok(df) => Arc::new(df.schema().clone()),
             Err(_) => {
                 if !inputs.is_empty() {
