@@ -1710,17 +1710,21 @@ impl SwanFlowEngine {
                         }
 
                         // Check until condition
+                        // P2-9: match against textual node OUTPUT (like the
+                        // execute_node_with_mode loop path), not a "done"
+                        // string built from Materialized events — the old
+                        // heuristic made until fire only for the literal
+                        // substring "done" and diverged between executors.
                         if let Some(until) = &node.until {
-                            let combined: String = all_events
-                                .iter()
-                                .filter_map(|e| match e {
-                                    NodeEvent::Materialized { .. } => Some("done"),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("");
-                            if combined.contains(until) {
-                                break;
+                            if !until.is_empty() {
+                                let sub_output: String = step_context
+                                    .values()
+                                    .filter_map(|v| v.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                if sub_output.contains(until.as_str()) {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1856,8 +1860,11 @@ impl SwanFlowEngine {
                     }
                 };
                 let table_name = crate::core::node_table_name(src_node.id);
+                // P2-8: scan ALL rows, matching the staged executor's
+                // conditional semantics (the old LIMIT 1 made the branch
+                // result depend on which executor ran the workflow).
                 if let Ok(df) = ctx
-                    .sql(&format!("SELECT * FROM \"{}\" LIMIT 1", table_name))
+                    .sql(&format!("SELECT * FROM \"{}\"", table_name))
                     .await
                 {
                     if let Ok(batches) = df.collect().await {
