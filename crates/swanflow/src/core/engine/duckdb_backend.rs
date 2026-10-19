@@ -39,6 +39,22 @@ impl fmt::Debug for DuckDBEngine {
 /// Depth-first walk of a LogicalPlan collecting table names referenced by
 /// TableScan nodes (used to recover node_<uuid> upstream tables for SqlProxy
 /// input aliasing on the DuckDB backend).
+/// If `s` starts with keyword `kw` (case-insensitive, followed by a
+/// non-identifier char), return the remainder after the keyword; else None.
+fn keyword_split<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
+    if s.len() < kw.len() {
+        return None;
+    }
+    if !s[..kw.len()].eq_ignore_ascii_case(kw) {
+        return None;
+    }
+    let after = &s[kw.len()..];
+    match after.chars().next() {
+        Some(c) if c.is_ascii_alphanumeric() || c == '_' => None,
+        _ => Some(after),
+    }
+}
+
 fn walk_plan_tables(
     plan: &datafusion::logical_expr::LogicalPlan,
     f: &mut dyn FnMut(&str),
@@ -535,28 +551,26 @@ impl QueryEngine for DuckDBEngine {
                         }
                         let cte_list = ctes.join(", ");
                         let q_trim = inlined.trim_start();
-                        if q_trim.len() >= 4
-                            && q_trim[..4].eq_ignore_ascii_case("WITH")
-                        {
-                            // Existing WITH: splice our CTEs in after the
-                            // keyword. WITH RECURSIVE needs RECURSIVE to stay
-                            // immediately after WITH (r4 pass-3): splice after
-                            // the RECURSIVE keyword in that case.
-                            let rest_all = &q_trim[4..];
-                            let rest_trim = rest_all.trim_start();
-                            if rest_trim.len() >= 9
-                                && rest_trim[..9].eq_ignore_ascii_case("RECURSIVE")
-                            {
-                                let after_rec = &rest_trim[9..];
+                        // Word-boundary-aware keyword checks (r4 pass-4): a
+                        // query starting with the IDENTIFIER "recursively" is
+                        // not a WITH RECURSIVE clause.
+                        let after_with = match keyword_split(q_trim, "WITH") {
+                            Some(rest) => rest,
+                            None => {
                                 return Ok(format!(
-                                    "WITH RECURSIVE {},{}",
-                                    cte_list,
-                                    after_rec
+                                    "WITH {} {}",
+                                    cte_list, inlined
                                 ));
                             }
-                            return Ok(format!("WITH {},{}", cte_list, rest_all));
+                        };
+                        return match keyword_split(after_with, "RECURSIVE") {
+                            Some(after_rec) => Ok(format!(
+                                "WITH RECURSIVE {},{}",
+                                cte_list,
+                                after_rec
+                            )),
+                            None => Ok(format!("WITH {},{}", cte_list, after_with)),
                         }
-                        return Ok(format!("WITH {} {}", cte_list, inlined));
                     }
                 }
                 if ext.node.name() == "MissingNodePlaceholder" {
