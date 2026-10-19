@@ -28,6 +28,11 @@ test = false
 swanflow-core = { path = "../swanflow-core" }
 swanflow-knime = { path = "../swanflow-knime" }
 swanflow-plugin-sdk = { path = "../swanflow-plugin-sdk" }
+# Leiden community detection for core.ai.community_batches (UA port batch 3).
+# default-features = false: no rayon (forces the deterministic sequential
+# algorithm paths), no serde/petgraph/gryf adapters — the node feeds the
+# built-in GraphDataBuilder directly.
+leiden-rs = { version = "0.8.1", default-features = false }
 datafusion = "52.1.0"
 sqlparser = "0.59"
 arrow = { version = "57.0", features = ["ffi"] }
@@ -65,6 +70,13 @@ bson = { version = "2", optional = true, features = ["chrono-0_4"] }
 wasmtime = { version = "28.0.0", default-features = false, features = ["cranelift", "runtime"] }
 # sqlx removed: postgres/mysql/sqlite access now goes through DuckDB scanners (ATTACH)
 chrono = { version = "0.4", features = ["serde"] }
+# Webhook ingress (ADR-014 Stage 4): hyper 1.x + hyper-util are already in
+# the lockfile via reqwest's tree — zero new crates downloaded, we just
+# declare the direct dependency for the daemon's HTTP listener.
+hyper = { version = "1.11", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+http = "1"
 dotenvy = "0.15.7"
 lazy_static = "1.5.0"
 hex = "0.4"

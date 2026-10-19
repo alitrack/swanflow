@@ -1,3 +1,4 @@
+pub mod communities;
 pub mod contracts;
 pub mod graph;
 pub mod mcp;

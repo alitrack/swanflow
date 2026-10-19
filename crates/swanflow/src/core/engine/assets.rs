@@ -790,9 +790,51 @@ pub fn record_asset_run(
     drop(ledger);
 }
 
+/// ADR-015 rule 6: compact fingerprint of an Arrow schema —
+/// `name:type,name:type,...` over each field's *logical* DataType Display.
+/// Display distinguishes family members that parquet's physical type cannot
+/// (Utf8 vs Utf8View, Binary vs BinaryView, LargeUtf8 vs Utf8) — a
+/// physical-type-only fingerprint ("VARCHAR") would let a Utf8View artifact
+/// pose as plain Utf8 (the family-case lesson). The record side
+/// (MaterializingStream, observer.rs) and the skip side (parquet footer via
+/// `parquet_footer_fingerprint`) must produce byte-identical strings for a
+/// reusable artifact; any difference — or an empty recording — means
+/// NOT reusable.
+pub fn schema_fingerprint(schema: &arrow::datatypes::Schema) -> String {
+    schema
+        .fields()
+        .iter()
+        .map(|f| format!("{}:{}", f.name(), f.data_type()))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// ADR-015 rule 6: fingerprint of a parquet file's footer schema —
+/// metadata only, no row-group data is read. The file's embedded
+/// `ARROW:schema` hint (always stored by ArrowWriter) is what lets
+/// view-family columns such as Utf8View survive the round trip; a bare
+/// physical-type conversion would read them back as plain Utf8.
+/// `None` = footer unreadable (corrupt/truncated artifact — not reusable).
+fn parquet_footer_fingerprint(path: &std::path::Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = parquet::file::metadata::ParquetMetaDataReader::new();
+    if reader.try_parse(&file).is_err() {
+        return None;
+    }
+    let meta = reader.finish().ok()?;
+    let fmeta = meta.file_metadata();
+    let arrow_schema = parquet::arrow::parquet_to_arrow_schema(
+        fmeta.schema_descr(),
+        fmeta.key_value_metadata(),
+    )
+    .ok()?;
+    Some(schema_fingerprint(&arrow_schema))
+}
+
 /// Try to skip a fresh node: returns the parquet path when the node's
 /// recorded digest matches the freshly recomputed one AND a cached
-/// materialization (flow_metadata row + parquet file) exists.
+/// materialization (flow_metadata row + parquet file + a recorded schema
+/// fingerprint matching the parquet footer, ADR-015 rule 6) exists.
 ///
 /// `None` means "execute normally". Best-effort like the write side:
 /// ledger/duckdb errors degrade to executing the node.
@@ -828,6 +870,7 @@ pub fn try_skip_fresh(
         Err(_) => return None,
     };
     let ledger = AssetLedger { conn, cache_dir: std::path::PathBuf::from(cache_dir) };
+    eprintln!("DBG guard-ok ledger-opened");
     // codex-review P1: skip only on a COMPLETE upstream digest set. A
     // missing upstream (filter_map upstream of us silently dropped it)
     // must not let a partial chain accidentally match a stale recorded
@@ -841,21 +884,56 @@ pub fn try_skip_fresh(
         .collect();
     let recomputed = compute_digest(node_id, type_id, node_config_json, rendered_config, &refs);
     let recorded = ledger.recorded_digest(node_id).ok()??;
+    eprintln!("DBG digest recorded={recorded} recomputed={}", recomputed.hex());
     if recorded != recomputed.hex() {
+        eprintln!("DBG bail: digest mismatch");
         return None;
     }
     // Digest matches — is there a cached materialization to reuse?
     let metadata_path = std::path::Path::new(cache_dir).join("metadata.duckdb");
-    let conn = duckdb::Connection::open(&metadata_path).ok()?;
-    let parquet_path: Option<String> = conn
+    eprintln!("DBG opening metadata: {}", metadata_path.display());
+    let conn = duckdb::Connection::open(&metadata_path);
+    eprintln!("DBG metadata open: {:?}", conn.as_ref().err().map(|e| e.to_string()));
+    let conn = conn.ok()?;
+    let qres = conn
         .query_row(
             "SELECT parquet_path FROM flow_metadata WHERE node_id = ? AND parquet_path != ''",
             [&node_id.to_string()],
             |row| row.get(0),
-        )
-        .ok();
+        );
+    eprintln!("DBG query: {:?}", qres.as_ref().err().map(|e| e.to_string()));
+    let parquet_path: Option<String> = qres.ok().flatten();
     let parquet_path = parquet_path?;
+    eprintln!("DBG metadata-row found: {parquet_path}");
     if !std::path::Path::new(&parquet_path).exists() {
+        eprintln!("DBG bail: file missing");
+        return None;
+    }
+    // ADR-015 rule 6: schema fingerprint — the materialized parquet must
+    // carry the schema its flow_metadata row recorded. A mismatch, an
+    // unreadable footer, or a pre-hardening row with no fingerprint
+    // (NULL / '' / '{}') means the artifact is NOT provably reusable:
+    // fail closed to re-execution. The rerun rewrites the row with a real
+    // fingerprint — a one-time cost with the same semantics as a digest
+    // version bump (rule 3).
+    let schema_json: Option<String> = conn
+        .query_row(
+            "SELECT schema_json FROM flow_metadata WHERE node_id = ? AND parquet_path != ''",
+            [&node_id.to_string()],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    let recorded_schema = match schema_json.as_deref() {
+        Some(s) if !s.trim().is_empty() && s != "{}" => s.to_string(),
+        _ => return None,
+    };
+    eprintln!("DBG recorded_schema={recorded_schema:?}");
+    let parquet_schema = parquet_footer_fingerprint(std::path::Path::new(&parquet_path));
+    eprintln!("DBG footer={parquet_schema:?}");
+    let parquet_schema = parquet_schema?;
+    if recorded_schema != parquet_schema {
+        eprintln!("DBG bail: schema mismatch");
         return None;
     }
     Some(parquet_path)
@@ -1041,6 +1119,31 @@ mod tests {
         assert!(cal.contains('✅') && cal.contains('❌'), "cal: {cal}");
     }
 
+    /// Write a real (empty-batch) parquet file with the given schema,
+    /// exactly as ArrowWriter does at materialization — the skip side
+    /// must read the footer, never trust the file's mere existence
+    /// (ADR-015 rule 6).
+    fn write_test_parquet(path: &std::path::Path, schema: &std::sync::Arc<arrow::datatypes::Schema>) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer =
+            parquet::arrow::ArrowWriter::try_new(file, schema.clone(), None).unwrap();
+        writer
+            .write(&arrow::array::RecordBatch::new_empty(schema.clone()))
+            .unwrap();
+        writer.close().unwrap();
+    }
+
+    /// A schema exercising both string families plus a numeric column —
+    /// the fingerprint must tell Utf8 and Utf8View apart end to end.
+    fn test_schema() -> std::sync::Arc<arrow::datatypes::Schema> {
+        use arrow::datatypes::{DataType, Field, Schema};
+        std::sync::Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("view", DataType::Utf8View, false),
+            Field::new("amount", DataType::Float64, true),
+        ]))
+    }
+
     #[test]
     fn try_skip_fresh_roundtrip() {
         let dir = std::env::temp_dir().join(format!("swanflow_skip_test_{}", std::process::id()));
@@ -1055,21 +1158,24 @@ mod tests {
         let ledger = AssetLedger::open(std::path::Path::new(&dir_s)).unwrap();
         ledger.record_asset_run_for(Uuid::nil(), "t", "{}", "", &[]).unwrap();
         let parquet = dir.join("dummy.parquet");
-        std::fs::write(&parquet, b"x").unwrap();
+        let schema = test_schema();
+        write_test_parquet(&parquet, &schema);
+        let fp = schema_fingerprint(schema.as_ref());
         let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
         meta.execute_batch(
-            "CREATE TABLE IF NOT EXISTS flow_metadata (node_id TEXT PRIMARY KEY, table_name TEXT, parquet_path TEXT, schema_json TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-             INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES ('00000000-0000-0000-0000-000000000000', 't', 'dummy.parquet', '{}');",
+            "CREATE TABLE IF NOT EXISTS flow_metadata (node_id TEXT PRIMARY KEY, table_name TEXT, parquet_path TEXT, schema_json TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);",
+        ).unwrap();
+        meta.execute(
+            "INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES (?, ?, ?, ?)",
+            [Uuid::nil().to_string(), "t".to_string(), "dummy.parquet".to_string(), fp.clone()],
         ).unwrap();
         let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]);
         assert!(got.is_none(), "relative parquet_path must not skip: {:?}", got);
 
         // Absolute path (as MaterializingStream records) -> skip
         let abs = parquet.to_str().unwrap().to_string();
-        meta.execute_batch(&format!(
-            "UPDATE flow_metadata SET parquet_path = '{}';", abs
-        ))
-        .unwrap();
+        meta.execute("UPDATE flow_metadata SET parquet_path = ?;", [abs.clone()]).unwrap();
+        let _ = meta.execute_batch("CHECKPOINT"); // WAL: fresh reader connections must see this row
         drop(meta); // release the file lock before re-opening inside try_skip_fresh
         let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]);
         assert_eq!(got.as_deref(), Some(abs.as_str()));
@@ -1122,17 +1228,26 @@ mod tests {
             .record_asset_run_for(Uuid::nil(), "t", raw, r#"{"query":"SELECT '1' AS v"}"#, &[])
             .unwrap();
         let parquet = dir.join("dummy.parquet");
-        std::fs::write(&parquet, b"x").unwrap();
+        let schema = test_schema();
+        write_test_parquet(&parquet, &schema);
+        let fp = schema_fingerprint(schema.as_ref());
         let abs = parquet.to_str().unwrap().to_string();
         let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
-        meta.execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS flow_metadata (node_id TEXT PRIMARY KEY, table_name TEXT, parquet_path TEXT, schema_json TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-             INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES ('00000000-0000-0000-0000-000000000000', 't', '{abs}', '{{}}');",
-        ))
+        meta.execute_batch(
+            "CREATE TABLE IF NOT EXISTS flow_metadata (node_id TEXT PRIMARY KEY, table_name TEXT, parquet_path TEXT, schema_json TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);",
+        )
         .unwrap();
+        // Parameterized INSERT (mirrors observer.rs production write path) —
+        // format!-interpolated literals previously produced node_id values
+        // that fail equality against the same-looking string at skip time.
+        meta.execute(
+            "INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES (?, ?, ?, ?)",
+            [Uuid::nil().to_string(), "t".to_string(), abs.clone(), fp.clone()],
+        )
+        .unwrap();
+        let _ = meta.execute_batch("CHECKPOINT"); // WAL: fresh reader connections must see this row
         drop(meta); // release the file lock before re-opening inside try_skip_fresh
 
-        // Same rendered context -> skip allowed.
         let got = try_skip_fresh(
             &dir_s,
             Uuid::nil(),
@@ -1449,6 +1564,146 @@ mod tests {
                     .starts_with("assets.duckdb.corrupt-")
             });
         assert!(backed_up, "corrupt ledger must be backed up with a .corrupt- suffix");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn schema_fingerprint_distinguishes_utf8_from_utf8view() {
+        // Family-case lesson: the fingerprint must not collapse the view
+        // family into its physical sibling — a "VARCHAR"-style fingerprint
+        // would let a Utf8View artifact pose as plain Utf8.
+        let s = |dt: arrow::datatypes::DataType| {
+            use arrow::datatypes::{Field, Schema};
+            std::sync::Arc::new(Schema::new(vec![Field::new("c", dt, false)]))
+        };
+        let u = s(arrow::datatypes::DataType::Utf8);
+        let v = s(arrow::datatypes::DataType::Utf8View);
+        assert_eq!(schema_fingerprint(u.as_ref()), "c:Utf8");
+        assert_eq!(schema_fingerprint(v.as_ref()), "c:Utf8View");
+        assert_ne!(
+            schema_fingerprint(u.as_ref()),
+            schema_fingerprint(v.as_ref()),
+            "Utf8 and Utf8View must fingerprint differently"
+        );
+    }
+
+    #[test]
+    fn schema_fingerprint_roundtrip_via_parquet_footer() {
+        // ADR-015 rule 6 (record side): what the record side stores must
+        // equal what the skip side reads back from the footer — including
+        // view-family columns, whose identity the footer restores via the
+        // embedded ARROW:schema hint (a physical-type-only conversion
+        // would read Utf8View back as plain Utf8 and break every skip
+        // for such nodes).
+        let dir = std::env::temp_dir().join(format!("swanflow_schema_rt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let schema = test_schema();
+        let path = dir.join("rt.parquet");
+        write_test_parquet(&path, &schema);
+        let recorded = schema_fingerprint(schema.as_ref());
+        assert_eq!(recorded, "name:Utf8,view:Utf8View,amount:Float64");
+        let footer = parquet_footer_fingerprint(&path).expect("footer must be readable");
+        assert_eq!(footer, recorded, "footer fingerprint must round-trip byte-exact");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn try_skip_fresh_schema_mismatch_recomputes() {
+        // ADR-015 rule 6: digest chain unchanged + parquet present, but
+        // the recorded schema fingerprint does NOT match the footer
+        // (engine upgrade / schema drift) -> the artifact is NOT reusable:
+        // skip must fail closed to re-execution, never silently reuse.
+        let dir = std::env::temp_dir().join(format!("swanflow_skipmismatch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_s = dir.to_str().unwrap().to_string();
+
+        let ledger = AssetLedger::open(std::path::Path::new(&dir_s)).unwrap();
+        ledger.record_asset_run_for(Uuid::nil(), "t", "{}", "", &[]).unwrap();
+        let parquet = dir.join("dummy.parquet");
+        let schema = test_schema();
+        write_test_parquet(&parquet, &schema);
+        let abs = parquet.to_str().unwrap().to_string();
+        let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
+        meta.execute_batch(
+            "CREATE TABLE IF NOT EXISTS flow_metadata (node_id TEXT PRIMARY KEY, table_name TEXT, parquet_path TEXT, schema_json TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);",
+        ).unwrap();
+        meta.execute(
+            "INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES (?, ?, ?, ?)",
+            [Uuid::nil().to_string(), "t".to_string(), abs.clone(), "name:Utf8,view:WRONG_TYPE,amount:Float64".to_string()],
+        ).unwrap();
+        let _ = meta.execute_batch("CHECKPOINT"); // WAL: fresh reader connections must see this row
+        drop(meta);
+
+        let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]);
+        assert!(got.is_none(), "schema fingerprint mismatch must fail closed: {got:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn try_skip_fresh_empty_schema_json_recomputes() {
+        // Pre-hardening rows carry no fingerprint (the historical
+        // placeholder '{}', '' or NULL): skip fails closed ONCE — this is
+        // migration semantics, not an error. After the (simulated) rerun
+        // records a real fingerprint the same artifact skips.
+        let dir = std::env::temp_dir().join(format!("swanflow_skipemptyschema_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_s = dir.to_str().unwrap().to_string();
+
+        let ledger = AssetLedger::open(std::path::Path::new(&dir_s)).unwrap();
+        ledger.record_asset_run_for(Uuid::nil(), "t", "{}", "", &[]).unwrap();
+        let parquet = dir.join("dummy.parquet");
+        let schema = test_schema();
+        write_test_parquet(&parquet, &schema);
+        let fp = schema_fingerprint(schema.as_ref());
+        let abs = parquet.to_str().unwrap().to_string();
+
+        // A: historical placeholder '{}'
+        let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
+        meta.execute_batch(
+            "CREATE TABLE IF NOT EXISTS flow_metadata (node_id TEXT PRIMARY KEY, table_name TEXT, parquet_path TEXT, schema_json TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);",
+        ).unwrap();
+        meta.execute(
+            "INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES (?, ?, ?, ?)",
+            [Uuid::nil().to_string(), "t".to_string(), abs.clone(), "{}".to_string()],
+        ).unwrap();
+        let _ = meta.execute_batch("CHECKPOINT"); // WAL: fresh reader connections must see this row
+        drop(meta);
+        assert!(
+            try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]).is_none(),
+            "'{{}}' placeholder must not skip"
+        );
+
+        // B: empty string
+        let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
+        meta.execute_batch("UPDATE flow_metadata SET schema_json = '';").unwrap();
+        drop(meta);
+        assert!(
+            try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]).is_none(),
+            "empty string must not skip"
+        );
+
+        // C: NULL
+        let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
+        meta.execute_batch("UPDATE flow_metadata SET schema_json = NULL;").unwrap();
+        drop(meta);
+        assert!(
+            try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]).is_none(),
+            "NULL must not skip"
+        );
+
+        // The rerun re-records the real fingerprint -> the next run skips.
+        let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
+        meta.execute_batch(&format!("UPDATE flow_metadata SET schema_json = '{fp}';")).unwrap();
+        drop(meta);
+        let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]);
+        assert_eq!(
+            got.as_deref(),
+            Some(abs.as_str()),
+            "after re-recording the fingerprint the skip must hit"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

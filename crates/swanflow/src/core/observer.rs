@@ -449,14 +449,29 @@ impl Stream for MaterializingStream {
                         writer.close().unwrap();
 
                         if let Ok(conn) = duckdb::Connection::open(&metadata_path) {
-                            println!(
+                            eprintln!(
                                 "DEBUG: Recording materialization for node {} into table {}",
                                 node_id, table_name
                             );
+                            // ADR-015 rule 6: record the REAL schema
+                            // fingerprint (name:type,...) so skip-if-fresh
+                            // can prove the parquet still matches this
+                            // node's output schema — not just that the
+                            // file exists. Pre-hardening rows stored '{}',
+                            // which now fails closed exactly once at skip
+                            // time (the rerun re-records the fingerprint).
+                            let schema_fp = crate::core::engine::assets::schema_fingerprint(schema.as_ref());
                             conn.execute(
                                 "INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES (?, ?, ?, ?)",
-                                [node_id.to_string(), table_name.clone(), path.clone(), "{}".to_string()],
+                                [node_id.to_string(), table_name.clone(), path.clone(), schema_fp],
                             ).ok();
+                            // WAL discipline (GraphRAG judgment): a later
+                            // reader opening a NEW connection on this file
+                            // cannot see un-checkpointed WAL content. Skip-if-
+                            // fresh readers (try_skip_fresh) open fresh
+                            // connections, so checkpoint here or the just-
+                            // recorded row is invisible to them.
+                            conn.execute("CHECKPOINT", []).ok();
                         }
                     }
                 }
