@@ -563,13 +563,22 @@ impl QueryEngine for DuckDBEngine {
                                 ));
                             }
                         };
-                        return match keyword_split(after_with, "RECURSIVE") {
+                        // Trim before the inner check (r4 pass-5): the
+                        // remainder after WITH normally starts with a space,
+                        // which would defeat the prefix match and splice the
+                        // CTEs before a dangling RECURSIVE keyword.
+                        let after_with_trim = after_with.trim_start();
+                        return match keyword_split(after_with_trim, "RECURSIVE") {
                             Some(after_rec) => Ok(format!(
                                 "WITH RECURSIVE {},{}",
                                 cte_list,
                                 after_rec
                             )),
-                            None => Ok(format!("WITH {},{}", cte_list, after_with)),
+                            None => Ok(format!(
+                                "WITH {},{}",
+                                cte_list,
+                                after_with_trim
+                            )),
                         }
                     }
                 }
@@ -1157,4 +1166,29 @@ mod tests {
         });
     }
 
+}
+
+#[cfg(test)]
+mod keyword_split_tests {
+    use super::keyword_split;
+
+    #[test]
+    fn matches_word_boundary() {
+        assert_eq!(
+            keyword_split("WITH RECURSIVE t AS (SELECT 1)", "WITH"),
+            Some(" RECURSIVE t AS (SELECT 1)")
+        );
+        // identifier lookalikes must NOT match the keyword
+        assert_eq!(
+            keyword_split("WITH recursively AS (SELECT 1)", "WITH"),
+            Some(" recursively AS (SELECT 1)")
+        );
+        assert_eq!(keyword_split("recursively t AS (SELECT 1)", "WITH"), None);
+        // inner RECURSIVE check on a trimmed remainder
+        assert_eq!(
+            keyword_split("RECURSIVE walk AS (SELECT 1)", "RECURSIVE"),
+            Some(" walk AS (SELECT 1)")
+        );
+        assert_eq!(keyword_split(" recursively AS (SELECT 1)", "RECURSIVE"), None);
+    }
 }
