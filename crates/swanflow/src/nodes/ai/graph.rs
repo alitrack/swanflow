@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
-    Float64Builder, Int64Array, Int64Builder, StringArray, StringBuilder,
+    ArrayRef, Float64Builder, Int64Array, Int64Builder, StringArray, StringBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -404,17 +404,48 @@ impl Stream for EntityExtractionStream {
                             // inside a tokio task ("Join Error / task panicked")
                             // whenever column 0 was not a string (e.g. an id
                             // column first). Fail with a clear message instead.
-                            let text_col = batch
-                                .column(0)
+                            // DuckDB-backed sources commonly surface Utf8View
+                            // (string view) buffers; cast those to plain Utf8
+                            // so string columns are accepted as-is (same policy
+                            // as ai.community_batches, see communities.rs).
+                            let text_array: ArrayRef =
+                                if let Some(sa) = batch
+                                    .column(0)
+                                    .as_any()
+                                    .downcast_ref::<datafusion::arrow::array::StringArray>()
+                                {
+                                    std::sync::Arc::clone(batch.column(0))
+                                } else {
+                                    let schema = batch.schema();
+                                    let f = schema.field(0);
+                                    if !matches!(
+                                        f.data_type(),
+                                        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                                    ) {
+                                        return Err(DataFusionError::Execution(format!(
+                                            "ai.entity_extractor expects column 0 to be a string, got {} ({:?}). Put the text column first.",
+                                            f.data_type(),
+                                            f.name()
+                                        )));
+                                    }
+                                    datafusion::arrow::compute::cast(
+                                        batch.column(0),
+                                        &DataType::Utf8,
+                                    )
+                                    .map_err(|e| {
+                                        DataFusionError::Execution(format!(
+                                            "ai.entity_extractor: cannot cast column 0 {} to Utf8: {e}",
+                                            f.name()
+                                        ))
+                                    })?
+                                };
+                            let text_col = text_array
                                 .as_any()
                                 .downcast_ref::<datafusion::arrow::array::StringArray>()
                                 .ok_or_else(|| {
-                                    let schema = batch.schema();
-                                    let f = schema.field(0);
-                                    DataFusionError::Execution(format!(
-                                        "ai.entity_extractor expects column 0 to be Utf8, got {} ({:?}). Put the text column first.",
-                                        f.data_type(), f.name()
-                                    ))
+                                    DataFusionError::Execution(
+                                        "ai.entity_extractor: column 0 is not a string array".to_string(),
+                                    )
                                 })?;
 
                             for i in 0..batch.num_rows() {

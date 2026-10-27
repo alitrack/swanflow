@@ -1,0 +1,90 @@
+# SwanFlow Example: Graph-RAG pipeline (three stages on one canvas)
+#
+# Stage 1 (ingest):  document text -> ai.entity_extractor -> writes entities/relations
+# Stage 2 (walk):    multi-hop subgraph via a single recursive CTE
+# Stage 3 (evidence): trace walked edges back to source chunks
+#
+# The knowledge-graph schema is the duckdb-graphrag contract:
+#   nodes(id, entity, degree) / edges(source_id, target_id, relation, chunk_ids[])
+#
+# Stage 1 needs LLM env config (LLM_API_BASE / LLM_MODEL / LLM_API_KEY),
+# same as agent-analyst.yaml. Stages 2-3 are pure SQL and run anywhere.
+#
+# Usage:
+#   swanflow run examples/graphrag-walk.yaml
+name: "Graph-RAG Pipeline"
+id: "c0000000-0000-0000-0000-000000000001"
+graph:
+  nodes:
+    # ── Stage 1: ingest ──────────────────────────────────────────
+    - id: "c0000000-0000-0000-0000-000000000101"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: |
+          SELECT 'ACME Corp bought 42 laptops from TechSupply on 2026-09-01 for 50400 USD' AS text, 'chunk_0' AS chunk_id
+          UNION ALL
+          SELECT 'Beta LLC ordered 10 monitors from ScreenWorld, a partner of TechSupply', 'chunk_1'
+      state: "Configured"
+      sub_workflow: null
+    - id: "c0000000-0000-0000-0000-000000000102"
+      type_id: "ai.entity_extractor"
+      config:
+        entity_types: ["organization", "product", "partner"]
+        relation_types: ["bought_from", "ordered_from", "partner_of"]
+      state: "Configured"
+      sub_workflow: null
+
+    # ── Stage 2: multi-hop graph walk (single recursive CTE) ─────
+    - id: "c0000000-0000-0000-0000-000000000201"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: |
+          WITH RECURSIVE edges(source_id, target_id, relation, chunk_ids) AS (
+            SELECT * FROM (VALUES
+              ('ACME Corp','TechSupply',  'bought_from',  ['chunk_0']::VARCHAR[]),
+              ('Beta LLC', 'ScreenWorld', 'ordered_from', ['chunk_1']::VARCHAR[]),
+              ('TechSupply','ScreenWorld','partner_of',   ['chunk_1']::VARCHAR[])
+            )
+          ), walk(node_id, depth) AS (
+            SELECT 'ACME Corp', 0
+            UNION ALL
+            SELECT e.target_id, w.depth + 1
+            FROM walk w JOIN edges e ON e.source_id = w.node_id
+            WHERE w.depth < 2
+          )
+          SELECT DISTINCT node_id, depth FROM walk ORDER BY depth, node_id
+      state: "Configured"
+      sub_workflow: null
+
+    # ── Stage 3: evidence recall ─────────────────────────────────
+    - id: "c0000000-0000-0000-0000-000000000301"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: |
+          WITH edges(source_id, target_id, chunk_ids) AS (
+            SELECT * FROM (VALUES
+              ('ACME Corp','TechSupply',  ['chunk_0']::VARCHAR[]),
+              ('Beta LLC', 'ScreenWorld', ['chunk_1']::VARCHAR[]),
+              ('TechSupply','ScreenWorld',['chunk_1']::VARCHAR[])
+            )
+          ), chunks(chunk_id, text) AS (
+            SELECT * FROM (VALUES
+              ('chunk_0','ACME Corp bought 42 laptops from TechSupply on 2026-09-01 for 50400 USD'),
+              ('chunk_1','Beta LLC ordered 10 monitors from ScreenWorld, a partner of TechSupply')
+            )
+          )
+          SELECT DISTINCT unnest(e.chunk_ids) AS chunk_id, c.text
+          FROM edges e JOIN chunks c ON c.chunk_id = ANY(e.chunk_ids)
+          WHERE e.source_id = 'ACME Corp' OR e.target_id = 'TechSupply'
+          ORDER BY chunk_id
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+    - [2, 3, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
