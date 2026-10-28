@@ -3,6 +3,7 @@
 
 pub mod excel;
 pub mod nodes;
+pub mod ossie;
 
 // Re-export all public items from submodules.
 // Note: ExcelScanLogical/ExcelScanMode/ExcelSinkLogical are defined
@@ -16,3 +17,4 @@ pub use nodes::{
     GraphIndexWriterExec, GraphIndexWriterLogical, GraphIndexWriterNode, HttpFetchNode,
     ParquetReadNode, UniversalReadNode,
 };
+pub use ossie::OssieReadNode;

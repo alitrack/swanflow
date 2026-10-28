@@ -81,7 +81,8 @@ impl NodeRegistry {
         use crate::nodes::io::{
             CsvReadNode, DbConnectorNode, DuckDBReadNode, DuckDBWriteNode, ExcelReadNode,
             ExcelReportNode, ExcelSheetNamesNode, ExcelTemplateNode, ExcelWriteNode,
-            GraphIndexWriterNode, HttpFetchNode, ParquetReadNode, UniversalReadNode,
+            GraphIndexWriterNode, HttpFetchNode, OssieReadNode, ParquetReadNode,
+            UniversalReadNode,
         };
         use crate::nodes::luajit::LuaJitNode;
         use crate::nodes::mcp::McpToolNode;
@@ -144,6 +145,7 @@ impl NodeRegistry {
         }
         self.register_node(Arc::new(CsvReadNode));
         self.register_node(Arc::new(ParquetReadNode));
+        self.register_node(Arc::new(OssieReadNode));
         self.register_node(Arc::new(UniversalReadNode));
         self.register_node(Arc::new(DbConnectorNode));
         self.register_node(Arc::new(ExcelReadNode));
