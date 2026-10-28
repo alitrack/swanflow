@@ -76,6 +76,15 @@ struct OssieMetric {
     expression: OssieExpr,
 }
 
+#[derive(Serialize)]
+pub(crate) struct OssieRelationship {
+    pub(crate) name: String,
+    pub(crate) from: String,
+    pub(crate) to: String,
+    pub(crate) from_columns: Vec<String>,
+    pub(crate) to_columns: Vec<String>,
+}
+
 #[derive(Serialize, Default)]
 struct OssieSemanticModel {
     name: String,
@@ -83,7 +92,7 @@ struct OssieSemanticModel {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     metrics: Vec<OssieMetric>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    relationships: Vec<JsonValue>,
+    relationships: Vec<OssieRelationship>,
 }
 
 #[derive(Serialize)]
@@ -94,23 +103,23 @@ struct OssieFile {
 
 // ── DuckDB introspection ───────────────────────────────────────────────
 
-struct TableMeta {
-    schema: String,
-    table: String,
+pub(crate) struct TableMeta {
+    pub(crate) schema: String,
+    pub(crate) table: String,
     #[allow(dead_code)] // table comment is introspected for future dataset description
     comment: String,
-    columns: Vec<ColumnMeta>,
-    primary_key: Vec<String>,
+    pub(crate) columns: Vec<ColumnMeta>,
+    pub(crate) primary_key: Vec<String>,
 }
 
-struct ColumnMeta {
-    name: String,
+pub(crate) struct ColumnMeta {
+    pub(crate) name: String,
     #[allow(dead_code)] // data_type is introspected for future typed export
     data_type: String,
     comment: String,
 }
 
-fn introspect(conn: &Connection, schema_filter: &str) -> Result<Vec<TableMeta>> {
+pub(crate) fn introspect(conn: &Connection, schema_filter: &str) -> Result<Vec<TableMeta>> {
     // Exclude DuckDB system schemas; restrict to one schema when asked.
     let mut rows = conn
         .prepare(
@@ -172,7 +181,9 @@ fn introspect(conn: &Connection, schema_filter: &str) -> Result<Vec<TableMeta>> 
         // Primary key via duckdb_constraints().
         let mut pk_stmt = conn
             .prepare(
-                "SELECT constraint_column_names FROM duckdb_constraints()
+                // constraint_column_names is a LIST(TEXT) column; cast to
+                // VARCHAR ("[a, b]") so the rust crate can read it as String.
+                "SELECT CAST(constraint_column_names AS VARCHAR) FROM duckdb_constraints()
                  WHERE schema_name = ? AND table_name = ?
                    AND constraint_type = 'PRIMARY KEY'",
             )
@@ -222,7 +233,11 @@ fn default_metrics(model_name: &str, tm: &TableMeta) -> Vec<OssieMetric> {
     }]
 }
 
-fn build_model(tables: Vec<TableMeta>, model_name: &str) -> OssieFile {
+fn build_model(
+    tables: Vec<TableMeta>,
+    model_name: &str,
+    relationships: Vec<OssieRelationship>,
+) -> OssieFile {
     let datasets: Vec<OssieDataset> = tables
         .iter()
         .map(|tm| {
@@ -263,7 +278,7 @@ fn build_model(tables: Vec<TableMeta>, model_name: &str) -> OssieFile {
             name: model_name.to_string(),
             datasets,
             metrics,
-            relationships: vec![],
+            relationships,
         }],
     }
 }
@@ -298,7 +313,9 @@ impl NodeBehavior for OssieExportNode {
                     "database": { "type": "string" },
                     "path":     { "type": "string" },
                     "schema":   { "type": "string" },
-                    "model_name": { "type": "string" }
+                    "model_name": { "type": "string" },
+                    "infer_relationships": { "type": "boolean" },
+                    "min_match_ratio": { "type": "number" }
                 },
                 "required": ["database", "path"]
             }),
@@ -346,6 +363,14 @@ impl NodeBehavior for OssieExportNode {
             .and_then(|v| v.as_str())
             .unwrap_or("swanflow_export")
             .to_string();
+        let infer_relationships = config
+            .get("infer_relationships")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let min_ratio = config
+            .get("min_match_ratio")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.90);
 
         let conn = Connection::open(&database)
             .map_err(|e| anyhow!("Failed to open DuckDB {}: {}", database, e))?;
@@ -357,7 +382,12 @@ impl NodeBehavior for OssieExportNode {
                 schema_filter
             ));
         }
-        let file = build_model(tables, &model_name);
+        let relationships = if infer_relationships {
+            crate::nodes::io::semantic_fk::infer_relationships(&conn, &tables, min_ratio)?
+        } else {
+            Vec::new()
+        };
+        let file = build_model(tables, &model_name, relationships);
 
         let text = serde_json::to_string_pretty(&file)
             .context("Failed to serialize Ossie model")?;
@@ -418,7 +448,7 @@ mod tests {
         let conn = Connection::open(demo_db()).unwrap();
         let tables = introspect(&conn, "").unwrap();
         assert!(!tables.is_empty(), "demo db should have base tables");
-        let file = build_model(tables, "rt_test");
+        let file = build_model(tables, "rt_test", Vec::new());
         let j = serde_json::to_value(&file).unwrap();
         assert_eq!(j["version"], "0.2.0.dev0");
         let sm = &j["semantic_model"][0];
@@ -463,6 +493,62 @@ mod tests {
         let batches = df.collect().await.unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert!(rows >= 2, "exported model must read back with rows, got {rows}");
+    }
+
+    #[tokio::test]
+    async fn export_with_inferred_relationships() {
+        let db = demo_db();
+        let out = "/tmp/ossie_rt/with_rel.ossie.json";
+        let exporter = OssieExportNode;
+        exporter
+            .propose_plan(
+                vec![],
+                &json!({ "database": db, "path": out, "model_name": "rt2", "infer_relationships": true }),
+            )
+            .await
+            .unwrap();
+        let model: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out).unwrap()).unwrap();
+        let rels = model["semantic_model"][0]["relationships"].as_array().unwrap();
+        assert!(
+            rels.iter().any(|r| r["from"] == "orders" && r["to"] == "customers"
+                && r["from_columns"][0] == "customer_id"),
+            "orders→customers relationship missing: {rels:#?}"
+        );
+        // Read back with OssieReadNode: the relationship must surface as a row
+        let reader = crate::nodes::io::ossie::OssieReadNode;
+        let plans = reader.propose_plan(vec![], &json!({ "path": out })).await.unwrap();
+        let ctx = SessionContext::new();
+        let df = ctx
+            .execute_logical_plan(plans.into_iter().next().unwrap())
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        let kinds: Vec<String> = batches
+            .iter()
+            .flat_map(|b| {
+                (0..b.num_rows()).filter_map(move |i| {
+                    let k = b
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<datafusion::arrow::array::StringArray>()
+                        .unwrap()
+                        .value(i);
+                    (k == "ossie_relationship")
+                        .then(|| {
+                            b.column(9)
+                                .as_any()
+                                .downcast_ref::<datafusion::arrow::array::StringArray>()
+                                .unwrap()
+                                .value(i)
+                                .to_string()
+                        })
+                })
+            })
+            .collect();
+        assert!(!kinds.is_empty(), "no ossie_relationship rows in catalog");
+        assert!(kinds.iter().any(|k| k.contains("orders_to_customers")),
+            "relationship row content: {kinds:#?}");
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ pub mod excel;
 pub mod nodes;
 pub mod ossie;
 pub mod ossie_export;
+pub mod semantic_fk;
 
 // Re-export all public items from submodules.
 // Note: ExcelScanLogical/ExcelScanMode/ExcelSinkLogical are defined
@@ -20,3 +21,4 @@ pub use nodes::{
 };
 pub use ossie::OssieReadNode;
 pub use ossie_export::OssieExportNode;
+pub use semantic_fk::SemanticFkInferNode;
