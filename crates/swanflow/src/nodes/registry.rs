@@ -82,7 +82,8 @@ impl NodeRegistry {
             CsvReadNode, DbConnectorNode, DuckDBReadNode, DuckDBWriteNode, ExcelReadNode,
             ExcelReportNode, ExcelSheetNamesNode, ExcelTemplateNode, ExcelWriteNode,
             GraphIndexWriterNode, HttpFetchNode, OssieExportNode, OssieReadNode,
-            ParquetReadNode, SemanticFkInferNode, UniversalReadNode,
+            ParquetReadNode, SemanticAnnotateNode, SemanticFkInferNode,
+            UniversalReadNode,
         };
         use crate::nodes::luajit::LuaJitNode;
         use crate::nodes::mcp::McpToolNode;
@@ -239,9 +240,13 @@ impl NodeRegistry {
             match OpenAiProvider::new(config) {
                 Ok(provider) => {
                     eprintln!("[DEBUG] Registering EntityExtractorNode");
+                    let provider = Arc::new(provider);
                     self.register_node(Arc::new(EntityExtractorNode {
-                        provider: Arc::new(provider),
+                        provider: provider.clone(),
                     }));
+                    self.register_node(Arc::new(
+                        crate::nodes::io::SemanticAnnotateNode { provider },
+                    ));
                 }
                 Err(e) => eprintln!("[DEBUG] Failed to create OpenAiProvider: {}", e),
             }
@@ -252,9 +257,11 @@ impl NodeRegistry {
             endpoint: None,
         }) {
             eprintln!("[DEBUG] Registering EntityExtractorNode (Fallback)");
+            let provider = Arc::new(provider);
             self.register_node(Arc::new(EntityExtractorNode {
-                provider: Arc::new(provider),
+                provider: provider.clone(),
             }));
+            self.register_node(Arc::new(crate::nodes::io::SemanticAnnotateNode { provider }));
         } else {
             eprintln!("[DEBUG] No LLM_MODEL or OPENAI_API_KEY found, EntityExtractor skip");
         }

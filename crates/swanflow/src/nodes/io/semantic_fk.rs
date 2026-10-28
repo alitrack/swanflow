@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn debug_introspect_layout() {
-        let conn = Connection::open(demo_db()).unwrap();
+        let conn = crate::nodes::io::ossie_export::open_duckdb_readonly(&demo_db()).unwrap();
         let tables = introspect(&conn, "").unwrap();
         for tm in &tables {
             eprintln!(

@@ -106,17 +106,32 @@ struct OssieFile {
 pub(crate) struct TableMeta {
     pub(crate) schema: String,
     pub(crate) table: String,
-    #[allow(dead_code)] // table comment is introspected for future dataset description
-    comment: String,
+    #[allow(dead_code)] // introspected for future dataset descriptions
+    pub(crate) comment: String,
     pub(crate) columns: Vec<ColumnMeta>,
     pub(crate) primary_key: Vec<String>,
 }
 
 pub(crate) struct ColumnMeta {
     pub(crate) name: String,
-    #[allow(dead_code)] // data_type is introspected for future typed export
-    data_type: String,
-    comment: String,
+    pub(crate) data_type: String,
+    pub(crate) comment: String,
+}
+
+/// Open a DuckDB file read-only (shared helper for semantic nodes).
+/// True read-only access mode — multiple readers of one file never fight
+/// over the write lock (the bundled engine aborts on such contention).
+pub(crate) fn open_duckdb_readonly(database: &str) -> Result<Connection> {
+    use duckdb::{AccessMode, Config};
+    if database == ":memory:" {
+        return Connection::open_in_memory()
+            .map_err(|e| anyhow!("in-memory DuckDB failed: {}", e));
+    }
+    let cfg = Config::default()
+        .access_mode(AccessMode::ReadOnly)
+        .map_err(|e| anyhow!("DuckDB config failed: {}", e))?;
+    Connection::open_with_flags(database, cfg)
+        .map_err(|e| anyhow!("Failed to open DuckDB {} read-only: {}", database, e))
 }
 
 pub(crate) fn introspect(conn: &Connection, schema_filter: &str) -> Result<Vec<TableMeta>> {
@@ -445,7 +460,7 @@ mod tests {
 
     #[test]
     fn exports_valid_ossie_shape() {
-        let conn = Connection::open(demo_db()).unwrap();
+        let conn = open_duckdb_readonly(&demo_db()).unwrap();
         let tables = introspect(&conn, "").unwrap();
         assert!(!tables.is_empty(), "demo db should have base tables");
         let file = build_model(tables, "rt_test", Vec::new());
