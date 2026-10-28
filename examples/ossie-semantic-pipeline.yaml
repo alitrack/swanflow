@@ -1,0 +1,64 @@
+# SwanFlow Example: Semantic-layer production pipeline (Ossie integration, P1)
+#
+# One canvas, four stages — the full "consume -> produce" semantic loop:
+#
+#   Stage 1 (annotate):  DuckDB catalog columns -> business terms (LLM;
+#                        needs LLM_API_BASE / LLM_MODEL / LLM_API_KEY)
+#   Stage 2 (fk-infer):  deterministic join-path probe (no LLM) — infers
+#                        orders.customer_id -> customers.customer_id
+#   Stage 3 (export):    catalog + relationships -> Apache Ossie 0.2.x model
+#   Stage 4 (read-back): exported model -> ossie_catalog, SQL-JOINable
+#
+# The demo database /tmp/ossie_rt/demo.duckdb (customers, orders) is built
+# by `python3 /tmp/ossie_rt/make_demo.py` (duckdb 1.5.5). Stage 1 is the
+# only LLM-dependent stage; skip it by deleting node 0 and edge [0,1] when
+# running without credentials.
+#
+# Usage:
+#   swanflow run examples/ossie-semantic-pipeline.yaml
+name: "Ossie Semantic Pipeline"
+id: "c0000000-0000-0000-0000-0000000000a1"
+graph:
+  nodes:
+    # ── Stage 1: LLM column annotation ──────────────────────────
+    - id: "c0000000-0000-0000-0000-0000000000b1"
+      type_id: "core.semantic.annotate"
+      config:
+        database: "/tmp/ossie_rt/demo.duckdb"
+        min_confidence: 0.5
+      state: "Configured"
+      sub_workflow: null
+
+    # ── Stage 2: deterministic FK inference ─────────────────────
+    - id: "c0000000-0000-0000-0000-0000000000b2"
+      type_id: "core.semantic.fk_infer"
+      config:
+        database: "/tmp/ossie_rt/demo.duckdb"
+        min_match_ratio: 0.9
+      state: "Configured"
+      sub_workflow: null
+
+    # ── Stage 3: export Ossie model with relationships ──────────
+    - id: "c0000000-0000-0000-0000-0000000000b3"
+      type_id: "core.io.ossie_export"
+      config:
+        database: "/tmp/ossie_rt/demo.duckdb"
+        path: "/tmp/ossie_rt/pipeline.ossie.json"
+        model_name: "swanflow_pipeline_demo"
+        infer_relationships: true
+      state: "Configured"
+      sub_workflow: null
+
+    # ── Stage 4: read the model back as a SQL catalog ───────────
+    - id: "c0000000-0000-0000-0000-0000000000b4"
+      type_id: "core.io.ossie_read"
+      config:
+        path: "/tmp/ossie_rt/pipeline.ossie.json"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+    - [2, 3, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
