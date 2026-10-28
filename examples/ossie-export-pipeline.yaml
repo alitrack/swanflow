@@ -1,11 +1,7 @@
 # SwanFlow Example: Ossie semantic export pipeline — deterministic stages
-# (no LLM required). Same as ossie-semantic-pipeline.yaml minus the
-# core.semantic.annotate stage; annotate is LLM-gated and covered by
-# mock-provider unit tests.
+# (no LLM required). Implements the P1 chain from the integration plan:
 #
-#   Stage 1 (fk-infer):  deterministic join-path probe
-#   Stage 2 (export):    catalog + relationships -> Apache Ossie 0.2.x model
-#   Stage 3 (read-back): model -> ossie_catalog, SQL-JOINable
+#   [metadata extract] -> [fk infer] -> [ossie export] -> [ossie read]
 #
 # Usage:
 #   swanflow run examples/ossie-export-pipeline.yaml
@@ -13,6 +9,15 @@ name: "Ossie Export Pipeline"
 id: "c0000000-0000-0000-0000-0000000000c1"
 graph:
   nodes:
+    # ── Stage 0: metadata extraction (tables/columns/comments/PKs) ──
+    - id: "c0000000-0000-0000-0000-0000000000e0"
+      type_id: "core.semantic.extract"
+      config:
+        database: "/tmp/ossie_rt/demo.duckdb"
+      state: "Configured"
+      sub_workflow: null
+
+    # ── Stage 1: deterministic FK inference ─────────────────────
     - id: "c0000000-0000-0000-0000-0000000000d1"
       type_id: "core.semantic.fk_infer"
       config:
@@ -21,6 +26,7 @@ graph:
       state: "Configured"
       sub_workflow: null
 
+    # ── Stage 2: export Ossie model with relationships ──────────
     - id: "c0000000-0000-0000-0000-0000000000d2"
       type_id: "core.io.ossie_export"
       config:
@@ -31,6 +37,7 @@ graph:
       state: "Configured"
       sub_workflow: null
 
+    # ── Stage 3: read the model back as a SQL catalog ───────────
     - id: "c0000000-0000-0000-0000-0000000000d3"
       type_id: "core.io.ossie_read"
       config:
@@ -40,5 +47,6 @@ graph:
   edges:
     - [0, 1, { source_port: 0, target_port: 0 }]
     - [1, 2, { source_port: 0, target_port: 0 }]
+    - [2, 3, { source_port: 0, target_port: 0 }]
   node_holes: []
   edge_property: "directed"
