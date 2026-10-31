@@ -100,6 +100,7 @@ impl NodeRegistry {
             PivotNode, ProfilerNode, ProjectNode, SemanticCleanerNode, TableSchemaValidatorNode,
             TableToVariableNode, VariableCreatorNode, WindowNode,
         };
+        #[cfg(feature = "wasm")]
         use crate::nodes::wasm::WasmNode;
 
         self.register_node(Arc::new(SqlNode));
@@ -193,6 +194,7 @@ impl NodeRegistry {
             // Note: PythonUdfNode is registered but currently returns empty plan (stub implementation)
             self.register_node(Arc::new(PythonUdfNode));
         }
+        #[cfg(feature = "wasm")]
         self.register_node(Arc::new(WasmNode));
         self.register_node(Arc::new(GraphRetrieverNode));
         self.register_node(Arc::new(ContextFuserNode));
