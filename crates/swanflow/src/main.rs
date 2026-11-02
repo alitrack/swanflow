@@ -1327,6 +1327,14 @@ async fn main() -> anyhow::Result<()> {
                     let duckdb = DuckDBEngine::new_in_memory()
                         .map_err(|e| anyhow::anyhow!("DuckDB: {}", e))?;
                     swan_engine = swan_engine.with_engine(Arc::new(duckdb));
+                    // P2-14: be honest — the staged executor below always
+                    // runs on DataFusion; the DuckDB engine object is only
+                    // consumed by SQL compilation helpers, not as the
+                    // workflow executor.
+                    eprintln!(
+                        "note: --engine duckdb sets the SQL compilation backend; \
+                         workflow execution remains on the staged DataFusion engine"
+                    );
                 } else if engine == "datafusion" {
                     swan_engine = swan_engine
                         .with_engine_mode(swanflow::core::engine::EngineMode::DataFusion);

@@ -358,6 +358,30 @@ impl NodeBehavior for HttpFetchNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let url = cfg::required_string(config, "url")?;
+        // P2-12: SSRF guard. The fetch runs inside the engine process;
+        // workflow files are UNTRUSTED input (SECURITY.md threat model), so
+        // metadata/loopback/link-local targets are rejected unless the
+        // operator explicitly allows them via SWANFLOW_ALLOW_PRIVATE_FETCH=1.
+        if std::env::var("SWANFLOW_ALLOW_PRIVATE_FETCH").as_deref() != Ok("1") {
+            if let Some(host) = extract_url_host(&url) {
+                let h = host.to_lowercase();
+                let blocked = h == "metadata.google.internal"
+                    || h.starts_with("169.254.")
+                    || h.starts_with("127.")
+                    || h == "localhost"
+                    || h == "[::1]"
+                    || h.starts_with("10.")
+                    || h.starts_with("192.168.")
+                    || private_172(&h);
+                if blocked {
+                    return Err(anyhow!(
+                        "url host '{}' is in the private/metadata range; \
+                         set SWANFLOW_ALLOW_PRIVATE_FETCH=1 to allow",
+                        host
+                    ));
+                }
+            }
+        }
         let _method = cfg::optional_string(config, "method").unwrap_or_else(|| "GET".to_string());
         let _timeout_secs = cfg::optional_number(config, "timeout_secs").unwrap_or(30.0);
 
@@ -975,6 +999,50 @@ enum DbDriver {
     ClickHouseConnector,
 }
 
+/// Extract the host portion of a http(s) URL (P2-12 SSRF guard).
+fn extract_url_host(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // strip userinfo
+    let hostport = authority.rsplit('@').next()?;
+    // strip port (and handle bracketed IPv6)
+    if let Some(rest) = hostport.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return Some(rest[..end].to_string());
+    }
+    Some(hostport.split(':').next()?.to_string())
+}
+
+/// 172.16.0.0/12 private range check (P2-12).
+fn private_172(host: &str) -> bool {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() == 4 {
+        if let (Ok(a), Ok(b)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>()) {
+            return a == 172 && (16..=31).contains(&b);
+        }
+    }
+    false
+}
+
+/// Redact userinfo (user:password@) from a URL for safe display in logs
+/// and error events. P2-1c: expanded URLs leak ${ENV}-substituted passwords.
+fn redact_url_credentials(url: &str) -> String {
+    if let Some(scheme_end) = url.find("://") {
+        let rest = &url[scheme_end + 3..];
+        if let Some(at) = rest.find('@') {
+            let userinfo = &rest[..at];
+            if !userinfo.is_empty() && !userinfo.contains('/') {
+                return format!(
+                    "{}://***@{}",
+                    &url[..scheme_end],
+                    &rest[at + 1..]
+                );
+            }
+        }
+    }
+    url.to_string()
+}
+
 impl DbConnectorNode {
     fn select_driver(url: &str) -> Option<DbDriver> {
         if url.starts_with("postgres://") || url.starts_with("postgresql://") {
@@ -1001,17 +1069,21 @@ impl DbConnectorNode {
             _ => "sqlite",
         };
 
+        // P2-1: escape single quotes when embedding the URL in the ATTACH
+        // string literal — a password containing ' breaks out of the literal
+        // (SQL injection into the local DuckDB attach statement).
+        let attach_lit = expanded_url.replace('\'', "''");
         let attach_sql = match driver {
             DbDriver::DuckDBPostgres => Some(format!(
                 "ATTACH '{}' AS ext_db (TYPE postgres);",
-                expanded_url
+                attach_lit
             )),
             DbDriver::DuckDBMysql => Some(format!(
                 "ATTACH '{}' AS ext_db (TYPE mysql);",
-                expanded_url
+                attach_lit
             )),
             _ => {
-                let db_path = expanded_url.trim_start_matches("sqlite://");
+                let db_path = attach_lit.trim_start_matches("sqlite://");
                 Some(format!("ATTACH '{}' AS ext_db (TYPE sqlite);", db_path))
             }
         };
@@ -1128,14 +1200,28 @@ impl NodeBehavior for DbConnectorNode {
         .ok_or_else(|| {
             anyhow!(
                 "Unsupported database URL: {}. Supported schemes: postgres://, postgresql://, mysql://, mariadb://, sqlite://, http(s):// (ClickHouse)",
-                expanded_url
+                redact_url_credentials(&expanded_url)
             )
         })?;
 
         // Build the effective query
         let effective_query = match (query, table) {
             (Some(q), _) if !q.is_empty() => q,
-            (_, Some(t)) if !t.is_empty() => format!("SELECT * FROM {}", t),
+            (_, Some(t)) if !t.is_empty() => {
+                // P2-1b: bare table interpolation = SQL injection channel;
+                // accept only dotted identifier chains (schema.table, db.schema.table).
+                let ok = t.split('.').all(|part| {
+                    !part.is_empty()
+                        && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                });
+                if !ok {
+                    return Err(anyhow!(
+                        "invalid table name '{}' (only [A-Za-z0-9_.] allowed; use 'query' for anything else)",
+                        t
+                    ));
+                }
+                format!("SELECT * FROM {}", t)
+            }
             _ => return Err(anyhow!("Either 'query' or 'table' must be provided")),
         };
 

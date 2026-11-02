@@ -90,10 +90,22 @@ impl KnwfParser {
             for raw_node in nodes_raw.iter() {
                 let settings_rel = raw_node.settings_file.as_deref().unwrap_or("");
                 let full_path = format!("{}{}", wf_prefix, settings_rel);
-                if let Ok(mut sf) = archive.by_name(&full_path) {
-                    let mut xml = String::new();
-                    if sf.read_to_string(&mut xml).is_ok() {
+                match archive.by_name(&full_path) {
+                    Ok(mut sf) => {
+                        let mut xml = String::new();
+                        // P2-6: a declared settings file that cannot be read
+                        // is an error, not a silent empty config.
+                        if let Err(e) = sf.read_to_string(&mut xml) {
+                            return Err(KnimeError::Unsupported(format!(
+                                "failed to read settings XML for node {} ({}): {}",
+                                raw_node.id, full_path, e
+                            )));
+                        }
                         map.insert(raw_node.id.clone(), xml);
+                    }
+                    Err(_) => {
+                        // No settings file for this node is a normal KNIME
+                        // pattern (bare meta nodes) — skip only when absent.
                     }
                 }
             }
@@ -104,9 +116,10 @@ impl KnwfParser {
         let mut nodes: Vec<KnimeNode> = Vec::new();
         for raw_node in nodes_raw.iter() {
             let settings_xml = node_settings.get(&raw_node.id);
-            let settings = settings_xml
-                .map(|xml| Self::parse_settings_xml(xml))
-                .unwrap_or(serde_json::Value::Null);
+            let settings = match settings_xml {
+                Some(xml) => Self::parse_settings_xml(xml)?,
+                None => serde_json::Value::Null,
+            };
 
             // Detect metanode: check if node dir has its own workflow.knime
             let is_metanode = raw_node
@@ -305,9 +318,9 @@ impl KnwfParser {
     /// Uses a stack-based approach to capture nested `<config>` elements
     /// and their `<entry key="X" value="Y"/>` children. The result preserves
     /// the full config hierarchy.
-    fn parse_settings_xml(xml: &str) -> serde_json::Value {
+    fn parse_settings_xml(xml: &str) -> KnimeResult<serde_json::Value> {
         if xml.is_empty() {
-            return serde_json::Value::Null;
+            return Ok(serde_json::Value::Null);
         }
         let mut reader = Reader::from_str(xml);
         reader.config_mut().trim_text(true);
@@ -368,14 +381,22 @@ impl KnwfParser {
                     }
                 }
                 Ok(Event::Eof) => break,
-                Err(_) => break,
+                // P2-6: fail closed. The old `Err(_) => break` silently
+                // truncated malformed XML and the importer "succeeded" with
+                // half a config.
+                Err(e) => {
+                    return Err(KnimeError::Unsupported(format!(
+                        "XML parse error in settings XML: {}",
+                        e
+                    )));
+                }
                 _ => {}
             }
             buf.clear();
         }
 
         // Return the root config's object
-        if let Some((_, root_map)) = stack.pop() {
+        Ok(if let Some((_, root_map)) = stack.pop() {
             if root_map.is_empty() {
                 serde_json::Value::Null
             } else {
@@ -383,7 +404,7 @@ impl KnwfParser {
             }
         } else {
             serde_json::Value::Null
-        }
+        })
     }
 }
 

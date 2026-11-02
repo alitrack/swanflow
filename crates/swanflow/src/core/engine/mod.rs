@@ -1150,6 +1150,18 @@ impl SwanFlowEngine {
                         .with_query_planner(query_planner_clone.clone())
                         .build();
 
+                    // P2-15: honor ErrorMode::Retry with a REAL retry loop
+                    // (ADR-013 §4). The old code logged "retry exhausted"
+                    // without a single retry attempt. Attempts use the
+                    // unified backoff policy (core/retry.rs).
+                    let retry_max: usize = match &error_mode {
+                        crate::core::graph::ErrorMode::Retry(max) => (*max).max(1) as usize,
+                        _ => 1,
+                    };
+                    let mut attempt_no: usize = 0;
+                    'retry_loop: loop {
+                    attempt_no += 1;
+                    let _ = attempt_no; // used in logs below via error arms
                     match state.create_physical_plan(&logical_plan).await {
                         Ok(physical_plan) => {
 
@@ -1285,11 +1297,14 @@ impl SwanFlowEngine {
                                                 )
                                                 .await
                                             {
+                                                // P2-10: a proposed repair is ADVISORY only — we do not
+                                                // apply it and do not re-run. Never suppress the error
+                                                // event (the old handled=true turned loud failures into
+                                                // silent continues).
                                                 println!(
-                                                    "[Intelligence] proposed repair {:?} for node {} — apply and re-run",
+                                                    "[Intelligence] proposed repair {:?} for node {} (advisory, not applied)",
                                                     repair, node_id
                                                 );
-                                                handled = true;
                                             }
                                         }
                                     }
@@ -1302,6 +1317,22 @@ impl SwanFlowEngine {
                                                 );
                                             }
                                             crate::core::graph::ErrorMode::Retry(max) => {
+                                                if attempt_no < retry_max {
+                                                    let delay_ms =
+                                                        crate::core::retry::backoff_delay_ms(
+                                                            crate::core::retry::DEFAULT_BASE_DELAY_MS,
+                                                            (attempt_no - 1) as u64,
+                                                        );
+                                                    println!(
+                                                        "DEBUG: node {} failed, retrying ({}/{}), backoff {}ms",
+                                                        node_id, attempt_no, retry_max, delay_ms
+                                                    );
+                                                    tokio::time::sleep(
+                                                        std::time::Duration::from_millis(delay_ms),
+                                                    )
+                                                    .await;
+                                                    continue 'retry_loop;
+                                                }
                                                 println!(
                                                     "DEBUG: node {} retry exhausted ({}), surfacing error",
                                                     node_id, max
@@ -1377,11 +1408,11 @@ impl SwanFlowEngine {
                                                         )
                                                         .await
                                                     {
+                                                        // P2-10: advisory only — never suppress the error event.
                                                         println!(
-                                                            "[Intelligence] proposed repair {:?} for node {} — apply and re-run",
+                                                            "[Intelligence] proposed repair {:?} for node {} (advisory, not applied)",
                                                             repair, node_id
                                                         );
-                                                        handled = true;
                                                     }
                                                 }
                                             }
@@ -1421,11 +1452,14 @@ impl SwanFlowEngine {
                                                 )
                                                 .await
                                             {
+                                                // P2-10: a proposed repair is ADVISORY only — we do not
+                                                // apply it and do not re-run. Never suppress the error
+                                                // event (the old handled=true turned loud failures into
+                                                // silent continues).
                                                 println!(
-                                                    "[Intelligence] proposed repair {:?} for node {} — apply and re-run",
+                                                    "[Intelligence] proposed repair {:?} for node {} (advisory, not applied)",
                                                     repair, node_id
                                                 );
-                                                handled = true;
                                             }
                                         }
                                     }
@@ -1438,6 +1472,22 @@ impl SwanFlowEngine {
                                                 );
                                             }
                                             crate::core::graph::ErrorMode::Retry(max) => {
+                                                if attempt_no < retry_max {
+                                                    let delay_ms =
+                                                        crate::core::retry::backoff_delay_ms(
+                                                            crate::core::retry::DEFAULT_BASE_DELAY_MS,
+                                                            (attempt_no - 1) as u64,
+                                                        );
+                                                    println!(
+                                                        "DEBUG: node {} failed, retrying ({}/{}), backoff {}ms",
+                                                        node_id, attempt_no, retry_max, delay_ms
+                                                    );
+                                                    tokio::time::sleep(
+                                                        std::time::Duration::from_millis(delay_ms),
+                                                    )
+                                                    .await;
+                                                    continue 'retry_loop;
+                                                }
                                                 println!(
                                                     "DEBUG: node {} retry exhausted ({}), surfacing error",
                                                     node_id, max
@@ -1463,6 +1513,7 @@ impl SwanFlowEngine {
                             }
                         }
                     }
+                    } // end 'retry_loop (P2-15)
                 }
 
                 // Final Sync after this level to be absolutely sure
@@ -1659,17 +1710,21 @@ impl SwanFlowEngine {
                         }
 
                         // Check until condition
+                        // P2-9: match against textual node OUTPUT (like the
+                        // execute_node_with_mode loop path), not a "done"
+                        // string built from Materialized events — the old
+                        // heuristic made until fire only for the literal
+                        // substring "done" and diverged between executors.
                         if let Some(until) = &node.until {
-                            let combined: String = all_events
-                                .iter()
-                                .filter_map(|e| match e {
-                                    NodeEvent::Materialized { .. } => Some("done"),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("");
-                            if combined.contains(until) {
-                                break;
+                            if !until.is_empty() {
+                                let sub_output: String = step_context
+                                    .values()
+                                    .filter_map(|v| v.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                if sub_output.contains(until.as_str()) {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1805,8 +1860,11 @@ impl SwanFlowEngine {
                     }
                 };
                 let table_name = crate::core::node_table_name(src_node.id);
+                // P2-8: scan ALL rows, matching the staged executor's
+                // conditional semantics (the old LIMIT 1 made the branch
+                // result depend on which executor ran the workflow).
                 if let Ok(df) = ctx
-                    .sql(&format!("SELECT * FROM \"{}\" LIMIT 1", table_name))
+                    .sql(&format!("SELECT * FROM \"{}\"", table_name))
                     .await
                 {
                     if let Ok(batches) = df.collect().await {
@@ -1933,7 +1991,11 @@ impl SwanFlowEngine {
             // Execute the fan-out parent itself FIRST so its output is
             // registered (node_<id> table) — children reference it as
             // input_0 via their incoming edges.
-            let _ = Self::compile_and_execute_node(
+            // P2-7: the parent's error_mode must be honored. Blindly
+            // discarding the result degraded a Fail-mode parent error into
+            // "continue", leaving children to run against missing/stale
+            // parent output.
+            if let Err(parent_err) = Self::compile_and_execute_node(
                 node,
                 workflow,
                 node_idx,
@@ -1944,7 +2006,36 @@ impl SwanFlowEngine {
                 tx,
                 hook,
             )
-            .await;
+            .await
+            {
+                match &node.error_mode {
+                    crate::core::graph::ErrorMode::Fail => {
+                        let _ = tx.send(NodeEvent::Error {
+                            node_id: node.id,
+                            message: format!(
+                                "fan-out parent failed, aborting run: {}",
+                                parent_err
+                            ),
+                        });
+                        return Err(parent_err);
+                    }
+                    crate::core::graph::ErrorMode::Skip => {
+                        println!(
+                            "DEBUG: fan-out parent {} error swallowed (error_mode=skip)",
+                            node.id
+                        );
+                    }
+                    crate::core::graph::ErrorMode::Retry(_) => {
+                        // Parent executes once here; retry exhaustion at the
+                        // caller. Surface the error instead of degrading.
+                        let _ = tx.send(NodeEvent::Error {
+                            node_id: node.id,
+                            message: format!("fan-out parent failed: {}", parent_err),
+                        });
+                        return Err(parent_err);
+                    }
+                }
+            }
 
             // Execute children in parallel, honoring each child's error_mode
             // (elastic fan-out, borrowed from Forge research #2026081102).

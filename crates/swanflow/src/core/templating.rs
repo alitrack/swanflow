@@ -50,19 +50,63 @@ impl TemplateEngine {
             output = output.replace("${interval_end}", &v);
         }
 
-        for (key, value) in context {
-            let placeholder = format!("${{context.{}}}", key);
-            let replacement = match value {
-                JsonValue::String(s) => s.clone(),
-                JsonValue::Number(n) => n.to_string(),
-                JsonValue::Bool(b) => b.to_string(),
-                _ => value.to_string(),
-            };
-            output = output.replace(&placeholder, &replacement);
-        }
+        // P2-11: single-pass, order-independent scan. The old per-key
+        // String::replace loop iterated in HashMap order, so a context VALUE
+        // containing another key's placeholder was re-expanded or not
+        // depending on iteration order — non-deterministic renders broke
+        // ADR-014 digest-chain skip-if-fresh decisions. The scanner below
+        // expands only placeholders found in the ORIGINAL input, never
+        // rescanning inserted values.
+        output = Self::expand_context_placeholders(&output, context);
 
         // Also resolve {{mustache}} style placeholders
         Self::resolve_mustache_placeholder(&output, context)
+    }
+
+    /// Single-pass ${context.key} expansion: scans the input once; only
+    /// placeholders present in the original text are replaced. Inserted
+    /// values are copied verbatim and never rescanned (P2-11).
+    fn expand_context_placeholders(
+        input: &str,
+        context: &HashMap<String, JsonValue>,
+    ) -> String {
+        let marker = "${context.";
+        let mut out = String::with_capacity(input.len());
+        let mut rest = input;
+        while let Some(pos) = rest.find(marker) {
+            out.push_str(&rest[..pos]);
+            let after = &rest[pos + marker.len()..];
+            match after.find('}') {
+                Some(end) => {
+                    let key = &after[..end];
+                    match context.get(key) {
+                        Some(value) => {
+                            let replacement = match value {
+                                JsonValue::String(s) => s.clone(),
+                                JsonValue::Number(n) => n.to_string(),
+                                JsonValue::Bool(b) => b.to_string(),
+                                _ => value.to_string(),
+                            };
+                            out.push_str(&replacement);
+                        }
+                        None => {
+                            // Unknown key: keep the placeholder verbatim.
+                            out.push_str(marker);
+                            out.push_str(key);
+                            out.push('}');
+                        }
+                    }
+                    rest = &after[end + 1..];
+                }
+                None => {
+                    // Unterminated placeholder: copy the rest verbatim.
+                    out.push_str(&rest[pos..]);
+                    rest = "";
+                }
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     /// Recursively renders a JSON value (e.g., node configuration).
@@ -363,5 +407,35 @@ mod tests {
         });
         TemplateEngine::extract_variable_refs(&input, &mut refs);
         assert!(refs.is_empty(), "junk should not be collected: {refs:?}");
+    }
+}
+
+#[cfg(test)]
+mod p2_templating_tests {
+    use super::*;
+
+    #[test]
+    fn value_containing_placeholder_is_not_reexpanded() {
+        let mut ctx = HashMap::new();
+        ctx.insert("a".to_string(), JsonValue::String("x${context.b}y".into()));
+        ctx.insert("b".to_string(), JsonValue::String("SECRET".into()));
+        let out = TemplateEngine::render_string("${context.a}", &ctx);
+        assert_eq!(out, "x${context.b}y");
+    }
+
+    #[test]
+    fn expansion_is_order_independent() {
+        let mut ctx = HashMap::new();
+        ctx.insert("k1".to_string(), JsonValue::String("v1".into()));
+        ctx.insert("k2".to_string(), JsonValue::String("v2".into()));
+        let out = TemplateEngine::render_string("${context.k1}-${context.k2}-${context.k1}", &ctx);
+        assert_eq!(out, "v1-v2-v1");
+    }
+
+    #[test]
+    fn unknown_key_kept_verbatim() {
+        let ctx: HashMap<String, JsonValue> = HashMap::new();
+        let out = TemplateEngine::render_string("keep ${context.missing} as-is", &ctx);
+        assert_eq!(out, "keep ${context.missing} as-is");
     }
 }

@@ -74,7 +74,8 @@ pub struct SwanFlowConnection {
     #[serde(default = "default_query_timeout")]
     pub query_timeout: u64,
 
-    /// Read-only mode (prevents writes)
+    /// Read-only intent flag. ADVISORY ONLY: no driver currently enforces
+    /// this — do not rely on it as a security boundary (P2-2).
     #[serde(default)]
     pub read_only: bool,
 
@@ -98,8 +99,10 @@ impl SwanFlowConnection {
     pub fn build_url(&self) -> Result<String> {
         let host = &self.host;
         let port = self.port;
-        let user = &self.user;
-        let password = &self.password;
+        // P2-4: percent-encode userinfo so passwords containing @ / : etc.
+        // cannot shift the URL's host parsing (p@ss -> host=ss).
+        let user = &percent_encode(&self.user);
+        let password = &percent_encode(&self.password);
         let database = self.database.as_deref().unwrap_or("");
 
         let url = match self.db_type.to_lowercase().as_str() {
@@ -139,7 +142,12 @@ impl SwanFlowConnection {
                 } else {
                     format!("/{}", database)
                 };
-                format!("mongodb://{}:{}{}{}", host, port, db_part, auth_source)
+                // P2-3: include user/password — the old template silently
+                // downgraded authenticated DBX Mongo profiles to anonymous.
+                format!(
+                    "mongodb://{}:{}@{}:{}{}{}",
+                    user, password, host, port, db_part, auth_source
+                )
             }
             "redis" => {
                 format!(
@@ -190,13 +198,19 @@ impl SwanFlowConnection {
     }
 
     /// Load multiple connection files from a directory.
+    ///
+    /// P2-5: fail-closed — a malformed file is an error, not a warning.
+    /// Users previously believed a connection was loaded when it silently
+    /// wasn't.
     pub fn load_dir(dir: &Path) -> Result<Vec<Self>> {
         let mut configs = Vec::new();
         if !dir.exists() {
             return Ok(configs);
         }
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
+        let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)?
+            .collect::<std::result::Result<_, _>>()?;
+        entries.sort_by_key(|e| e.path());
+        for entry in entries {
             let path = entry.path();
             if path
                 .extension()
@@ -206,11 +220,11 @@ impl SwanFlowConnection {
                 match Self::load_from_yaml(&path) {
                     Ok(cfg) => configs.push(cfg),
                     Err(e) => {
-                        eprintln!(
-                            "Warning: failed to load connection '{}': {}",
+                        return Err(anyhow::anyhow!(
+                            "failed to load connection '{}': {}",
                             path.display(),
                             e
-                        );
+                        ));
                     }
                 }
             }
@@ -421,5 +435,74 @@ mod tests {
         assert_eq!(loaded.name, "Test PG");
         assert_eq!(loaded.host, "10.0.0.1");
         assert_eq!(loaded.build_url().unwrap(), cfg.build_url().unwrap());
+    }
+}
+
+
+/// Percent-encode the userinfo-relevant characters of a URL component
+/// (P2-4): unreserved chars pass through; everything else is %XX-escaped.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod p2_tests {
+    use super::*;
+
+    #[test]
+    fn percent_encode_specials() {
+        assert_eq!(percent_encode("p@ss:w/rd"), "p%40ss%3Aw%2Frd");
+        assert_eq!(percent_encode("plain"), "plain");
+    }
+
+    #[test]
+    fn mongo_url_includes_credentials() {
+        let cfg = SwanFlowConnection {
+            id: "test-mongo".into(),
+            name: "m".into(),
+            db_type: "mongodb".into(),
+            host: "h".into(),
+            port: 27017,
+            user: "u".into(),
+            password: "p@ss".into(),
+            database: Some("db".into()),
+            ssl: false,
+            connect_timeout: 30,
+            query_timeout: 60,
+            read_only: false,
+            extra: None,
+        };
+        let url = cfg.build_url().unwrap();
+        assert!(url.starts_with("mongodb://u:p%40ss@h:27017/db"), "{}", url);
+    }
+
+    #[test]
+    fn postgres_url_encodes_password_at_sign() {
+        let cfg = SwanFlowConnection {
+            id: "test-pg".into(),
+            name: "p".into(),
+            db_type: "postgres".into(),
+            host: "h".into(),
+            port: 5432,
+            user: "u".into(),
+            password: "a@b".into(),
+            database: Some("d".into()),
+            ssl: false,
+            connect_timeout: 30,
+            query_timeout: 60,
+            read_only: false,
+            extra: None,
+        };
+        let url = cfg.build_url().unwrap();
+        assert_eq!(url, "postgres://u:a%40b@h:5432/d");
     }
 }
