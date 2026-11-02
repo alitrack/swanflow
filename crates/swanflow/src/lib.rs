@@ -5,6 +5,7 @@ pub mod docs_portal;
 pub mod hotl;
 pub mod mcp;
 pub mod nodes;
+pub mod deploy;
 
 /// Load a workflow from a YAML/JSON file (shared by the CLI and the
 /// daemon's automation sensor registration).
