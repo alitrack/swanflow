@@ -1076,6 +1076,24 @@ mod tests {
         UpstreamDigest { bytes: [bytes; 32] }
     }
 
+    /// Serializes every test that calls `compute_digest`. The digest bakes
+    /// the process-global `SWANFLOW_INTERVAL_START/END` env (see
+    /// `compute_digest`), and `digest_changes_with_interval_env` mutates
+    /// exactly those vars to prove day-to-day divergence — under the
+    /// default parallel lib-test threads the mutation window races the
+    /// other six digest tests and flips their assertions nondeterministically
+    /// (phantom "key order must not matter" / "upstream order independent"
+    /// failures). One guard for all seven makes the env state well-defined
+    /// for every reader. Poison recovery (not a hard error) so a panic in
+    /// one test cannot wedge the remaining six for the whole run.
+    static DIGEST_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn guard_digest_test() -> std::sync::MutexGuard<'static, ()> {
+        DIGEST_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn daily_gaps_contiguous_batching() {
         use chrono::NaiveDate;
@@ -1188,6 +1206,7 @@ mod tests {
 
     #[test]
     fn digest_depends_on_rendered_config() {
+        let _g = guard_digest_test(); // serialize env-sensitive digest tests
         // v3: the rendered config (template-resolved values execution
         // actually used) is part of the digest. Same raw config +
         // different rendered config -> different digest (this is the fix
@@ -1276,6 +1295,7 @@ mod tests {
 
     #[test]
     fn digest_depends_on_config() {
+        let _g = guard_digest_test(); // serialize env-sensitive digest tests
         let id = Uuid::new_v4();
         let a = compute_digest(id, "core.sql.duckdb", "{\"query\":\"SELECT 1\"}", "", &[]);
         let b = compute_digest(id, "core.sql.duckdb", "{\"query\":\"SELECT 2\"}", "", &[]);
@@ -1284,6 +1304,7 @@ mod tests {
 
     #[test]
     fn digest_transitive_upstream() {
+        let _g = guard_digest_test(); // serialize env-sensitive digest tests
         let id = Uuid::new_v4();
         let up = Uuid::new_v4();
         let d1 = compute_digest(id, "t", "c", "", &[(up, &d(1))]);
@@ -1293,6 +1314,7 @@ mod tests {
 
     #[test]
     fn digest_upstream_order_independent() {
+        let _g = guard_digest_test(); // serialize env-sensitive digest tests
         let id = Uuid::new_v4();
         let u1 = Uuid::new_v4();
         let u2 = Uuid::new_v4();
@@ -1321,6 +1343,7 @@ mod tests {
 
     #[test]
     fn digest_ignores_json_key_order() {
+        let _g = guard_digest_test(); // serialize env-sensitive digest tests
         // P2: preserve_order bakes insertion order into config.to_string();
         // merely re-ordering keys must NOT change the digest (phantom stale).
         let id = Uuid::nil();
@@ -1338,6 +1361,7 @@ mod tests {
 
     #[test]
     fn digest_framing_disambiguates_concatenations() {
+        let _g = guard_digest_test(); // serialize env-sensitive digest tests
         // P2: length-prefix prevents ("ab","c") vs ("a","bc") collisions.
         let id = Uuid::nil();
         // type_id "ab" + config "c" vs type_id "a" + config "bc"
@@ -1385,6 +1409,7 @@ mod tests {
 
     #[test]
     fn digest_changes_with_interval_env() {
+        let _g = guard_digest_test(); // serialize env-sensitive digest tests
         // codex-review P0 (domain C): backfill binds ${interval_start} at
         // execution time; the digest must see the interval or every day
         // reuses day 1's parquet under SWANFLOW_SKIP_FRESH=1.
