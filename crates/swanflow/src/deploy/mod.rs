@@ -11,6 +11,7 @@
 //! runs-as-owner | at-least-once | version-locks at run time.
 
 pub mod motherduck;
+pub mod deployer;
 
 use crate::core::graph::Workflow;
 use petgraph::visit::EdgeRef;

@@ -108,6 +108,30 @@ enum Commands {
         command: ImportCommands,
     },
 
+    /// Deploy a workflow to a remote runtime (MotherDuck Flights)
+    Deploy {
+        /// Workflow YAML/JSON file
+        file: PathBuf,
+        /// Compile mode: inline (one flight) or per-node (one per node + scheduler)
+        #[arg(long, default_value = "inline")]
+        mode: String,
+        /// MCP endpoint override (tests / self-hosted relays)
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Bearer token (default: MOTHERDUCK_TOKEN env)
+        #[arg(long)]
+        token: Option<String>,
+        /// Directory for flight source copies (default: ./flights)
+        #[arg(long)]
+        flights_dir: Option<PathBuf>,
+        /// Directory for deploy manifests (default: ./flights)
+        #[arg(long)]
+        manifest_dir: Option<PathBuf>,
+        /// Roll back to the previous deployment instead of deploying
+        #[arg(long)]
+        rollback: bool,
+    },
+
     /// Materialization ledger (ADR-014 Stage 1): list what has been
     /// materialized and what is stale.
     Assets {
@@ -730,6 +754,51 @@ async fn main() -> anyhow::Result<()> {
                 println!("   Next: swanflow agent approve {}", path.display());
             }
         },
+        Commands::Deploy { file, mode, endpoint, token, flights_dir, manifest_dir, rollback } => {
+            use swanflow::deploy;
+
+            let workflow = swanflow::load_workflow_file(&file)?;
+            let dag_id = workflow.id.to_string();
+            let flights_dir = flights_dir.unwrap_or_else(|| PathBuf::from("flights"));
+            let manifest_dir = manifest_dir.unwrap_or_else(|| flights_dir.clone());
+
+            if rollback {
+                let restored = deploy::deployer::rollback(
+                    &dag_id, &flights_dir, &manifest_dir, endpoint, token,
+                )
+                .await?;
+                println!(
+                    "✅ rolled back dag {dag_id} to deployment at {} ({} flight(s))",
+                    restored.deployed_at,
+                    restored.flights.len()
+                );
+                return Ok(());
+            }
+
+            if mode != "inline" && mode != "per-node" {
+                return Err(anyhow::anyhow!("unsupported mode '{mode}' (inline | per-node)"));
+            }
+
+            let programs = match mode.as_str() {
+                "per-node" => deploy::motherduck::compile_per_node(&workflow)?,
+                _ => vec![deploy::motherduck::compile_inline(&workflow)?],
+            };
+
+            println!("📦 compiled {} flight(s) (mode={mode})", programs.len());
+            for p in &programs {
+                println!("   • {} (sha256 {}…)", p.flight_name, &p.source_sha256[..12]);
+            }
+
+            let manifest = deploy::deployer::deploy(
+                programs, &mode, &dag_id, &flights_dir, &manifest_dir, endpoint, token,
+            )
+            .await?;
+            println!(
+                "🚀 deployed dag {dag_id}: {} flight(s), manifest at {}",
+                manifest.flights.len(),
+                manifest_dir.join(deploy::deployer::manifest_file_name(&dag_id)).display()
+            );
+        }
         Commands::Import { command } => match command {
             ImportCommands::Duckorch { dir, output } => {
                 use swanflow::nodes::import_duckorch as orch;
