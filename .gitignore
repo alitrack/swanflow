@@ -21,3 +21,4 @@ target/swanflow_cache/
 test_data.csv
 *.duckdb
 graphify-out/
+openspec/

@@ -200,6 +200,7 @@ impl NodeRegistry {
         self.register_node(Arc::new(ContextFuserNode));
         self.register_node(Arc::new(McpInvokeNode));
         self.register_node(Arc::new(McpToolNode));
+        self.register_node(Arc::new(crate::nodes::motherduck::MotherDuckFlightNode));
         self.register_node(Arc::new(StructuredIoContractNode));
         self.register_node(Arc::new(CitationTrackerNode));
         self.register_node(Arc::new(CommunityBatchesNode));
