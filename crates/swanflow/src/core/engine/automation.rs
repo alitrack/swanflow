@@ -7,8 +7,10 @@
 //! on_cron("*/5 * * * *")
 //! on_interval(30m)
 //! freshness_violated(5m)
+//! on_webhook("/hooks/refresh")
 //! eager & !freshness_violated(1h)
 //! on_cron("0 * * * *") | freshness_violated(10m)
+//! on_webhook("/hooks/every-hour") & on_cron("0 * * * *")
 //! ```
 //!
 //! Precedence: `!` > `&` > `|`; parentheses group. The evaluator is
@@ -33,6 +35,11 @@ pub enum AutomationCondition {
     /// Ready when the asset's last materialization is older than max_lag
     /// (or it never materialized).
     FreshnessViolated { max_lag_secs: u64 },
+    /// Ready when a webhook arrived for `path` since the last ready
+    /// evaluation (ADR-014 Stage 4 — true push triggering). The webhook
+    /// server records the arrival; the sensor consumes it only after
+    /// the run is claimed, so a crashed run never loses its event.
+    OnWebhook { path: String },
     And(Box<AutomationCondition>, Box<AutomationCondition>),
     Or(Box<AutomationCondition>, Box<AutomationCondition>),
     Not(Box<AutomationCondition>),
@@ -399,6 +406,9 @@ impl CondParser {
                     "freshness_violated" => Ok(AutomationCondition::FreshnessViolated {
                         max_lag_secs: parse_duration(&unquote(&arg))?,
                     }),
+                    "on_webhook" => Ok(AutomationCondition::OnWebhook {
+                        path: parse_webhook_path(&unquote(&arg))?,
+                    }),
                     _ => Err(format!("unknown condition '{tok}'")),
                 }
             }
@@ -415,6 +425,65 @@ fn unquote(s: &str) -> String {
     } else {
         t.to_string()
     }
+}
+
+/// Validate a webhook path literal (ADR-014 Stage 4). Rules:
+/// - must start with `/` (the webhook server routes on the path; a
+///   relative or absolute-filesystem-looking string is a misconfig)
+/// - no `..` segment (traversal)
+/// - no query/fragment (`?`/`#`) — matching is on the path only
+/// - no whitespace or control chars
+/// Returns the canonical (unquoted) path.
+pub fn parse_webhook_path(s: &str) -> Result<String, String> {
+    let t = unquote(s);
+    if t.is_empty() {
+        return Err("webhook path must not be empty".to_string());
+    }
+    if !t.starts_with('/') {
+        return Err(format!(
+            "webhook path '{t}' must start with '/' (e.g. on_webhook(\"/hooks/refresh\"))"
+        ));
+    }
+    if t.contains("..") {
+        return Err(format!("webhook path '{t}' must not contain '..'"));
+    }
+    if t.contains('?') || t.contains('#') {
+        return Err(format!(
+            "webhook path '{t}' must not contain '?' or '#' (match on the path only)"
+        ));
+    }
+    if t.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!("webhook path '{t}' must not contain whitespace/control chars"));
+    }
+    if t.len() > 512 {
+        return Err("webhook path exceeds 512 chars".to_string());
+    }
+    Ok(t)
+}
+
+/// Every webhook path referenced anywhere in the condition tree
+/// (a path can appear in several nodes / both arms of an `|`). The
+/// daemon routes an incoming HTTP request to fired-paths via this
+/// extractor — duplicated below as needed.
+pub fn webhook_paths(cond: &AutomationCondition) -> Vec<String> {
+    fn walk(c: &AutomationCondition, out: &mut Vec<String>) {
+        match c {
+            AutomationCondition::OnWebhook { path } => {
+                if !out.contains(path) {
+                    out.push(path.clone());
+                }
+            }
+            AutomationCondition::And(a, b) | AutomationCondition::Or(a, b) => {
+                walk(a, out);
+                walk(b, out);
+            }
+            AutomationCondition::Not(a) => walk(a, out),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(cond, &mut out);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +507,12 @@ pub struct EvalContext {
     /// workflows based on missing data; better to skip this tick and
     /// retry.
     pub ledger_unavailable: bool,
+    /// Webhook paths that have ARRIVED (pushed by the HTTP listener)
+    /// and are waiting to be consumed by this evaluation. OnWebhook is
+    /// ready iff its path is in this set; the CALLER removes the path
+    /// from the queue only after the triggered run is claimed (crash-
+    /// safe: an unclaimed firing re-fires next tick).
+    pub webhook_fired: std::collections::HashSet<String>,
 }
 
 /// Kleene tri-state evaluation. `None` = Unknown (evidence missing —
@@ -474,6 +549,9 @@ pub fn evaluate(cond: &AutomationCondition, ctx: &EvalContext) -> Option<bool> {
                 None => Some(true), // never materialized = maximally stale
                 Some(t) => Some(ctx.now - t >= Duration::seconds(*max_lag_secs as i64)),
             }
+        }
+        AutomationCondition::OnWebhook { path } => {
+            Some(ctx.webhook_fired.contains(path))
         }
         AutomationCondition::And(a, b) => kleene_and(evaluate(a, ctx), evaluate(b, ctx)),
         AutomationCondition::Or(a, b) => kleene_or(evaluate(a, ctx), evaluate(b, ctx)),
@@ -522,7 +600,104 @@ mod tests {
             last_materialized_at: mat.map(at),
             last_eval_ready_at: eval.map(at),
             ledger_unavailable: false,
+            webhook_fired: std::collections::HashSet::new(),
         }
+    }
+
+    fn ctx_webhook(now: &str, fired: &[&str]) -> EvalContext {
+        EvalContext {
+            now: at(now),
+            last_materialized_at: None,
+            last_eval_ready_at: None,
+            ledger_unavailable: false,
+            webhook_fired: fired.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn webhook_parse_forms() {
+        // Quoted and unquoted forms.
+        assert!(matches!(
+            parse_automation(r#"on_webhook("/hooks/refresh")"#).unwrap(),
+            AutomationCondition::OnWebhook { path } if path == "/hooks/refresh"
+        ));
+        assert!(matches!(
+            parse_automation("on_webhook(/hooks/x)").unwrap(),
+            AutomationCondition::OnWebhook { path } if path == "/hooks/x"
+        ));
+        // Path validation errors.
+        assert!(parse_automation("on_webhook(hooks/x)").is_err(), "no leading /");
+        assert!(parse_automation(r#"on_webhook("/a/../b")"#).is_err(), "traversal");
+        assert!(parse_automation(r#"on_webhook("/a?x=1")"#).is_err(), "query string");
+        assert!(parse_automation(r#"on_webhook("")"#).is_err(), "empty");
+        assert!(parse_automation("on_webhook()").is_err(), "empty unquoted");
+    }
+
+    #[test]
+    fn webhook_evaluation_semantics() {
+        let cond = parse_automation(r#"on_webhook("/hooks/refresh")"#).unwrap();
+        // No arrival -> hold.
+        assert_eq!(evaluate(&cond, &ctx_webhook("2026-10-16 12:00:00", &[])), Some(false));
+        // Arrival for this path -> ready.
+        assert_eq!(
+            evaluate(&cond, &ctx_webhook("2026-10-16 12:00:00", &["/hooks/refresh"])),
+            Some(true)
+        );
+        // Arrival for a DIFFERENT path -> hold (routing is per-path).
+        assert_eq!(
+            evaluate(&cond, &ctx_webhook("2026-10-16 12:00:00", &["/hooks/other"])),
+            Some(false)
+        );
+        // Not(on_webhook) = "no event pending" — meaningful for suppressors.
+        let cond = parse_automation(r#"!on_webhook("/hooks/pause")"#).unwrap();
+        assert_eq!(
+            evaluate(&cond, &ctx_webhook("2026-10-16 12:00:00", &[])),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate(&cond, &ctx_webhook("2026-10-16 12:00:00", &["/hooks/pause"])),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn webhook_composition() {
+        // webhook & !freshness: fire only when pushed AND not stale-broken.
+        let cond =
+            parse_automation(r#"on_webhook("/hooks/refresh") & !freshness_violated(1h)"#).unwrap();
+        let mut c = ctx_webhook("2026-10-16 12:00:00", &["/hooks/refresh"]);
+        c.last_materialized_at = Some(at("2026-10-16 11:30:00"));
+        assert_eq!(evaluate(&cond, &c), Some(true));
+        c.last_materialized_at = Some(at("2026-10-16 10:00:00"));
+        assert_eq!(evaluate(&cond, &c), Some(false), "stale upstream suppresses");
+        // cron | webhook: either arm fires.
+        let cond =
+            parse_automation(r#"on_cron("0 * * * *") | on_webhook("/hooks/now")"#).unwrap();
+        let mut c = ctx_webhook("2026-10-16 12:30:00", &["/hooks/now"]);
+        c.last_eval_ready_at = Some(at("2026-10-16 12:00:00"));
+        assert_eq!(evaluate(&cond, &c), Some(true), "off-cron but pushed");
+        // Off-cron (last ready 12:00, hourly fire due 13:00) and no push.
+        let mut c2 = ctx_webhook("2026-10-16 12:30:00", &[]);
+        c2.last_eval_ready_at = Some(at("2026-10-16 12:00:00"));
+        assert_eq!(evaluate(&cond, &c2), Some(false), "off-cron, no push");
+    }
+
+    #[test]
+    fn webhook_paths_extractor() {
+        let cond = parse_automation(
+            r#"on_cron("0 * * * *") | (on_webhook("/a") & !on_webhook("/b"))"#,
+        )
+        .unwrap();
+        let mut paths = webhook_paths(&cond);
+        paths.sort();
+        assert_eq!(paths, vec!["/a".to_string(), "/b".to_string()]);
+        // Dedupe: same path twice.
+        let cond =
+            parse_automation(r#"on_webhook("/a") | on_webhook("/a")"#).unwrap();
+        assert_eq!(webhook_paths(&cond), vec!["/a".to_string()]);
+        // No webhook -> empty.
+        let cond = parse_automation("eager").unwrap();
+        assert!(webhook_paths(&cond).is_empty());
     }
 
     #[test]

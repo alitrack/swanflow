@@ -59,6 +59,7 @@ impl NodeRegistry {
     /// require runtime configuration (API keys, tool names) and are used as
     /// helpers rather than direct workflow nodes.
     pub fn register_core_nodes(&mut self) {
+        use crate::nodes::ai::communities::CommunityBatchesNode;
         use crate::nodes::ai::contracts::{CitationTrackerNode, StructuredIoContractNode};
         use crate::nodes::ai::graph::{
             ContextFuserNode, EntityExtractorNode, GraphRetrieverNode, ResearchLoopMetaNode,
@@ -80,7 +81,9 @@ impl NodeRegistry {
         use crate::nodes::io::{
             CsvReadNode, DbConnectorNode, DuckDBReadNode, DuckDBWriteNode, ExcelReadNode,
             ExcelReportNode, ExcelSheetNamesNode, ExcelTemplateNode, ExcelWriteNode,
-            GraphIndexWriterNode, HttpFetchNode, ParquetReadNode, UniversalReadNode,
+            GraphIndexWriterNode, HttpFetchNode, OssieExportNode, OssieReadNode,
+            ParquetReadNode, SemanticAnnotateNode, SemanticExtractNode,
+            SemanticFkInferNode, UniversalReadNode,
         };
         use crate::nodes::luajit::LuaJitNode;
         use crate::nodes::mcp::McpToolNode;
@@ -97,6 +100,7 @@ impl NodeRegistry {
             PivotNode, ProfilerNode, ProjectNode, SemanticCleanerNode, TableSchemaValidatorNode,
             TableToVariableNode, VariableCreatorNode, WindowNode,
         };
+        #[cfg(feature = "wasm")]
         use crate::nodes::wasm::WasmNode;
 
         self.register_node(Arc::new(SqlNode));
@@ -143,6 +147,10 @@ impl NodeRegistry {
         }
         self.register_node(Arc::new(CsvReadNode));
         self.register_node(Arc::new(ParquetReadNode));
+        self.register_node(Arc::new(OssieReadNode));
+        self.register_node(Arc::new(OssieExportNode));
+        self.register_node(Arc::new(SemanticFkInferNode));
+        self.register_node(Arc::new(SemanticExtractNode));
         self.register_node(Arc::new(UniversalReadNode));
         self.register_node(Arc::new(DbConnectorNode));
         self.register_node(Arc::new(ExcelReadNode));
@@ -186,13 +194,16 @@ impl NodeRegistry {
             // Note: PythonUdfNode is registered but currently returns empty plan (stub implementation)
             self.register_node(Arc::new(PythonUdfNode));
         }
+        #[cfg(feature = "wasm")]
         self.register_node(Arc::new(WasmNode));
         self.register_node(Arc::new(GraphRetrieverNode));
         self.register_node(Arc::new(ContextFuserNode));
         self.register_node(Arc::new(McpInvokeNode));
         self.register_node(Arc::new(McpToolNode));
+        self.register_node(Arc::new(crate::nodes::motherduck::MotherDuckFlightNode));
         self.register_node(Arc::new(StructuredIoContractNode));
         self.register_node(Arc::new(CitationTrackerNode));
+        self.register_node(Arc::new(CommunityBatchesNode));
         self.register_node(Arc::new(EmbeddingGeneratorNode));
         self.register_node(Arc::new(QueryPlanningNode));
         self.register_node(Arc::new(SemanticChunkerNode));
@@ -233,9 +244,13 @@ impl NodeRegistry {
             match OpenAiProvider::new(config) {
                 Ok(provider) => {
                     eprintln!("[DEBUG] Registering EntityExtractorNode");
+                    let provider = Arc::new(provider);
                     self.register_node(Arc::new(EntityExtractorNode {
-                        provider: Arc::new(provider),
+                        provider: provider.clone(),
                     }));
+                    self.register_node(Arc::new(
+                        crate::nodes::io::SemanticAnnotateNode { provider },
+                    ));
                 }
                 Err(e) => eprintln!("[DEBUG] Failed to create OpenAiProvider: {}", e),
             }
@@ -246,9 +261,11 @@ impl NodeRegistry {
             endpoint: None,
         }) {
             eprintln!("[DEBUG] Registering EntityExtractorNode (Fallback)");
+            let provider = Arc::new(provider);
             self.register_node(Arc::new(EntityExtractorNode {
-                provider: Arc::new(provider),
+                provider: provider.clone(),
             }));
+            self.register_node(Arc::new(crate::nodes::io::SemanticAnnotateNode { provider }));
         } else {
             eprintln!("[DEBUG] No LLM_MODEL or OPENAI_API_KEY found, EntityExtractor skip");
         }
@@ -274,7 +291,7 @@ impl Default for NodeRegistry {
 mod shell_marker_tests {
     use super::*;
 
-    /// The 9 AI governance nodes audited 2026-09-28 as pure pass-through shells
+    /// The 8 AI governance nodes audited 2026-09-28 as pure pass-through shells
     /// (propose_plan == identity clone; helpers dead code — see
     /// swanflow-workflows/docs/shell_nodes_audit.md). Their spec descriptions
     /// must carry the shell prefix so registry consumers can flag them.
@@ -291,7 +308,8 @@ mod shell_marker_tests {
             "core.ai.run_state_store",
             "core.ai.observability_audit_ledger",
             "core.ai.query_planning",
-            "core.ai.structured_io_contract",
+            // core.ai.structured_io_contract: real node since UA port batch 2
+            // (2026-10-16) — the 4-layer LLM-output validation gate.
             "core.ai.tool_executor",
             "core.flow.python_udf",
         ];

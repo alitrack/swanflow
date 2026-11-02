@@ -41,6 +41,13 @@ enum Commands {
         /// digest chain is unchanged (equivalent to SWANFLOW_SKIP_FRESH=1)
         #[arg(long)]
         skip_fresh: bool,
+
+        /// Emit machine-readable JSON Lines on stdout: one JSON object per
+        /// NodeEvent plus a final `{"event":"finished",...}` line. Human-
+        /// readable progress goes to stderr so stdout stays parseable by
+        /// agents and scripts.
+        #[arg(long)]
+        json: bool,
     },
     /// Inspect a workflow's inferred schemas without executing it
     Inspect {
@@ -99,6 +106,30 @@ enum Commands {
     Import {
         #[command(subcommand)]
         command: ImportCommands,
+    },
+
+    /// Deploy a workflow to a remote runtime (MotherDuck Flights)
+    Deploy {
+        /// Workflow YAML/JSON file
+        file: PathBuf,
+        /// Compile mode: inline (one flight) or per-node (one per node + scheduler)
+        #[arg(long, default_value = "inline")]
+        mode: String,
+        /// MCP endpoint override (tests / self-hosted relays)
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Bearer token (default: MOTHERDUCK_TOKEN env)
+        #[arg(long)]
+        token: Option<String>,
+        /// Directory for flight source copies (default: ./flights)
+        #[arg(long)]
+        flights_dir: Option<PathBuf>,
+        /// Directory for deploy manifests (default: ./flights)
+        #[arg(long)]
+        manifest_dir: Option<PathBuf>,
+        /// Roll back to the previous deployment instead of deploying
+        #[arg(long)]
+        rollback: bool,
     },
 
     /// Materialization ledger (ADR-014 Stage 1): list what has been
@@ -172,6 +203,11 @@ enum AgentCommands {
         /// Also print the inferred schemas for each node.
         #[arg(long)]
         explain: bool,
+
+        /// Emit machine-readable JSON Lines on stdout for the execution
+        /// phase (same schema as `swanflow run --json`).
+        #[arg(long)]
+        json: bool,
     },
 
     /// Run the AI AnalystAgent against a natural-language request and emit a
@@ -272,6 +308,12 @@ enum DaemonCommands {
         /// Automation sensor tick period in seconds (default: 30)
         #[arg(long)]
         tick: Option<u64>,
+        /// Enable webhook ingress (push triggers): HTTP listener bound
+        /// here feeds `on_webhook(...)` automation conditions, e.g.
+        /// `--webhook-bind 127.0.0.1:8748` then
+        /// `curl -X POST http://127.0.0.1:8748/hooks/refresh`
+        #[arg(long)]
+        webhook_bind: Option<String>,
         /// Enable embedded Quack server so any DuckDB client can ATTACH
         #[arg(long)]
         quack: bool,
@@ -311,6 +353,17 @@ enum DaemonCommands {
     Watch {
         /// Path to workflow file (.yaml/.json) with `automation` conditions
         file: PathBuf,
+        /// Custom socket path
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Push a webhook event into the daemon's automation sensor
+    /// (ADR-014 Stage 4): the next tick fires every watched workflow
+    /// whose `on_webhook(path)` matches. Requires the daemon to run
+    /// with `--webhook-bind` (or the socket-trigger fallback).
+    Trigger {
+        /// Webhook path to fire, e.g. /hooks/refresh
+        path: String,
         /// Custom socket path
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -415,12 +468,19 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file, legacy_yaml, skip_fresh } => {
+        Commands::Run { file, legacy_yaml, skip_fresh, json } => {
             let workflow = load_workflow(file)?;
-            println!(
-                "🚀 Loading Workflow: {} (ID: {})",
-                workflow.name, workflow.id
-            );
+            if json {
+                println!(
+                    "{{\"event\":\"workflow\",\"name\":{},\"id\":\"{}\"}}",
+                    serde_json::to_string(&workflow.name).unwrap_or_default(),
+                    workflow.id
+                );
+            } else {
+                eprintln!("🚀 Loading Workflow: {} (ID: {})",
+                    workflow.name, workflow.id
+                );
+            }
 
             let registry = Arc::new(NodeRegistry::default());
             let engine = SwanFlowEngine::new(registry).with_skip_fresh(skip_fresh);
@@ -431,12 +491,19 @@ async fn main() -> anyhow::Result<()> {
                 engine.execute_workflow(&workflow).await?
             };
 
-            println!("📊 Execution Started...");
             let mut failed = false;
+            if !json {
+                eprintln!("📊 Execution Started...");
+            }
             while let Some(event) = rx.recv().await {
+                if json {
+                    println!("{}", serde_json::to_string(&event).unwrap_or_default());
+                }
                 match event {
                     NodeEvent::StateChanged { node_id, state } => {
-                        println!("  Node[{}] -> {:?}", node_id, state);
+                        if !json {
+                            println!("  Node[{}] -> {:?}", node_id, state);
+                        }
                         if matches!(state, NodeState::Error(_)) {
                             failed = true;
                         }
@@ -448,11 +515,18 @@ async fn main() -> anyhow::Result<()> {
                     _ => {}
                 }
             }
-            if failed {
+            if json {
+                println!("{{\"event\":\"finished\",\"ok\":{}}}", !failed);
+                if failed {
+                    std::process::exit(1);
+                }
+            } else if failed {
                 println!("❌ Execution Finished with errors.");
                 std::process::exit(1);
             }
-            println!("✅ Execution Finished.");
+            if !json {
+                println!("✅ Execution Finished.");
+            }
         }
         Commands::Docs {
             file,
@@ -527,7 +601,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Agent { command } => match command {
-            AgentCommands::Approve { file, yes, dry_run, explain } => {
+            AgentCommands::Approve { file, yes, dry_run, explain, json } => {
                 use swanflow::hotl::ApprovalGate;
 
                 let workflow = load_workflow(file)?;
@@ -571,33 +645,80 @@ async fn main() -> anyhow::Result<()> {
                     return Ok(());
                 }
 
-                // Interactive (or --yes) approval gate on stdout/stdin.
+                // Interactive (or --yes) approval gate. Under --json the
+                // human-readable summary goes to stderr so stdout stays a
+                // clean JSON Lines stream.
                 let gate = if yes {
                     ApprovalGate::auto_approve()
                 } else {
                     ApprovalGate::new()
                 };
                 let stdin = std::io::stdin();
-                let stdout = std::io::stdout();
                 let mut lock_in = stdin.lock();
-                let mut lock_out = stdout.lock();
-                let approved = gate.review(&workflow, &mut lock_in, &mut lock_out)?;
+                let approved = if json {
+                    let stderr = std::io::stderr();
+                    let mut lock_err = stderr.lock();
+                    gate.review(&workflow, &mut lock_in, &mut lock_err)?
+                } else {
+                    let stdout = std::io::stdout();
+                    let mut lock_out = stdout.lock();
+                    let approved = gate.review(&workflow, &mut lock_in, &mut lock_out)?;
+                    drop(lock_out);
+                    approved
+                };
                 drop(lock_in);
-                drop(lock_out);
 
                 if !approved {
-                    println!("❌ Execution cancelled by human reviewer.");
+                    if json {
+                        println!("{{\"event\":\"finished\",\"ok\":false,\"reason\":\"cancelled\"}}");
+                    } else {
+                        println!("❌ Execution cancelled by human reviewer.");
+                    }
                     return Ok(());
                 }
 
-                println!("✅ Approved — executing workflow: {} ({})", workflow.name, workflow.id);
+                if json {
+                    println!(
+                        "{{\"event\":\"workflow\",\"name\":{},\"id\":\"{}\"}}",
+                        serde_json::to_string(&workflow.name).unwrap_or_default(),
+                        workflow.id
+                    );
+                } else {
+                    println!("✅ Approved — executing workflow: {} ({})", workflow.name, workflow.id);
+                }
                 let mut rx = engine.execute_workflow(&workflow).await?;
+                let mut failed = false;
                 while let Some(event) = rx.recv().await {
-                    if let NodeEvent::StateChanged { node_id, state } = event {
-                        println!("  Node[{}] -> {:?}\n", node_id, state);
+                    if json {
+                        println!("{}", serde_json::to_string(&event).unwrap_or_default());
+                    }
+                    match event {
+                        NodeEvent::StateChanged { node_id, state } => {
+                            if !json {
+                                println!("  Node[{}] -> {:?}\n", node_id, state);
+                            }
+                            if matches!(state, NodeState::Error(_)) {
+                                failed = true;
+                            }
+                        }
+                        NodeEvent::Error { message, .. } => {
+                            eprintln!("  ❌ Error: {}", message);
+                            failed = true;
+                        }
+                        _ => {}
                     }
                 }
-                println!("✅ Execution Finished.");
+                if json {
+                    println!("{{\"event\":\"finished\",\"ok\":{}}}", !failed);
+                } else if failed {
+                    println!("❌ Execution Finished with errors.");
+                }
+                if failed {
+                    std::process::exit(1);
+                }
+                if !json {
+                    println!("✅ Execution Finished.");
+                }
             }
             AgentCommands::Analyze { prompt, model, endpoint, api_key, out } => {
                 use swanflow::agent::AnalystAgent;
@@ -633,6 +754,51 @@ async fn main() -> anyhow::Result<()> {
                 println!("   Next: swanflow agent approve {}", path.display());
             }
         },
+        Commands::Deploy { file, mode, endpoint, token, flights_dir, manifest_dir, rollback } => {
+            use swanflow::deploy;
+
+            let workflow = swanflow::load_workflow_file(&file)?;
+            let dag_id = workflow.id.to_string();
+            let flights_dir = flights_dir.unwrap_or_else(|| PathBuf::from("flights"));
+            let manifest_dir = manifest_dir.unwrap_or_else(|| flights_dir.clone());
+
+            if rollback {
+                let restored = deploy::deployer::rollback(
+                    &dag_id, &flights_dir, &manifest_dir, endpoint, token,
+                )
+                .await?;
+                println!(
+                    "✅ rolled back dag {dag_id} to deployment at {} ({} flight(s))",
+                    restored.deployed_at,
+                    restored.flights.len()
+                );
+                return Ok(());
+            }
+
+            if mode != "inline" && mode != "per-node" {
+                return Err(anyhow::anyhow!("unsupported mode '{mode}' (inline | per-node)"));
+            }
+
+            let programs = match mode.as_str() {
+                "per-node" => deploy::motherduck::compile_per_node(&workflow)?,
+                _ => vec![deploy::motherduck::compile_inline(&workflow)?],
+            };
+
+            println!("📦 compiled {} flight(s) (mode={mode})", programs.len());
+            for p in &programs {
+                println!("   • {} (sha256 {}…)", p.flight_name, &p.source_sha256[..12]);
+            }
+
+            let manifest = deploy::deployer::deploy(
+                programs, &mode, &dag_id, &flights_dir, &manifest_dir, endpoint, token,
+            )
+            .await?;
+            println!(
+                "🚀 deployed dag {dag_id}: {} flight(s), manifest at {}",
+                manifest.flights.len(),
+                manifest_dir.join(deploy::deployer::manifest_file_name(&dag_id)).display()
+            );
+        }
         Commands::Import { command } => match command {
             ImportCommands::Duckorch { dir, output } => {
                 use swanflow::nodes::import_duckorch as orch;
@@ -794,6 +960,7 @@ async fn main() -> anyhow::Result<()> {
                                     last_materialized_at: None,
                                     last_eval_ready_at: Some(now),
                                     ledger_unavailable: false,
+                                    webhook_fired: std::collections::HashSet::new(),
                                 };
                                 match swanflow::core::engine::automation::evaluate(&cond, &ctx) {
                                     Some(true) => "🟢 ready".to_string(),
@@ -831,6 +998,7 @@ async fn main() -> anyhow::Result<()> {
                                     last_materialized_at: None,
                                     last_eval_ready_at: Some(now),
                                     ledger_unavailable: true,
+                                    webhook_fired: std::collections::HashSet::new(),
                                 };
                                 match swanflow::core::engine::automation::evaluate(&cond, &ctx) {
                                     Some(true) => "🟢 ready".to_string(),
@@ -883,6 +1051,7 @@ async fn main() -> anyhow::Result<()> {
                                 // since the daemon's last tick.
                                 last_eval_ready_at: Some(now),
                                 ledger_unavailable,
+                                webhook_fired: std::collections::HashSet::new(),
                             };
                             let lag = mat.map(|t| (now - t).num_minutes()).unwrap_or(i64::MAX);
                             let lag_s = if lag == i64::MAX { "never".into() } else { format!("{lag}m ago") };
@@ -1561,7 +1730,7 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
     }
 
     match cmd {
-        DaemonCommands::Start { socket, tick, quack, quack_bind, quack_token, foreground } => {
+        DaemonCommands::Start { socket, tick, webhook_bind, quack, quack_bind, quack_token, foreground } => {
             if foreground {
                 // Forked child — run daemon in foreground
                 let registry = Arc::new(NodeRegistry::default());
@@ -1572,6 +1741,9 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
                 }
                 if let Some(secs) = tick {
                     daemon = daemon.with_tick_secs(secs);
+                }
+                if let Some(bind) = webhook_bind {
+                    daemon = daemon.with_webhook_bind(bind);
                 }
                 if quack {
                     let mut qc = swanflow::core::engine::daemon::QuackConfig::default();
@@ -1622,6 +1794,9 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             if let Some(secs) = tick {
                 child.arg("--tick").arg(secs.to_string());
             }
+            if let Some(ref bind) = webhook_bind {
+                child.arg("--webhook-bind").arg(bind);
+            }
             if quack {
                 child.arg("--quack").arg("--quack-bind").arg(&quack_bind);
                 if let Some(ref t) = quack_token {
@@ -1638,6 +1813,9 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
                 Ok(_) => {
                     println!("✅ SwanFlow daemon started (PID: {})", pid);
                     println!("   Socket: {}", socket_path.display());
+                    if let Some(ref bind) = webhook_bind {
+                        println!("   Webhook: http://{bind}/ (POST /hooks/... → on_webhook)");
+                    }
                     if quack {
                         let token_display = quack_token.as_deref().unwrap_or("<auto-generated>");
                         println!("   Quack:  quack://{}/ (token: {})", quack_bind, token_display);
@@ -1690,6 +1868,16 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             let resp = send_daemon_raw(&socket, "automation.register", serde_json::json!({"path": abs.to_string_lossy().to_string()})).await?;
             println!("{}", resp);
             println!("⚙️  The daemon sensor re-evaluates automation conditions every 30s.");
+            Ok(())
+        }
+        DaemonCommands::Trigger { path, socket } => {
+            // Validate the path shape client-side for a friendlier error
+            // than a silent 404-equivalent on the daemon side.
+            swanflow::core::engine::automation::parse_webhook_path(&path)
+                .map_err(|e| anyhow::anyhow!("invalid webhook path: {e}"))?;
+            let resp = send_daemon_raw(&socket, "automation.webhook", serde_json::json!({"path": path})).await?;
+            println!("{}", resp);
+            println!("🔔 Pushed. Matching on_webhook conditions fire on the next sensor tick.");
             Ok(())
         }
         DaemonCommands::Unwatch { target, socket } => {
@@ -1872,6 +2060,9 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
         DaemonCommands::Unwatch { target, .. } => {
             // Target is a remote path or UUID — forwarded verbatim.
             run_ssh(host, &["swanflow", "daemon", "unwatch", &target])?;
+        }
+        DaemonCommands::Trigger { path, .. } => {
+            run_ssh(host, &["swanflow", "daemon", "trigger", &path])?;
         }
         DaemonCommands::List { .. } => {
             run_ssh(host, &["swanflow", "daemon", "list"])?;

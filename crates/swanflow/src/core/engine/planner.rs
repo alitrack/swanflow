@@ -166,6 +166,39 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 ),
             )));
         }
+        // core.ai.structured_io_contract: real since 2026-10-16 (UA port
+        // batch 2; was a pass-through shell) — the 4-layer validation gate
+        // for raw LLM JSON output (sanitize → alias-map/auto-fix →
+        // per-element JSON Schema check; fail-soft drop-and-count default).
+        if let Some(sio) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::contracts::StructuredIoContractLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::contracts::StructuredIoContractExec::new(
+                    sio.contract.clone(),
+                    Arc::new(sio.schema.as_arrow().clone()),
+                    physical_inputs[0].clone(),
+                ),
+            )));
+        }
+        // core.ai.community_batches: real since 2026-10-16 (UA port batch 3)
+        // — deterministic Leiden community batching for LLM batch summaries:
+        // seed-fixed leiden-rs (sequential paths), input-order splitting of
+        // oversized communities, singleton merge-into-misc policy. The Exec
+        // coalesces input partitions itself (whole graph must be visible).
+        if let Some(cb) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::ai::communities::CommunityBatchesLogical>()
+        {
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::communities::CommunityBatchesExec::new(
+                    cb.config.clone(),
+                    Arc::new(cb.schema.as_arrow().clone()),
+                    physical_inputs[0].clone(),
+                ),
+            )));
+        }
         // core.ai.fact_claim_verifier: real implementation since 2026-09-28
         // (was a pass-through shell; see swanflow-workflows/docs/shell_nodes_audit.md).
         // Scores claim tokens against the evidence corpus of the input batch.

@@ -1,7 +1,7 @@
 # ADR-014: Asset Semantics — Staged Adoption
 
-**Status**: Proposed
-**Date**: 2026-10-05
+**Status**: Accepted (Stages 1–3 shipped; Stage 4 added 2026-10-19)
+**Date**: 2026-10-05 (Stage 4: 2026-10-17→10-19)
 **Deciders**: SwanFlow maintainers
 
 ## Context
@@ -93,6 +93,34 @@ the machinery. No scheduler, no sensor thread, no partition math.
   NOT a new thread. `target_lag` throttle.
 - Freshness surfaces: `assets list --stale` gains `max_lag` violations;
   OpenLineage-style event emission rides the existing MCP event channel.
+
+### Stage 4 — Webhook push triggers (added 2026-10-19, merged PR #1)
+
+The automation review (2026-10-16) identified the push gap: all Stage 3
+conditions are poll-evaluated (30s sensor tick) and webhooks were
+output-only. Stage 4 closes it:
+
+- `AutomationCondition::OnWebhook(path)` — a node with
+  `automation: 'on_webhook("/hooks/cdc")'` is marked ready when an HTTP
+  request hits the registered path (readiness consumed on the next tick,
+  preserving the existing sensor execution model — no new execution path).
+- `webhook_server.rs`: opt-in HTTP listener, `swanflow daemon
+  --webhook-bind 127.0.0.1:PORT`. Off by default; zero attack surface when
+  unused.
+- Watch-time validation extended to `on_webhook` expressions (parse errors
+  fail at `swanflow watch`, same policy as cron/interval).
+
+Pairing example shipped as `examples/cdc-webhook-push.yaml`: pure-DuckDB
+CDC with zero external state — the synced baseline is the engine's own
+materialization cache (`cache/{node_id}_{port}.parquet`), change detection
+is an anti-join on (id, updated_at), the target is a duckdb_write append
++ partition_by idempotent upsert. E2E verdicts (real daemon + curl):
+initial full sync / update+insert upsert / no-change idempotent no-op —
+all green.
+
+Known edge: an empty extraction rewrites the synced baseline to empty, so
+the next change re-syncs all rows (idempotent, write-amplifying).
+Production path: separate watermark state table.
 
 ### Non-goals
 

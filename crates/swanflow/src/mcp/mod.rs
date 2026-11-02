@@ -246,4 +246,5 @@ pub fn error_response(id: JsonValue, code: i64, message: impl Into<String>) -> J
 }
 
 pub mod client;
+pub mod http;
 pub mod server;

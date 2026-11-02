@@ -8,6 +8,13 @@ use swanflow::nodes::ai::tool_executor::ToolExecutorNode;
 use swanflow::nodes::io::UniversalReadNode;
 use swanflow::nodes::NodeBehavior;
 
+// core.ai.structured_io_contract is a REAL node since UA port batch 2
+// (2026-10-16): the 4-layer LLM-output validation gate (sanitize → alias
+// map → auto-fix → per-element JSON Schema check, fail-soft drop-and-count
+// by default, `strict: true` = fail-fast). The legacy `required_fields`
+// config is still honored as a synthesized object-schema shorthand, so the
+// shell-era tests below keep their meaning; the new config surface is
+// `schema` (+ `alias_map` / `strict` / `input_column`).
 #[test]
 fn test_structured_io_contract_rejects_empty_required_fields() {
     let node = StructuredIoContractNode;
@@ -15,6 +22,35 @@ fn test_structured_io_contract_rejects_empty_required_fields() {
         .validate(&json!({ "required_fields": [] }))
         .expect_err("empty required_fields should fail");
     assert!(err.to_string().contains("must not be empty"));
+}
+
+#[test]
+fn test_structured_io_contract_accepts_real_config_surface() {
+    let node = StructuredIoContractNode;
+    // JSON Schema (the primary config of the converted node) + alias map +
+    // strict flag all validate.
+    assert!(
+        node
+            .validate(&json!({
+                "schema": {
+                    "type": "object",
+                    "properties": { "kind": { "enum": ["organization", "person"] } },
+                    "required": ["kind"]
+                },
+                "alias_map": { "组织": "organization" },
+                "strict": false
+            }))
+            .is_ok(),
+        "schema + alias_map + strict must be accepted"
+    );
+    // Neither `schema` nor `required_fields` → config error naming both.
+    let err = node
+        .validate(&json!({}))
+        .expect_err("no schema and no required_fields should fail");
+    let msg = err.to_string();
+    assert!(msg.contains("schema") && msg.contains("required_fields"), "got: {msg}");
+    // `schema` must be a JSON object, not a scalar.
+    assert!(node.validate(&json!({ "schema": "object" })).is_err());
 }
 
 #[test]

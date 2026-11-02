@@ -3,6 +3,11 @@
 
 pub mod excel;
 pub mod nodes;
+pub mod ossie;
+pub mod ossie_export;
+pub mod semantic_annotate;
+pub mod semantic_extract;
+pub mod semantic_fk;
 
 // Re-export all public items from submodules.
 // Note: ExcelScanLogical/ExcelScanMode/ExcelSinkLogical are defined
@@ -16,3 +21,8 @@ pub use nodes::{
     GraphIndexWriterExec, GraphIndexWriterLogical, GraphIndexWriterNode, HttpFetchNode,
     ParquetReadNode, UniversalReadNode,
 };
+pub use ossie::OssieReadNode;
+pub use ossie_export::OssieExportNode;
+pub use semantic_annotate::SemanticAnnotateNode;
+pub use semantic_extract::SemanticExtractNode;
+pub use semantic_fk::SemanticFkInferNode;
