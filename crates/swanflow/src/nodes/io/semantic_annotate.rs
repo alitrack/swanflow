@@ -255,10 +255,8 @@ mod tests {
         }
     }
 
-    fn demo_db() -> String {
-        let p = "/tmp/ossie_rt/demo.duckdb";
-        assert!(std::path::Path::new(p).is_file(), "demo fixture missing");
-        p.to_string()
+    fn demo_db() -> (String, tempfile::TempDir) {
+        crate::nodes::io::ossie_export::build_demo_fixture()
     }
 
     fn mock_valid() -> MockProvider {
@@ -279,11 +277,12 @@ mod tests {
 
     #[tokio::test]
     async fn annotates_and_guards_hallucinations() {
+        let (db, _guard) = demo_db();
         let node = SemanticAnnotateNode {
             provider: Arc::new(mock_valid()),
         };
         let plans = node
-            .propose_plan(vec![], &serde_json::json!({ "database": demo_db() }))
+            .propose_plan(vec![], &serde_json::json!({ "database": db }))
             .await
             .unwrap();
         let ctx = SessionContext::new();
@@ -326,10 +325,11 @@ mod tests {
                 .to_string(),
             }),
         };
+        let (db, _guard) = demo_db();
         let plans = node
             .propose_plan(
                 vec![],
-                &serde_json::json!({ "database": demo_db(), "min_confidence": 0.8 }),
+                &serde_json::json!({ "database": db, "min_confidence": 0.8 }),
             )
             .await
             .unwrap();
@@ -345,13 +345,14 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_garbage_response() {
+        let (db, _guard) = demo_db();
         let node = SemanticAnnotateNode {
             provider: Arc::new(MockProvider {
                 response: "I cannot answer that.".to_string(),
             }),
         };
         assert!(node
-            .propose_plan(vec![], &serde_json::json!({ "database": demo_db() }))
+            .propose_plan(vec![], &serde_json::json!({ "database": db }))
             .await
             .is_err());
     }

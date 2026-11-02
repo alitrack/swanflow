@@ -314,19 +314,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn demo_db() -> String {
-        // orders.customer_id → customers.customer_id is the known FK;
-        // the probe must find it with ratio 1.0 (every order's customer exists).
-        let p = "/tmp/ossie_rt/demo.duckdb";
-        assert!(std::path::Path::new(p).is_file(), "demo fixture missing");
-        p.to_string()
+    /// Shared fixture from ossie_export tests: customers + orders with the
+    /// orders.customer_id → customers.customer_id FK (ratio 1.0).
+    fn demo_db() -> (String, tempfile::TempDir) {
+        crate::nodes::io::ossie_export::build_demo_fixture()
     }
 
     #[tokio::test]
     async fn infers_customer_order_fk_with_full_ratio() {
+        let (db, _guard) = demo_db();
         let node = SemanticFkInferNode;
         let plans = node
-            .propose_plan(vec![], &json!({ "database": demo_db() }))
+            .propose_plan(vec![], &json!({ "database": db }))
             .await
             .unwrap();
         let ctx = SessionContext::new();
@@ -363,7 +362,8 @@ mod tests {
 
     #[test]
     fn debug_introspect_layout() {
-        let conn = crate::nodes::io::ossie_export::open_duckdb_readonly(&demo_db()).unwrap();
+        let (db, _guard) = demo_db();
+        let conn = crate::nodes::io::ossie_export::open_duckdb_readonly(&db).unwrap();
         let tables = introspect(&conn, "").unwrap();
         for tm in &tables {
             eprintln!(

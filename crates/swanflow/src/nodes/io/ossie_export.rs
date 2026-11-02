@@ -438,29 +438,38 @@ impl TypedNodeBehavior for OssieExportNode {
     const OUTPUT_COUNT: usize = 1;
 }
 
+/// Shared test fixture (crate-visible under cfg(test)): builds a fresh demo
+/// database (customers + orders, orders.customer_id → customers.customer_id)
+/// in a tempdir. Self-contained — replaces the old `/tmp/ossie_rt/demo.duckdb`
+/// convention which broke on machines without the leftover file (9 tests
+/// failed with "demo fixture missing").
+///
+/// Returns (db_path, _tempdir_guard). Keep the guard alive for the whole
+/// test — dropping it deletes the directory.
+#[cfg(test)]
+pub(crate) fn build_demo_fixture() -> (String, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = dir.path().join("demo.duckdb");
+    let conn = Connection::open(&p).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE customers(customer_id INTEGER PRIMARY KEY, customer_name VARCHAR, region VARCHAR);
+         CREATE TABLE orders(order_id INTEGER PRIMARY KEY, customer_id INTEGER, amount DOUBLE, order_date DATE);
+         INSERT INTO customers VALUES (1,'alice','eu'),(2,'bob','us'),(3,'carol','apac');
+         INSERT INTO orders VALUES (101,1,50.0,'2026-01-05'),(102,1,25.0,'2026-01-06'),(103,2,75.5,'2026-01-07'),(104,3,10.0,'2026-01-08');",
+    )
+    .unwrap();
+    (p.to_string_lossy().into_owned(), dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    fn demo_db() -> String {
-        let p = "/tmp/ossie_rt/demo.duckdb";
-        if !PathBuf::from(p).is_file() {
-            // Build a minimal demo database on the fly (tests that run on
-            // machines without the fixture still exercise the happy path).
-            let conn = Connection::open(p).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS t(a INTEGER PRIMARY KEY, b VARCHAR);
-                 INSERT OR REPLACE INTO t VALUES (1,'x'),(2,'y');",
-            )
-            .unwrap();
-        }
-        p.to_string()
-    }
-
     #[test]
     fn exports_valid_ossie_shape() {
-        let conn = open_duckdb_readonly(&demo_db()).unwrap();
+        let (db, _guard) = build_demo_fixture();
+        let conn = open_duckdb_readonly(&db).unwrap();
         let tables = introspect(&conn, "").unwrap();
         assert!(!tables.is_empty(), "demo db should have base tables");
         let file = build_model(tables, "rt_test", Vec::new());
@@ -483,8 +492,10 @@ mod tests {
     async fn round_trip_read_after_export() {
         // Export, then load the file with OssieReadNode — the consumer must
         // parse what the producer wrote (consumer↔producer contract).
-        let db = demo_db();
-        let out = "/tmp/ossie_rt/roundtrip.ossie.json";
+        let (db, _db_guard) = build_demo_fixture();
+        let out_dir = tempfile::tempdir().unwrap();
+        let out = out_dir.path().join("roundtrip.ossie.json");
+        let out = out.to_str().unwrap();
         let exporter = OssieExportNode;
         let plans = exporter
             .propose_plan(
@@ -512,8 +523,10 @@ mod tests {
 
     #[tokio::test]
     async fn export_with_inferred_relationships() {
-        let db = demo_db();
-        let out = "/tmp/ossie_rt/with_rel.ossie.json";
+        let (db, _db_guard) = build_demo_fixture();
+        let out_dir = tempfile::tempdir().unwrap();
+        let out = out_dir.path().join("with_rel.ossie.json");
+        let out = out.to_str().unwrap();
         let exporter = OssieExportNode;
         exporter
             .propose_plan(

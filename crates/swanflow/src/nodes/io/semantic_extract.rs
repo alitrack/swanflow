@@ -146,17 +146,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn demo_db() -> String {
-        let p = "/tmp/ossie_rt/demo.duckdb";
-        assert!(std::path::Path::new(p).is_file(), "demo fixture missing");
-        p.to_string()
+    fn demo_db() -> (String, tempfile::TempDir) {
+        crate::nodes::io::ossie_export::build_demo_fixture()
     }
 
     #[tokio::test]
     async fn extracts_long_format_metadata_with_pks() {
+        let (db, _guard) = demo_db();
         let node = SemanticExtractNode;
         let plans = node
-            .propose_plan(vec![], &json!({ "database": demo_db() }))
+            .propose_plan(vec![], &json!({ "database": db }))
             .await
             .unwrap();
         let ctx = SessionContext::new();
