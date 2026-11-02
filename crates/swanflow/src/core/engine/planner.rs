@@ -366,43 +366,43 @@ impl ExtensionPlanner for SwanFlowPlanner {
         if let Some(proxy) = node.as_any().downcast_ref::<SqlProxyLogical>() {
             // Late-binding: Register inputs and parse SQL now
 
-            // LAZY REGISTRATION: Sync materialized tables from metadata.duckdb
-            sync_metadata_to_context(&self.ctx, &self.cache_dir).await;
-
+            // P1-6 fix: per-proxy scratch context. The shared `self.ctx`
+            // alias `input_0` is clobber-prone when several SqlProxy nodes in
+            // the same fan-out stage register the same alias — one node's
+            // `ctx.sql()` could resolve `input_0` to ANOTHER node's table
+            // (silent cross-node data mixup, scheduling dependent). The pivot
+            // node already moved to a fresh context for exactly this reason
+            // ("an earlier node in the same stage had re-registered
+            // input_0"); SqlProxy now follows the same pattern. Materialized
+            // tables are still synced from metadata.duckdb below so upstream
+            // stage outputs remain visible by their node table names.
+            let scratch = std::sync::Arc::new(datafusion::prelude::SessionContext::new());
+            sync_metadata_to_context(&scratch, &self.cache_dir).await;
             for (i, input_plan) in proxy.inputs.iter().enumerate() {
                 let table_name = format!("input_{}", i);
-                let df = datafusion::prelude::DataFrame::new(self.ctx.state(), input_plan.clone());
-                let _ = self.ctx.deregister_table(&table_name);
-                if let Err(first) = self.ctx.register_table(&table_name, df.into_view()) {
-                    // Concurrent fan_out children share this context and may race on
-                    // the same alias (identical parent output). Deregister + retry once.
-                    let _ = self.ctx.deregister_table(&table_name);
-                    let df2 =
-                        datafusion::prelude::DataFrame::new(self.ctx.state(), input_plan.clone());
-                    self.ctx
-                        .register_table(&table_name, df2.into_view())
-                        .map_err(|e| {
-                            datafusion::error::DataFusionError::Plan(format!(
-                                "Failed to register input_{}: {} (first: {})",
-                                i, e, first
-                            ))
-                        })?;
-                }
+                let df =
+                    datafusion::prelude::DataFrame::new(scratch.state(), input_plan.clone());
+                scratch
+                    .register_table(&table_name, df.into_view())
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Plan(format!(
+                            "Failed to register input_{}: {}",
+                            i, e
+                        ))
+                    })?;
             }
 
             // WORKAROUND for DataFusion 52.1.0 sql() limitation with $1 placeholders
             let query = inline_placeholders(&proxy.query, &proxy.params);
 
-            let df = self.ctx.sql(&query).await.map_err(|e| {
+            let df = scratch.sql(&query).await.map_err(|e| {
                 datafusion::error::DataFusionError::Plan(format!("Late-binding SQL error: {}", e))
             })?;
 
             let logical_plan = df.into_optimized_plan()?;
-            // We MUST use the latest session state from our context which now has the tables!
-            // Check if schema matches logical proxy schema
             let logical_schema = proxy.schema.clone();
             let physical_plan = _planner
-                .create_physical_plan(&logical_plan, &self.ctx.state())
+                .create_physical_plan(&logical_plan, &scratch.state())
                 .await?;
 
 
@@ -628,44 +628,53 @@ impl QueryPlanner for SwanFlowQueryPlanner {
 ///   later, smaller placeholder.
 /// - String literals are single-quote-escaped; other types use their Display
 ///   form (numbers, booleans, `NULL`).
-fn inline_placeholders(query: &str, params: &[ScalarValue]) -> String {
-    let mut out = query.to_string();
-    for i in (0..params.len()).rev() {
-        let placeholder = format!("${}", i + 1);
-        let val_str = match &params[i] {
-            ScalarValue::Utf8(Some(s)) => format!("'{}'", s.replace('\'', "''")),
-            other => format!("{}", other),
-        };
-        out = replace_placeholder_desc(&out, &placeholder, &val_str);
+pub fn inline_placeholders(query: &str, params: &[ScalarValue]) -> String {
+    // P1-1 fix (r4 C1 hardening): SINGLE-PASS inliner. We scan the query once;
+    // every $N token found in the ORIGINAL text is replaced by its param value
+    // in the output buffer. Inserted values are never rescanned — not within
+    // one call and not across loop iterations — so a param whose value itself
+    // contains "$1"/"$2" text cannot be re-expanded (the old multi-pass
+    // descending replace only guaranteed that within one call).
+    let mut out = String::with_capacity(query.len() + 16);
+    let mut rest = query;
+    while !rest.is_empty() {
+        if rest.starts_with('$') {
+            // parse the maximal ASCII digit run after the $
+            let digits: String = rest[1..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                let n: usize = digits.parse().unwrap_or(usize::MAX);
+                if n >= 1 && n <= params.len() {
+                    let param = &params[n - 1];
+                    match param {
+                        ScalarValue::Utf8(Some(s)) => {
+                            out.push('\'');
+                            out.push_str(&s.replace('\'', "''"));
+                            out.push('\'');
+                        }
+                        other => out.push_str(&format!("{}", other)),
+                    }
+                    rest = &rest[1 + digits.len()..];
+                    continue;
+                }
+                // out-of-range placeholder: keep literally (schema probe may
+                // legitimately contain $ tokens outside params range)
+            }
+        }
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
     }
     out
 }
 
-/// Replace `placeholder` (e.g. `"$1"`) in `haystack` with `replacement`,
-/// only where the placeholder is NOT immediately followed by a digit
-/// (`$1` must not match the prefix of `$10`).
-fn replace_placeholder_desc(haystack: &str, placeholder: &str, replacement: &str) -> String {
-    let bytes = haystack.as_bytes();
-    let mut result = String::with_capacity(haystack.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if haystack[i..].starts_with(placeholder) {
-            let after = i + placeholder.len();
-            let followed_by_digit = after < bytes.len()
-                && (bytes[after].is_ascii_digit());
-            if !followed_by_digit {
-                // Prefix [0..i) was already pushed incrementally; append only
-                // the replacement (re-scanning stops after it, so a value that
-                // itself contains "$N" is never inlined again).
-                result.push_str(replacement);
-                i = after;
-                continue;
-            }
-        }
-        result.push(haystack[i..].chars().next().unwrap());
-        i += 1;
-    }
-    result
+
+/// Schema-discovery entry point used by nodes::sql (SqlProxyLogical build).
+/// Same inlining as physical planning, so discovered schema == executed SQL.
+pub fn inline_placeholders_for_schema(query: &str, params: &[ScalarValue]) -> String {
+    inline_placeholders(query, params)
 }
 
 #[cfg(test)]
@@ -705,6 +714,64 @@ mod inline_placeholder_tests {
         ];
         let out = inline_placeholders(query, &params);
         assert_eq!(out, "SELECT '$2', 7");
+    }
+
+    #[test]
+    fn non_ascii_haystack_does_not_panic() {
+        // P1-1 regression: the old byte-index scanner panicked on any
+        // non-ASCII char once a replacement had shifted the indices.
+        let query = "SELECT \u{4e2d}\u{6587}\u{6ce8}\u{91ca} FROM t WHERE a = $1 AND \u{540d}\u{79f0} = $2";
+        let params = vec![
+            ScalarValue::Int64(Some(1)),
+            ScalarValue::Utf8(Some("\u{5317}\u{4eac}".to_string())),
+        ];
+        let out = inline_placeholders(&query, &params);
+        assert!(out.contains("= 1"), "param 1 inlined: {}", out);
+        assert!(out.contains("'\u{5317}\u{4eac}'"), "param 2 inlined: {}", out);
+    }
+
+    #[test]
+    fn mixed_single_and_double_digit_placeholders() {
+        // P1-1 regression: $1 must not clobber the prefix of $10/$11.
+        let query = "SELECT * FROM t WHERE a = $1 AND b = $10 AND c = $11";
+        let params: Vec<ScalarValue> = (1..=11)
+            .map(|i| ScalarValue::Int64(Some(i)))
+            .collect();
+        let out = inline_placeholders(&query, &params);
+        assert_eq!(out, "SELECT * FROM t WHERE a = 1 AND b = 10 AND c = 11");
+    }
+
+    #[test]
+    fn schema_discovery_entry_matches_physical_inlining() {
+        let query = "SELECT $1 AS v, $10 AS w FROM t";
+        let params: Vec<ScalarValue> = (1..=10)
+            .map(|i| ScalarValue::Int64(Some(i)))
+            .collect();
+        assert_eq!(
+            inline_placeholders_for_schema(query, &params),
+            inline_placeholders(query, &params)
+        );
+    }
+
+    #[test]
+    fn value_containing_lower_placeholder_text_is_not_reexpanded() {
+        // r4 C1: param $2 = "$1" must NOT be expanded by the $1 pass.
+        let params = vec![
+            ScalarValue::Utf8(Some("Greeting".to_string())),
+            ScalarValue::Utf8(Some("$1".to_string())),
+        ];
+        let out = inline_placeholders("SELECT $1, $2 FROM t", &params);
+        assert_eq!(out, "SELECT 'Greeting', '$1' FROM t");
+    }
+
+    #[test]
+    fn value_containing_dollar_digit_is_not_rematched_with_non_ascii() {
+        let params = vec![
+            ScalarValue::Utf8(Some("$2\u{5143}".to_string())),
+            ScalarValue::Int64(Some(7)),
+        ];
+        let out = inline_placeholders("SELECT $1, $2 FROM t", &params);
+        assert_eq!(out, "SELECT '$2\u{5143}', 7 FROM t");
     }
 
     #[test]

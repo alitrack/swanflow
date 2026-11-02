@@ -40,6 +40,22 @@ pub struct MappingEntry {
     pub compat: String,
 }
 
+/// Escape a string config value for safe inclusion inside a single-quoted SQL
+/// string literal (DuckDB standard string convention: `''` escapes a single
+/// quote; backslash is literal).
+///
+/// P1-7 fix (audit 2026-10-19): every site that splices a KNIME config value
+/// into generated SQL must route the value through this function (or `sq_lit`),
+/// otherwise a value containing `'` breaks / injects into the SQL.
+fn sq_escape(v: &str) -> String {
+    v.replace('\'', "''")
+}
+
+/// Render a string config value as a quoted, escaped SQL string literal.
+fn sq_lit(v: &str) -> String {
+    format!("'{}'", sq_escape(v))
+}
+
 /// Maps KNIME node types to SwanFlow native nodes.
 pub struct KnimeNodeMapper {
     type_map: HashMap<String, SwanFlowNodeDef>,
@@ -89,9 +105,16 @@ impl KnimeNodeMapper {
                        "has_header": s.get("has_column_header").and_then(|v| v.as_bool()).unwrap_or(true),
                        "delimiter": s.get("column_delimiter").and_then(|v| v.as_str()).unwrap_or(",")}));
 
-        def!("org.knime.base.node.io.filehandling.CSVWriterNodeFactory", "core.io.csv_read",
-            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""),
-                       "delimiter": s.get("column_delimiter").and_then(|v| v.as_str()).unwrap_or(",")}));
+        // P1-7 fix (audit 2026-10-19): SwanFlow has no CSV write node
+        // (crates/swanflow/src/nodes/io/ only registers csv_read/parquet_read/
+        // duckdb_write/excel_write). The old mapping to core.io.csv_read turned a
+        // WRITE node into a READ node - output silently lost. Fail-closed:
+        // core.missing.placeholder with an explicit reason.
+        def!("org.knime.base.node.io.filehandling.CSVWriterNodeFactory", "core.missing.placeholder",
+            |s| json!({"reason": "CSV Writer 无对应写节点（SwanFlow 无 core.io.csv_write），输出不会落盘",
+                       "knime_factory": "org.knime.base.node.io.filehandling.CSVWriterNodeFactory",
+                       "path": s.get("file_name").and_then(|v| v.as_str()),
+                       "delimiter": s.get("column_delimiter").and_then(|v| v.as_str())}));
 
         def!("org.knime.base.node.io.filehandling.ExcelReaderNodeFactory", "core.io.excel_read",
             |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""),
@@ -103,7 +126,7 @@ impl KnimeNodeMapper {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let op = Self::map_op(s.get("operator").and_then(|v| v.as_str()).unwrap_or("="));
                 let val = s.get("filter_value").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"expr": format!("{} {} {}", col, op, val)})
+                json!({"expr": format!("{} {} {}", col, op, sq_lit(val))})
             });
 
         def!("org.knime.base.node.preproc.filter.column.ColumnFilterNodeFactory", "core.transform.project",
@@ -327,7 +350,7 @@ impl KnimeNodeMapper {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let op = s.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
                 let val = s.get("filter_value").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"expr": format!("{} {} {}", col, op, val), "split": true})
+                json!({"expr": format!("{} {} {}", col, op, sq_lit(val)), "split": true})
             });
 
         // ─── Join / Pivot ───
@@ -339,7 +362,7 @@ impl KnimeNodeMapper {
             |s| {
                 let cols_str = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
                 let cols: Vec<&str> = cols_str.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
-                let cols_list = cols.iter().map(|c| format!("'{}'", c)).collect::<Vec<_>>().join(", ");
+                let cols_list = cols.iter().map(|c| sq_lit(c)).collect::<Vec<_>>().join(", ");
                 json!({"query": format!("UNPIVOT input_0 ON COLUMNS({}) INTO NAME key VALUE val", cols_list)})
             });
 
@@ -377,7 +400,7 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("ts");
                 let fmt = s.get("format").and_then(|v| v.as_str()).unwrap_or("%Y-%m-%d %H:%M:%S");
-                json!({"query": format!("SELECT *, strptime(CAST({} AS VARCHAR), '{}') AS {}_dt FROM input_0", col, fmt, col)})
+                json!({"query": format!("SELECT *, strptime(CAST({} AS VARCHAR), {}) AS {}_dt FROM input_0", col, sq_lit(fmt), col)})
             });
         def!("org.knime.time.node.extract.datetime.ExtractDateTimeFieldNodeFactory", "core.sql",
             |s| {
@@ -395,14 +418,26 @@ impl KnimeNodeMapper {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let amount = s.get("shift_amount").and_then(|v| v.as_str()).unwrap_or("1");
                 let unit = s.get("shift_unit").and_then(|v| v.as_str()).unwrap_or("day");
-                json!({"query": format!("SELECT *, {} + INTERVAL '{}' {} AS {}_shifted FROM input_0", col, amount, unit, col)})
+                json!({"query": format!("SELECT *, {} + INTERVAL {} {} AS {}_shifted FROM input_0", col, sq_lit(amount), unit, col)})
             });
+        // P1-7 fix (audit 2026-10-19): the old code silently defaulted to
+        // hardcoded 2020-01-01 / 2020-12-31 when the config was missing. Now
+        // fail-closed: missing start/end -> explicit `error` field (core.sql
+        // validation requires `query`, so the node fails loudly instead of
+        // silently producing a wrong date range).
         def!("org.knime.time.node.create.datetimerange.DateTimeRangeNodeFactory", "core.sql",
             |s| {
-                let start = s.get("start_column").and_then(|v| v.as_str()).unwrap_or("'2020-01-01'::DATE");
-                let end = s.get("end_column").and_then(|v| v.as_str()).unwrap_or("'2020-12-31'::DATE");
-                let step = s.get("step").and_then(|v| v.as_str()).unwrap_or("INTERVAL 1 DAY");
-                json!({"query": format!("SELECT UNNEST(generate_series({}::TIMESTAMP, {}::TIMESTAMP, {})) AS dt", start, end, step)})
+                let start = s.get("start_column").and_then(|v| v.as_str());
+                let end = s.get("end_column").and_then(|v| v.as_str());
+                match (start, end) {
+                    (Some(start), Some(end)) => {
+                        let step = s.get("step").and_then(|v| v.as_str()).unwrap_or("INTERVAL 1 DAY");
+                        json!({"query": format!(
+                            "SELECT UNNEST(generate_series({}, {}, {})) AS dt",
+                            sq_lit(start), sq_lit(end), step)})
+                    }
+                    _ => json!({"error": "DateTimeRange: start_column/end_column 配置缺失，拒绝回退到硬编码日期范围（fail-closed）"}),
+                }
             });
         def!("org.knime.time.node.extract.timefield.ExtractTimeFieldNodeFactory", "core.sql",
             |s| {
@@ -426,11 +461,16 @@ impl KnimeNodeMapper {
                 let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
                 json!({"query": format!("DELETE FROM \"{}\"", table)})
             });
-        def!("org.knime.base.node.io.database.DBUpdateNodeFactory", "core.sql",
-            |s| {
-                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
-                json!({"query": format!("UPDATE \"{}\" SET ... FROM input_0", table)})
-            });
+        // P1-7 fix (audit 2026-10-19): the old mapping generated the literal,
+        // always-invalid SQL `UPDATE "{table}" SET ... FROM input_0` (the `SET ...`
+        // is literal text - the node is guaranteed to fail at runtime). KNIME
+        // DBUpdate's config is a set of per-column update values which no
+        // existing SwanFlow node can faithfully express, so fail-closed:
+        // core.missing.placeholder with an explicit reason.
+        def!("org.knime.base.node.io.database.DBUpdateNodeFactory", "core.missing.placeholder",
+            |s| json!({"reason": "DB Update 暂不支持：KNIME DBUpdate 的列更新配置无法忠实翻译为 SQL，旧映射生成的 UPDATE 语句必然非法",
+                       "knime_factory": "org.knime.base.node.io.database.DBUpdateNodeFactory",
+                       "table": s.get("table_name").and_then(|v| v.as_str())}));
         def_fb!("org.knime.base.node.io.filestore.FileDownloadNodeFactory", "core.sql",
             |s| {
                 let url = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
@@ -456,34 +496,31 @@ impl KnimeNodeMapper {
                     else if path.ends_with(".csv") { "csv" }
                     else if path.ends_with(".json") { "json" }
                     else { "auto" };
-                json!({"query": format!("SELECT * FROM read_{}('{}://{}')", ext, proto, path)})
+                json!({"query": format!("SELECT * FROM read_{}('{}://{}')", ext, sq_escape(proto), sq_escape(path))})
             }, "Fallback: SwanFlow Python UDF → requests.get()");
         def!("org.knime.base.node.io.filehandling.node.FileListDirectoryNodeFactory", "core.sql",
             |s| {
                 let dir = s.get("directory").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM glob('{}**')", dir)})
+                json!({"query": format!("SELECT * FROM glob('{}**')", sq_escape(dir))})
             });
 
         // ─── REST / HTTP (erpl-web / http_client powered) ───
         def!("org.knime.rest.nodes.GETRequestNodeFactory", "core.sql",
             |s| {
                 let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM read_json_auto('{}')", url)})
+                json!({"query": format!("SELECT * FROM read_json_auto({})", sq_lit(url))})
             });
         def!("org.knime.rest.nodes.POSTRequestNodeFactory", "core.sql",
             |s| {
                 let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let body = s.get("body").and_then(|v| v.as_str()).unwrap_or("{}");
-                json!({"query": format!(
-                    "SELECT http_post('{}', headers := '{{}}', body := '{}') AS response", url, body)})
+                json!({"query": format!("SELECT http_post({}, headers := '{{}}', body := {}) AS response", sq_lit(url), sq_lit(body))})
             });
         def!("org.knime.rest.nodes.PUTRequestNodeFactory", "core.sql",
             |s| {
                 let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let body = s.get("body").and_then(|v| v.as_str()).unwrap_or("{}");
-                json!({"query": format!(
-                    "SELECT http_put('{}', headers := '{{}}', body := '{}') AS response", url, body)})
+                json!({"query": format!("SELECT http_put({}, headers := '{{}}', body := {}) AS response", sq_lit(url), sq_lit(body))})
             });
 
         // ─── Transform — String / Regex ───
@@ -571,14 +608,14 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let delim = s.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
-                json!({"query": format!("SELECT *, UNNEST(string_split(\"{}\", '{}')) AS {}_expanded FROM input_0", col, delim, col)})
+                json!({"query": format!("SELECT *, UNNEST(string_split(\"{}\", {})) AS {}_expanded FROM input_0", col, sq_lit(delim), col)})
             });
         def!("org.knime.base.node.preproc.many2one.ManyToOneNodeFactory", "core.sql",
             |s| {
                 let group_col = s.get("group_column").and_then(|v| v.as_str()).unwrap_or("");
                 let agg_col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let sep = s.get("separator").and_then(|v| v.as_str()).unwrap_or(",");
-                json!({"query": format!("SELECT {}, string_agg(\"{}\", '{}') AS {}_combined FROM input_0 GROUP BY {}", group_col, agg_col, sep, agg_col, group_col)})
+                json!({"query": format!("SELECT {}, string_agg(\"{}\", {}) AS {}_combined FROM input_0 GROUP BY {}", group_col, agg_col, sq_lit(sep), agg_col, group_col)})
             });
 
         // ─── Transform — Column Type ───
@@ -610,7 +647,12 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let vals = s.get("included_values").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"expr": format!("{} IN ({})", col, vals)})
+                if vals.trim().is_empty() {
+                    json!({"error": "NominalValueRowFilter: included_values 配置缺失，拒绝生成空 IN()（fail-closed）"})
+                } else {
+                    let vals_list = vals.split(',').map(|v| sq_lit(v.trim())).collect::<Vec<_>>().join(", ");
+                    json!({"expr": format!("{} IN ({})", col, vals_list)})
+                }
             });
 
         // ─── Flow Control — Switch / IF / Try-Catch ───
@@ -695,9 +737,7 @@ impl KnimeNodeMapper {
                 let feats = Self::parse_feats(s, "feature_columns");
                 let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
                 let feat_json_array = format!("json_array({})", feat_cols.join(", "));
-                json!({"query": format!(
-                    "SELECT * FROM ml_train('sw_polyreg', 'linear_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"poly_degree\": {}}}')",
-                    target, feat_json_array, degree)})
+                json!({"query": format!("SELECT * FROM ml_train('sw_polyreg', 'linear_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"poly_degree\": {}}}')", target, feat_json_array, sq_escape(degree))})
             });
 
         // ─── Analysis — Tree / Ensemble (duckdb-ml powered) ───
@@ -726,9 +766,7 @@ impl KnimeNodeMapper {
                 let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
                 let feat_json_array = format!("json_array({})", feat_cols.join(", "));
                 let n_trees = s.get("number_of_trees").and_then(|v| v.as_str()).unwrap_or("100");
-                json!({"query": format!(
-                    "SELECT * FROM ml_train('sw_rf', 'random_forest', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_estimators\": {}}}')",
-                    target, feat_json_array, n_trees)})
+                json!({"query": format!("SELECT * FROM ml_train('sw_rf', 'random_forest', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_estimators\": {}}}')", target, feat_json_array, sq_escape(n_trees))})
             }, "Fallback: SwanFlow Python UDF → sklearn.ensemble.RandomForestRegressor");
         def!("org.knime.base.node.mine.treeensemble.randomforest.RandomForestPredictorNodeFactory", "core.sql",
             |s| {
@@ -745,9 +783,7 @@ impl KnimeNodeMapper {
                 let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
                 let feat_json_array = format!("json_array({})", feat_cols.join(", "));
                 let n_trees = s.get("number_of_trees").and_then(|v| v.as_str()).unwrap_or("100");
-                json!({"query": format!(
-                    "SELECT * FROM ml_train('sw_gbdt', 'xgboost_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_estimators\": {}}}')",
-                    target, feat_json_array, n_trees)})
+                json!({"query": format!("SELECT * FROM ml_train('sw_gbdt', 'xgboost_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_estimators\": {}}}')", target, feat_json_array, sq_escape(n_trees))})
             }, "Fallback: SwanFlow Python UDF → xgboost.XGBRegressor");
 
         // ─── Analysis — Clustering (duckdb-ml powered) ───
@@ -757,9 +793,7 @@ impl KnimeNodeMapper {
                 let n_clusters = s.get("number_of_clusters").and_then(|v| v.as_str()).unwrap_or("3");
                 let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
                 let feat_json_array = format!("json_array({})", feat_cols.join(", "));
-                json!({"query": format!(
-                    "SELECT * FROM ml_train('sw_kmeans', 'kmeans', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"k\": {}}}')",
-                    feat_json_array, n_clusters)})
+                json!({"query": format!("SELECT * FROM ml_train('sw_kmeans', 'kmeans', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"k\": {}}}')", feat_json_array, sq_escape(n_clusters))})
             }, "Fallback: SwanFlow Python UDF → sklearn.cluster.KMeans");
         def!("org.knime.base.node.mine.cluster.hierarchical.HierarchicalClusterNodeFactory", "core.script.python",
             |_| json!({"sandboxed": false, "script": "from sklearn.cluster import AgglomerativeClustering\nimport numpy as np\nimport pandas as pd\nimport pyarrow as pa\n\ntable = pa.Table.from_batches([batch])\nX = table.to_pandas().values\nmodel = AgglomerativeClustering(n_clusters=3).fit(X)\nresult_table = pa.Table.from_pandas(pd.DataFrame({\"cluster\": model.labels_}))"}));
@@ -773,9 +807,7 @@ impl KnimeNodeMapper {
                 let n_components = s.get("number_of_components").and_then(|v| v.as_str()).unwrap_or("2");
                 let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
                 let feat_json_array = format!("json_array({})", feat_cols.join(", "));
-                json!({"query": format!(
-                    "SELECT * FROM ml_train('sw_pca', 'pca', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_components\": {}}}')",
-                    feat_json_array, n_components)})
+                json!({"query": format!("SELECT * FROM ml_train('sw_pca', 'pca', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_components\": {}}}')", feat_json_array, sq_escape(n_components))})
             });
 
         // ─── Analysis — Statistics (DuckDB built-in + stats_duck) ───
@@ -860,9 +892,7 @@ impl KnimeNodeMapper {
                 let feat_json_array = format!("json_array({})", feat_cols.join(", "));
                 let hidden = s.get("hidden_layers").and_then(|v| v.as_str()).unwrap_or("64");
                 let lr = s.get("learning_rate").and_then(|v| v.as_str()).unwrap_or("0.01");
-                json!({"query": format!(
-                    "SELECT * FROM ml_train('sw_mlp', 'mlp_regressor', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"hidden_size\": {}, \"lr\": {}}}')",
-                    target, feat_json_array, hidden, lr)})
+                json!({"query": format!("SELECT * FROM ml_train('sw_mlp', 'mlp_regressor', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"hidden_size\": {}, \"lr\": {}}}')", target, feat_json_array, sq_escape(hidden), sq_escape(lr))})
             }, "Fallback: SwanFlow Python UDF → sklearn.neural_network.MLPRegressor");
         def!("org.knime.base.node.mine.mlp.MLPPredictorNodeFactory", "core.sql",
             |s| {
@@ -885,12 +915,12 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.pmml.PMMLWriterNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/model.json");
-                json!({"query": format!("SELECT * FROM ml_load_xgboost('exported_model', '{}')", path)})
+                json!({"query": format!("SELECT * FROM ml_load_xgboost('exported_model', {})", sq_lit(path))})
             });
         def!("org.knime.base.node.io.pmml.PMMLReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/model.json");
-                json!({"query": format!("SELECT * FROM ml_load_xgboost('imported_model', '{}')", path)})
+                json!({"query": format!("SELECT * FROM ml_load_xgboost('imported_model', {})", sq_lit(path))})
             });
 
 
@@ -902,9 +932,7 @@ impl KnimeNodeMapper {
                 let feat_cols = feats.iter().map(|f| format!("\"{}\"", f)).collect::<Vec<_>>();
                 let feat_json_array = format!("json_array({})", feat_cols.join(", "));
                 let k = s.get("number_of_neighbors").and_then(|v| v.as_str()).unwrap_or("5");
-                json!({"query": format!(
-                    "SELECT * FROM ml_train('sw_knn', 'knn_regressor', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"k\": {}}}')",
-                    target, feat_json_array, k)})
+                json!({"query": format!("SELECT * FROM ml_train('sw_knn', 'knn_regressor', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"k\": {}}}')", target, feat_json_array, sq_escape(k))})
             });
         def!("org.knime.base.node.mine.lasso.LassoNodeFactory", "core.sql",
             |s| {
@@ -913,28 +941,26 @@ impl KnimeNodeMapper {
                 let feat_cols = feats.iter().map(|f| format!("\"{}\"", f)).collect::<Vec<_>>();
                 let feat_json_array = format!("json_array({})", feat_cols.join(", "));
                 let alpha = s.get("alpha").and_then(|v| v.as_str()).unwrap_or("1.0");
-                json!({"query": format!(
-                    "SELECT * FROM ml_train('sw_lasso', 'lasso_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"lambda\": {}}}')",
-                    target, feat_json_array, alpha)})
+                json!({"query": format!("SELECT * FROM ml_train('sw_lasso', 'lasso_regression', (SELECT json_group_array(\"{}\") FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"lambda\": {}}}')", target, feat_json_array, sq_escape(alpha))})
             });
 
         // ─── DuckDB WASM extension bridge (ducklink) ───
         def!("org.knime.base.node.io.filehandling.node.WebAppNodeFactory", "core.sql",
             |s| {
                 let component = s.get("wasm_component").and_then(|v| v.as_str()).unwrap_or("my_extension");
-                json!({"query": format!("FROM ducklink_load('{}'); SELECT * FROM ducklink.modules", component)})
+                json!({"query": format!("FROM ducklink_load({}); SELECT * FROM ducklink.modules", sq_lit(component))})
             });
 
         // ─── SAS / SPSS / Stata readers (via DuckDB community extensions) ───
         def!("org.knime.base.node.io.filehandling.node.SASReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_csv_auto('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_csv_auto({})", sq_lit(path))})
             });
         def!("org.knime.base.node.io.filehandling.node.SPSSReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_parquet('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_parquet({})", sq_lit(path))})
             });
 
         // ─── DB Query / Table Selector / Connection ───
@@ -944,26 +970,20 @@ impl KnimeNodeMapper {
             |s| json!({"query": format!("SELECT * FROM {}",
                 s.get("table_name").and_then(|v| v.as_str()).unwrap_or("unknown_table"))}));
         def!("org.knime.base.node.io.database.DBConnectionNodeFactory", "core.sql",
-            |s| json!({"query": format!("ATTACH '{}' AS knime_db (TYPE postgres)",
-                s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""))}));
+            |s| json!({"query": format!("ATTACH {} AS knime_db (TYPE postgres)", sq_lit(s.get("database_url").and_then(|v| v.as_str()).unwrap_or("")))}));
 
 
         // ─── Federated DB Connectors (DuckDB ATTACH extensions) ───
         def!("org.knime.base.node.io.database.DBConnectorMySQLNodeFactory", "core.sql",
-            |s| json!({"query": format!("ATTACH '{}' AS mysql_db (TYPE mysql)",
-                s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""))}));
+            |s| json!({"query": format!("ATTACH {} AS mysql_db (TYPE mysql)", sq_lit(s.get("database_url").and_then(|v| v.as_str()).unwrap_or("")))}));
         def!("org.knime.base.node.io.database.DBConnectorPostgreSQLNodeFactory", "core.sql",
-            |s| json!({"query": format!("ATTACH '{}' AS pg_db (TYPE postgres)",
-                s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""))}));
+            |s| json!({"query": format!("ATTACH {} AS pg_db (TYPE postgres)", sq_lit(s.get("database_url").and_then(|v| v.as_str()).unwrap_or("")))}));
         def!("org.knime.base.node.io.database.DBConnectorSQLiteNodeFactory", "core.sql",
-            |s| json!({"query": format!("ATTACH '{}' AS sqlite_db (TYPE sqlite)",
-                s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""))}));
+            |s| json!({"query": format!("ATTACH {} AS sqlite_db (TYPE sqlite)", sq_lit(s.get("file_name").and_then(|v| v.as_str()).unwrap_or("")))}));
         def!("org.knime.base.node.io.database.DBConnectorMSSQLNodeFactory", "core.sql",
-            |s| json!({"query": format!("ATTACH '{}' AS mssql_db (TYPE sqlserver)",
-                s.get("database_url").and_then(|v| v.as_str()).unwrap_or(""))}));
+            |s| json!({"query": format!("ATTACH {} AS mssql_db (TYPE sqlserver)", sq_lit(s.get("database_url").and_then(|v| v.as_str()).unwrap_or("")))}));
         def!("org.knime.base.node.io.database.DBConnectorMongoDBNodeFactory", "core.sql",
-            |s| json!({"query": format!("ATTACH '{}' AS mongo_db (TYPE mongodb)",
-                s.get("connection_string").and_then(|v| v.as_str()).unwrap_or(""))}));
+            |s| json!({"query": format!("ATTACH {} AS mongo_db (TYPE mongodb)", sq_lit(s.get("connection_string").and_then(|v| v.as_str()).unwrap_or("")))}));
         def!("org.knime.base.node.io.database.DBConnectorSalesforceNodeFactory", "core.sql",
             |s| json!({"query": format!("ATTACH '' AS sf (TYPE salesforce)",
                 )}));
@@ -972,24 +992,24 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.spatial.SPATIALReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM ST_Read('{}')", path)})
+                json!({"query": format!("SELECT * FROM ST_Read({})", sq_lit(path))})
             });
         def!("org.knime.base.node.io.spatial.GeoJSONReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM ST_Read('{}')", path)})
+                json!({"query": format!("SELECT * FROM ST_Read({})", sq_lit(path))})
             });
         def!("org.knime.base.node.io.spatial.ShapeFileReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM ST_Read('{}')", path)})
+                json!({"query": format!("SELECT * FROM ST_Read({})", sq_lit(path))})
             });
         def!("org.knime.geospatial.nodes.coordinate.CoordinateTransformNodeFactory", "core.sql",
             |s| {
                 let col = s.get("geometry_column").and_then(|v| v.as_str()).unwrap_or("");
                 let from_srid = s.get("source_crs").and_then(|v| v.as_str()).unwrap_or("4326");
                 let to_srid = s.get("target_crs").and_then(|v| v.as_str()).unwrap_or("3857");
-                json!({"query": format!("SELECT *, ST_Transform({}, 'EPSG:{}', 'EPSG:{}') AS {}_transformed FROM input_0", col, from_srid, to_srid, col)})
+                json!({"query": format!("SELECT *, ST_Transform({}, 'EPSG:{}', 'EPSG:{}') AS {}_transformed FROM input_0", col, sq_escape(from_srid), sq_escape(to_srid), col)})
             });
         def!("org.knime.geospatial.nodes.buffer.BufferNodeFactory", "core.sql",
             |s| {
@@ -1016,14 +1036,14 @@ impl KnimeNodeMapper {
             |s| {
                 let url = s.get("service_url").and_then(|v| v.as_str()).unwrap_or("");
                 let entity = s.get("entity_set").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_json_auto('{}/{}')", url, entity)})
+                json!({"query": format!("SELECT * FROM read_json_auto('{}/{}')", sq_escape(url), sq_escape(entity))})
             });
 
         // ─── FTP / SFTP reader (cloudfs) ───
         def!("org.knime.base.node.io.filehandling.FTPFileReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_csv_auto('sftp://{}')", path)})
+                json!({"query": format!("SELECT * FROM read_csv_auto('sftp://{}')", sq_escape(path))})
             });
 
         // ─── Scripting ───
@@ -1040,12 +1060,12 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.imgwriter.ImageWriterNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/output.png");
-                json!({"query": format!("COPY (SELECT * FROM input_0) TO '{}'", path)})
+                json!({"query": format!("COPY (SELECT * FROM input_0) TO {}", sq_lit(path))})
             });
         def!("org.knime.base.node.io.imgreader.ImageReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_blob('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_blob({})", sq_lit(path))})
             });
 
         // ─── Viz — Classic Views (core.sql passthrough) ───
@@ -1138,14 +1158,22 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.filehandling.ARFFWriterNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/output.arff");
-                json!({"query": format!("COPY (SELECT * FROM input_0) TO '{}'", path)})
+                json!({"query": format!("COPY (SELECT * FROM input_0) TO {}", sq_lit(path))})
             });
-        def!("org.knime.base.node.io.table.writer.TableWriterNodeFactory", "core.io.csv_read",
-            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or("")}));
+        // P1-7 fix (audit 2026-10-19): no generic table-write node exists in
+        // SwanFlow; the old mapping to core.io.csv_read was a write->read lie.
+        def!("org.knime.base.node.io.table.writer.TableWriterNodeFactory", "core.missing.placeholder",
+            |s| json!({"reason": "Table Writer 无对应写节点（SwanFlow 无通用表写节点），输出不会落盘",
+                       "knime_factory": "org.knime.base.node.io.table.writer.TableWriterNodeFactory",
+                       "path": s.get("file_name").and_then(|v| v.as_str())}));
         def!("org.knime.base.node.io.parquet.ParquetReaderNodeFactory", "core.io.csv_read",
             |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""), "format": "parquet"}));
-        def!("org.knime.base.node.io.parquet.ParquetWriterNodeFactory", "core.io.csv_read",
-            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""), "format": "parquet"}));
+        // P1-7 fix (audit 2026-10-19): no parquet write node exists in SwanFlow
+        // (only core.io.parquet_read); fail-closed with a placeholder + reason.
+        def!("org.knime.base.node.io.parquet.ParquetWriterNodeFactory", "core.missing.placeholder",
+            |s| json!({"reason": "Parquet Writer 无对应写节点（SwanFlow 无 core.io.parquet_write），输出不会落盘",
+                       "knime_factory": "org.knime.base.node.io.parquet.ParquetWriterNodeFactory",
+                       "path": s.get("file_name").and_then(|v| v.as_str())}));
 
         // ─── Column Combiner / Splitter ───
         def!("org.knime.base.node.preproc.colcombine.ColumnCombinerNodeFactory", "core.sql",
@@ -1153,7 +1181,7 @@ impl KnimeNodeMapper {
                 let cols_str = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
                 let cols: Vec<&str> = cols_str.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
                 let sep = s.get("separator").and_then(|v| v.as_str()).unwrap_or("_");
-                let concat = cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(&format!(" || '{}' || ", sep));
+                let concat = cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(&format!(" || {} || ", sq_lit(sep)));
                 json!({"query": format!("SELECT *, {} AS combined FROM input_0", concat)})
             });
 
@@ -1216,7 +1244,7 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let path = s.get("json_path").and_then(|v| v.as_str()).unwrap_or("$");
-                json!({"query": format!("SELECT *, json_extract(\"{}\", '{}') AS json_result FROM input_0", col, path)})
+                json!({"query": format!("SELECT *, json_extract(\"{}\", {}) AS json_result FROM input_0", col, sq_lit(path))})
             });
         def!("org.knime.json.node.jsontotable.JsonToTableNodeFactory", "core.sql",
             |s| {
@@ -1228,12 +1256,12 @@ impl KnimeNodeMapper {
         def_fb!("org.knime.base.node.io.xml.XMLReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_xml('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_xml({})", sq_lit(path))})
             }, "Fallback: SwanFlow Python UDF → lxml.etree");
         def!("org.knime.base.node.io.xml.XMLWriterNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/output.xml");
-                json!({"query": format!("COPY (SELECT * FROM input_0) TO '{}'", path)})
+                json!({"query": format!("COPY (SELECT * FROM input_0) TO {}", sq_lit(path))})
             });
 
         // ─── Google Sheets / BigQuery ───
@@ -1241,13 +1269,13 @@ impl KnimeNodeMapper {
             |s| {
                 let sid = s.get("sheet_id").and_then(|v| v.as_str()).unwrap_or("");
                 let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
-                json!({"query": format!("SELECT * FROM read_csv_auto('gdfs://sheets/{}?sheet={}')", sid, sheet)})
+                json!({"query": format!("SELECT * FROM read_csv_auto('gdfs://sheets/{}?sheet={}')", sq_escape(sid), sq_escape(sheet))})
             }, "Fallback: SwanFlow Python UDF → gspread");
         def!("org.knime.ext.google.bigquery.GoogleBigQueryConnectorNodeFactory", "core.sql",
             |s| {
                 let project = s.get("project_id").and_then(|v| v.as_str()).unwrap_or("");
                 let dataset = s.get("dataset").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM bigquery_scan('{}', '{}', 'SELECT * FROM table')", project, dataset)})
+                json!({"query": format!("SELECT * FROM bigquery_scan({}, {}, 'SELECT * FROM table')", sq_lit(project), sq_lit(dataset))})
             });
 
         // ─── Text Mining / NLP ───
@@ -1293,13 +1321,13 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.logging.LoggingNodeFactory", "core.sql",
             |s| {
                 let msg = s.get("message").and_then(|v| v.as_str()).unwrap_or("log entry");
-                json!({"query": format!("SELECT *, '{}' AS log_message, now() AS log_time FROM input_0", msg)})
+                json!({"query": format!("SELECT *, {} AS log_message, now() AS log_time FROM input_0", sq_lit(msg))})
             });
         def!("org.knime.base.node.util.sendemail.SendEmailNodeFactory", "core.sql",
             |s| {
                 let to = s.get("to").and_then(|v| v.as_str()).unwrap_or("");
                 let subject = s.get("subject").and_then(|v| v.as_str()).unwrap_or("SwanFlow notification");
-                json!({"query": format!("SELECT http_post('https://api.sendgrid.com/v3/mail/send', headers := '{{\"Authorization\": \"Bearer $SENDGRID_API_KEY\"}}', body := '{{\"to\":\"{}\",\"subject\":\"{}\"}}') AS email_result FROM input_0", to, subject)})
+                json!({"query": format!("SELECT http_post('https://api.sendgrid.com/v3/mail/send', headers := '{{\"Authorization\": \"Bearer $SENDGRID_API_KEY\"}}', body := '{{\"to\":\"{}\",\"subject\":\"{}\"}}') AS email_result FROM input_0", sq_escape(to), sq_escape(subject))})
             });
 
         // ─── Analysis ───
@@ -1316,9 +1344,7 @@ impl KnimeNodeMapper {
                 let n_clusters = s.get("number_of_clusters").and_then(|v| v.as_str()).unwrap_or("3");
                 let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
                 let feat_json_array = format!("json_array({})", feat_cols.join(", "));
-                json!({"query": format!(
-                    "SELECT * FROM ml_train('sw_kmeans', 'kmeans', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"k\": {}}}')",
-                    feat_json_array, n_clusters)})
+                json!({"query": format!("SELECT * FROM ml_train('sw_kmeans', 'kmeans', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"k\": {}}}')", feat_json_array, sq_escape(n_clusters))})
             }, "Fallback: SwanFlow Python UDF → sklearn.cluster.KMeans");
         def!("org.knime.base.node.mine.tree.decisiontree2.DecisionTreeNodeFactory2", "core.sql",
             |s| {
@@ -1346,9 +1372,7 @@ impl KnimeNodeMapper {
                 let n_components = s.get("number_of_components").and_then(|v| v.as_str()).unwrap_or("2");
                 let feat_cols: Vec<String> = feats.iter().map(|f| format!("\"{}\"", f)).collect();
                 let feat_json_array = format!("json_array({})", feat_cols.join(", "));
-                json!({"query": format!(
-                    "SELECT * FROM ml_train('sw_pca', 'pca', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_components\": {}}}')",
-                    feat_json_array, n_components)})
+                json!({"query": format!("SELECT * FROM ml_train('sw_pca', 'pca', (SELECT json_group_array(0) FROM input_0), (SELECT json_group_array({}) FROM input_0), '{{\"n_components\": {}}}')", feat_json_array, sq_escape(n_components))})
             });
         def!("org.knime.base.node.preproc.normalize.Normalizer2NodeFactory", "core.transform.project",
             |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
@@ -1439,14 +1463,14 @@ impl KnimeNodeMapper {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let op = s.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
                 let val = s.get("filter_value").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"expr": format!("{} {} {}", col, op, val), "split": true})
+                json!({"expr": format!("{} {} {}", col, op, sq_lit(val)), "split": true})
             });
         def!("org.knime.base.node.preproc.row.split.RowSplitter2NodeFactory", "core.transform.filter",
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let op = s.get("operator").and_then(|v| v.as_str()).unwrap_or("=");
                 let val = s.get("filter_value").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"expr": format!("{} {} {}", col, op, val), "split": true})
+                json!({"expr": format!("{} {} {}", col, op, sq_lit(val)), "split": true})
             });
         def!("org.knime.base.node.preproc.filter.row.RowSamplingNodeFactory", "core.transform.filter",
             |s| json!({"sample_size": s.get("sample_size"),
@@ -1484,10 +1508,7 @@ impl KnimeNodeMapper {
 
         // ─── String / Text ───
         def!("org.knime.base.node.preproc.stringreplacer.StringReplacerNodeFactory", "core.sql",
-            |s| json!({"query": format!("SELECT *, REPLACE({}, '{}', '{}') AS result FROM input_0",
-                s.get("column_name").and_then(|v| v.as_str()).unwrap_or(""),
-                s.get("pattern").and_then(|v| v.as_str()).unwrap_or(""),
-                s.get("replacement").and_then(|v| v.as_str()).unwrap_or(""))}));
+            |s| json!({"query": format!("SELECT *, REPLACE({}, {}, {}) AS result FROM input_0", s.get("column_name").and_then(|v| v.as_str()).unwrap_or(""), sq_lit(s.get("pattern").and_then(|v| v.as_str()).unwrap_or("")), sq_lit(s.get("replacement").and_then(|v| v.as_str()).unwrap_or("")))}));
         def!("org.knime.base.node.preproc.string2number.StringToNumberNodeFactory", "core.transform.project",
             |s| json!({"column": s.get("column_name").and_then(|v| v.as_str()),
                        "target_type": "number"}));
@@ -1577,7 +1598,7 @@ impl KnimeNodeMapper {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let shift = s.get("shift_amount").and_then(|v| v.as_str()).unwrap_or("1");
                 let unit = s.get("shift_unit").and_then(|v| v.as_str()).unwrap_or("DAY");
-                json!({"query": format!("SELECT *, CAST({} AS DATE) + INTERVAL '{}' {} AS shifted FROM input_0", col, shift, unit)})
+                json!({"query": format!("SELECT *, CAST({} AS DATE) + INTERVAL {} {} AS shifted FROM input_0", col, sq_lit(shift), unit)})
             });
         def!("org.knime.time.node.manipulate.timeseries.TimeSeriesNodeFactory", "core.sql",
             |s| {
@@ -1605,29 +1626,34 @@ impl KnimeNodeMapper {
                 let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
                 json!({"query": format!("DELETE FROM \"{}\"", table)})
             });
-        def!("org.knime.base.node.io.database.DBUpdateNodeFactory", "core.sql",
-            |s| {
-                let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("output_table");
-                json!({"query": format!("UPDATE \"{}\" SET ... FROM input_0", table)})
-            });
+        // P1-7 fix (audit 2026-10-19): the old mapping generated the literal,
+        // always-invalid SQL `UPDATE "{table}" SET ... FROM input_0` (the `SET ...`
+        // is literal text - the node is guaranteed to fail at runtime). KNIME
+        // DBUpdate's config is a set of per-column update values which no
+        // existing SwanFlow node can faithfully express, so fail-closed:
+        // core.missing.placeholder with an explicit reason.
+        def!("org.knime.base.node.io.database.DBUpdateNodeFactory", "core.missing.placeholder",
+            |s| json!({"reason": "DB Update 暂不支持：KNIME DBUpdate 的列更新配置无法忠实翻译为 SQL，旧映射生成的 UPDATE 语句必然非法",
+                       "knime_factory": "org.knime.base.node.io.database.DBUpdateNodeFactory",
+                       "table": s.get("table_name").and_then(|v| v.as_str())}));
 
         // ─── File / Network ───
         def_fb!("org.knime.base.node.io.filestore.FileDownloadNodeFactory", "core.sql",
             |s| {
                 let url = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_csv_auto('{}')", url)})
+                json!({"query": format!("SELECT * FROM read_csv_auto({})", sq_lit(url))})
             }, "Fallback: SwanFlow Python UDF → requests.get()");
         def!("org.knime.base.node.io.filestore.FileUploadNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/output.parquet");
-                json!({"query": format!("COPY (SELECT * FROM input_0) TO '{}'", path)})
+                json!({"query": format!("COPY (SELECT * FROM input_0) TO {}", sq_lit(path))})
             });
         def!("org.knime.base.node.io.filestore.ListFilesNodeFactory", "core.transform.project",
             |s| json!({"path": s.get("directory").and_then(|v| v.as_str())}));
         def!("org.knime.base.node.io.http.HttpRetrieverNodeFactory", "core.sql",
             |s| {
                 let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_json_auto('{}')", url)})
+                json!({"query": format!("SELECT * FROM read_json_auto({})", sq_lit(url))})
             });
 
         // ─── Flow Control ───
@@ -1775,14 +1801,12 @@ impl KnimeNodeMapper {
                 let host = s.get("host").and_then(|v| v.as_str()).unwrap_or("localhost");
                 let port = s.get("port").and_then(|v| v.as_str()).unwrap_or("5432");
                 let query = s.get("sql_query").and_then(|v| v.as_str()).unwrap_or("SELECT 1");
-                json!({"query": format!(
-                    "ATTACH 'host={} port={}' AS remote_duckdb (TYPE quack); SELECT * FROM remote_duckdb.({})",
-                    host, port, query)})
+                json!({"query": format!("ATTACH 'host={} port={}' AS remote_duckdb (TYPE quack); SELECT * FROM remote_duckdb.({})", sq_escape(host), sq_escape(port), query)})
             });
         def!("org.knime.base.node.io.remote.RemoteFileReaderNodeFactory", "core.sql",
             |s| {
                 let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM '{}'", url)})
+                json!({"query": format!("SELECT * FROM {}", sq_lit(url))})
             });
 
         // ─── Additional KNIME base nodes ───
@@ -1805,7 +1829,7 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let delim = s.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
-                json!({"query": format!("SELECT *, UNNEST(string_split(\"{}\", '{}')) AS split_value FROM input_0", col, delim)})
+                json!({"query": format!("SELECT *, UNNEST(string_split(\"{}\", {})) AS split_value FROM input_0", col, sq_lit(delim))})
             });
         def!("org.knime.base.node.preproc.missingval.MissingValueReplacerNodeFactory", "core.sql",
             |s| {
@@ -1823,8 +1847,7 @@ impl KnimeNodeMapper {
             |s| {
                 let driver = s.get("driver").and_then(|v| v.as_str()).unwrap_or("duckdb");
                 let uri = s.get("connection_uri").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "ATTACH '{}' AS adbc_source (TYPE adbc, DRIVER '{}')", uri, driver)})
+                json!({"query": format!("ATTACH {} AS adbc_source (TYPE adbc, DRIVER {})", sq_lit(uri), sq_lit(driver))})
             });
 
         // ─── DuckDB AI (LLM / Embedding in SQL) ───
@@ -1833,24 +1856,20 @@ impl KnimeNodeMapper {
                 let prompt = s.get("prompt").and_then(|v| v.as_str()).unwrap_or("Summarize this");
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let model = s.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o");
-                json!({"query": format!(
-                    "SELECT *, prompt('{}', {}) AS ai_response FROM input_0", model, col)})
+                json!({"query": format!("SELECT *, prompt({}, {}) AS ai_response FROM input_0", sq_lit(model), col)})
             });
         def!("org.knime.base.node.mine.ai.EmbeddingNodeFactory", "core.sql",
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let model = s.get("embedding_model").and_then(|v| v.as_str()).unwrap_or("text-embedding-3-small");
-                json!({"query": format!(
-                    "SELECT *, embed('{}', {}) AS embedding FROM input_0", model, col)})
+                json!({"query": format!("SELECT *, embed({}, {}) AS embedding FROM input_0", sq_lit(model), col)})
             });
         def!("org.knime.base.node.mine.ai.VectorSearchNodeFactory", "core.sql",
             |s| {
                 let query = s.get("search_query").and_then(|v| v.as_str()).unwrap_or("");
                 let col = s.get("embedding_column").and_then(|v| v.as_str()).unwrap_or("");
                 let k = s.get("top_k").and_then(|v| v.as_str()).unwrap_or("10");
-                json!({"query": format!(
-                    "SELECT *, array_cosine_similarity({}, embed('text-embedding-3-small', '{}')) AS similarity FROM input_0 ORDER BY similarity DESC LIMIT {}",
-                    col, query, k)})
+                json!({"query": format!("SELECT *, array_cosine_similarity({}, embed('text-embedding-3-small', {})) AS similarity FROM input_0 ORDER BY similarity DESC LIMIT {}", col, sq_lit(query), k)})
             });
 
         // ─── flockmtl (LLM + RAG bridge) ───
@@ -1859,9 +1878,7 @@ impl KnimeNodeMapper {
                 let prompt = s.get("prompt").and_then(|v| v.as_str()).unwrap_or("Answer based on context");
                 let context = s.get("context_column").and_then(|v| v.as_str()).unwrap_or("");
                 let model = s.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o");
-                json!({"query": format!(
-                    "SELECT *, llm_complete('{}', {} || '\n\n' || '{}') AS rag_response FROM input_0",
-                    model, context, prompt)})
+                json!({"query": format!("SELECT *, llm_complete({}, {} || '\n\n' || {}) AS rag_response FROM input_0", sq_lit(model), context, sq_lit(prompt))})
             });
 
         // ═══════════════════════════════════════════════════════════════
@@ -1876,23 +1893,20 @@ impl KnimeNodeMapper {
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
                 let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
-                json!({"query": format!(
-                    "SELECT * FROM st_read('{}', layer='{}')", path, sheet)})
+                json!({"query": format!("SELECT * FROM st_read({}, layer={})", sq_lit(path), sq_lit(sheet))})
             }, "Fallback: DuckDB excel extension → read_xlsx()");
 
         def!("org.knime.ext.poi3.node.io.filehandling.excel.writer.ExcelTableWriterNodeFactory2", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/output.xlsx");
-                json!({"query": format!(
-                    "COPY (SELECT * FROM input_0) TO '{}' (FORMAT xlsx)", path)})
+                json!({"query": format!("COPY (SELECT * FROM input_0) TO {} (FORMAT xlsx)", sq_lit(path))})
             });
 
         def!("org.knime.base.node.io.filehandling.ExcelReaderNodeFactory2", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
                 let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
-                json!({"query": format!(
-                    "SELECT * FROM st_read('{}', layer='{}')", path, sheet)})
+                json!({"query": format!("SELECT * FROM st_read({}, layer={})", sq_lit(path), sq_lit(sheet))})
             });
 
         // ─── Excel (community) — sheetreader / rusty_sheet / spxlsx ───
@@ -1900,16 +1914,14 @@ impl KnimeNodeMapper {
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
                 let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
-                json!({"query": format!(
-                    "SELECT * FROM sheetreader('{}', sheet='{}')", path, sheet)})
+                json!({"query": format!("SELECT * FROM sheetreader({}, sheet={})", sq_lit(path), sq_lit(sheet))})
             });
 
         def!("org.knime.ext.sharepoint.SharePointExcelReaderNodeFactory", "core.sql",
             |s| {
                 let site = s.get("site_url").and_then(|v| v.as_str()).unwrap_or("");
                 let file = s.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM spxlsx('{}', file='{}')", site, file)})
+                json!({"query": format!("SELECT * FROM spxlsx({}, file={})", sq_lit(site), sq_lit(file))})
             });
 
         // ─── Azure Blob Storage (duckdb azure extension) ───
@@ -1918,15 +1930,13 @@ impl KnimeNodeMapper {
                 let container = s.get("container").and_then(|v| v.as_str()).unwrap_or("");
                 let account = s.get("account_name").and_then(|v| v.as_str()).unwrap_or("");
                 let path = s.get("blob_path").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM 'azure://{}/{}/{}'", account, container, path)})
+                json!({"query": format!("SELECT * FROM 'azure://{}/{}/{}'", sq_escape(account), sq_escape(container), sq_escape(path))})
             });
 
         def!("org.knime.base.node.io.cloud.AzureBlobReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM read_csv_auto('azure://{}')", path)})
+                json!({"query": format!("SELECT * FROM read_csv_auto('azure://{}')", sq_escape(path))})
             });
 
         // ─── GCS (Google Cloud Storage) ───
@@ -1934,52 +1944,46 @@ impl KnimeNodeMapper {
             |s| {
                 let bucket = s.get("bucket").and_then(|v| v.as_str()).unwrap_or("");
                 let path = s.get("object_path").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM 'gcs://{}/{}'", bucket, path)})
+                json!({"query": format!("SELECT * FROM 'gcs://{}/{}'", sq_escape(bucket), sq_escape(path))})
             });
 
         def!("org.knime.base.node.io.cloud.GCSReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM read_parquet('gcs://{}')", path)})
+                json!({"query": format!("SELECT * FROM read_parquet('gcs://{}')", sq_escape(path))})
             });
 
         // ─── Iceberg (Apache Iceberg) — duckdb iceberg extension ───
         def!("org.knime.base.node.io.lake.IcebergReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("table_path").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM iceberg_scan('{}')", path)})
+                json!({"query": format!("SELECT * FROM iceberg_scan({})", sq_lit(path))})
             });
 
         def!("org.knime.base.node.io.lake.IcebergWriterNodeFactory", "core.sql",
             |s| {
                 let path = s.get("table_path").and_then(|v| v.as_str()).unwrap_or("/tmp/iceberg_table");
-                json!({"query": format!(
-                    "COPY (SELECT * FROM input_0) TO '{}' (FORMAT iceberg)", path)})
+                json!({"query": format!("COPY (SELECT * FROM input_0) TO {} (FORMAT iceberg)", sq_lit(path))})
             });
 
         // ─── Delta Lake — duckdb delta extension ───
         def!("org.knime.base.node.io.lake.DeltaReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("table_path").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM delta_scan('{}')", path)})
+                json!({"query": format!("SELECT * FROM delta_scan({})", sq_lit(path))})
             });
 
         def!("org.knime.base.node.io.lake.DeltaWriterNodeFactory", "core.sql",
             |s| {
                 let path = s.get("table_path").and_then(|v| v.as_str()).unwrap_or("/tmp/delta_table");
-                json!({"query": format!(
-                    "COPY (SELECT * FROM input_0) TO '{}' (FORMAT delta)", path)})
+                json!({"query": format!("COPY (SELECT * FROM input_0) TO {} (FORMAT delta)", sq_lit(path))})
             });
 
         // ─── Lance columnar format — duckdb lance extension ───
         def!("org.knime.base.node.io.lake.LanceReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM '{}'", path)})
+                json!({"query": format!("SELECT * FROM {}", sq_lit(path))})
             });
 
         // ─── Unity Catalog — duckdb unity_catalog extension ───
@@ -1989,33 +1993,28 @@ impl KnimeNodeMapper {
                 let catalog = s.get("catalog").and_then(|v| v.as_str()).unwrap_or("main");
                 let schema = s.get("schema").and_then(|v| v.as_str()).unwrap_or("default");
                 let table = s.get("table").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "ATTACH '{}' AS uc (TYPE unity_catalog); SELECT * FROM uc.{}.{}.{}",
-                    endpoint, catalog, schema, table)})
+                json!({"query": format!("ATTACH {} AS uc (TYPE unity_catalog); SELECT * FROM uc.{}.{}.{}", sq_lit(endpoint), catalog, schema, table)})
             });
 
         // ─── Avro — duckdb avro extension ───
         def!("org.knime.base.node.io.filehandling.AvroReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_avro('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_avro({})", sq_lit(path))})
             });
 
         // ─── ODBC — duckdb odbc extension ───
         def!("org.knime.base.node.io.database.ODBCConnectorNodeFactory", "core.sql",
             |s| {
                 let dsn = s.get("dsn").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "ATTACH 'dsn={}' AS odbc_db (TYPE odbc)", dsn)})
+                json!({"query": format!("ATTACH 'dsn={}' AS odbc_db (TYPE odbc)", sq_escape(dsn))})
             });
 
         def!("org.knime.base.node.io.database.ODBCReaderNodeFactory", "core.sql",
             |s| {
                 let dsn = s.get("dsn").and_then(|v| v.as_str()).unwrap_or("");
                 let query = s.get("sql_string").and_then(|v| v.as_str()).unwrap_or("SELECT * FROM table");
-                json!({"query": format!(
-                    "ATTACH 'dsn={}' AS odbc_src (TYPE odbc); {}",
-                    dsn, query)})
+                json!({"query": format!("ATTACH 'dsn={}' AS odbc_src (TYPE odbc); {}", sq_escape(dsn), query)})
             });
 
         // ─── VSS Vector Similarity Search — duckdb vss extension ───
@@ -2041,21 +2040,20 @@ impl KnimeNodeMapper {
         def_fb!("org.knime.base.node.io.filehandling.YAMLReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_yaml('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_yaml({})", sq_lit(path))})
             }, "Fallback: SwanFlow Python UDF → PyYAML");
 
         // ─── PDF — duckdb pdf extension ───
         def_fb!("org.knime.base.node.io.filehandling.PDFReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_text('pdf://{}')", path)})
+                json!({"query": format!("SELECT * FROM read_text('pdf://{}')", sq_escape(path))})
             }, "Fallback: SwanFlow Python UDF → PyMuPDF / pdfplumber");
 
         def!("org.knime.base.node.io.filehandling.PDFTableReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM parquet_scan('{}')", path)})
+                json!({"query": format!("SELECT * FROM parquet_scan({})", sq_lit(path))})
             });
 
         // ─── H3 Geospatial Indexing — spatial extension H3 functions ───
@@ -2091,13 +2089,13 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.filehandling.StataReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_dta('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_dta({})", sq_lit(path))})
             });
 
         def!("org.knime.base.node.io.filehandling.SAS7BDATReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_sas('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_sas({})", sq_lit(path))})
             });
 
         // ─── Overture Maps — duckdb overture extension ───
@@ -2105,16 +2103,14 @@ impl KnimeNodeMapper {
             |s| {
                 let theme = s.get("theme").and_then(|v| v.as_str()).unwrap_or("places");
                 let bbox = s.get("bbox").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM overture('{}', bbox='{}')", theme, bbox)})
+                json!({"query": format!("SELECT * FROM overture({}, bbox={})", sq_lit(theme), sq_lit(bbox))})
             });
 
         // ─── GeoArrow — duckdb duck_geoarrow extension ───
         def!("org.knime.geospatial.nodes.geoarrow.GeoArrowReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT ST_AsText(geometry) AS wkt, * FROM read_parquet('{}')", path)})
+                json!({"query": format!("SELECT ST_AsText(geometry) AS wkt, * FROM read_parquet({})", sq_lit(path))})
             });
 
         // ─── Harbor — DuckDB HTTP server/client ───
@@ -2122,9 +2118,7 @@ impl KnimeNodeMapper {
             |s| {
                 let port = s.get("port").and_then(|v| v.as_str()).unwrap_or("42197");
                 let token = s.get("auth_token").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "ATTACH 'host=localhost port={} token={}' AS harbor_db (TYPE harbor)",
-                    port, token)})
+                json!({"query": format!("ATTACH 'host=localhost port={} token={}' AS harbor_db (TYPE harbor)", sq_escape(port), sq_escape(token))})
             });
 
         // ─── GeoIP — duckdb geoip extension ───
@@ -2140,16 +2134,14 @@ impl KnimeNodeMapper {
             |s| {
                 let server = s.get("mcp_server").and_then(|v| v.as_str()).unwrap_or("");
                 let tool = s.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM mcp_call('{}', '{}', input_0)", server, tool)})
+                json!({"query": format!("SELECT * FROM mcp_call({}, {}, input_0)", sq_lit(server), sq_lit(tool))})
             });
 
         // ─── OpenTelemetry — duckdb otlp extension ───
         def!("org.knime.base.node.monitor.OTLPReaderNodeFactory", "core.sql",
             |s| {
                 let endpoint = s.get("endpoint").and_then(|v| v.as_str()).unwrap_or("http://localhost:4318");
-                json!({"query": format!(
-                    "SELECT * FROM otlp_traces('{}')", endpoint)})
+                json!({"query": format!("SELECT * FROM otlp_traces({})", sq_lit(endpoint))})
             });
 
         // ─── ERPL Web — OData/GraphQL/REST SAP connector ───
@@ -2157,16 +2149,14 @@ impl KnimeNodeMapper {
             |s| {
                 let service = s.get("odata_service").and_then(|v| v.as_str()).unwrap_or("");
                 let entity = s.get("entity_set").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM odata_scan('{}/{}')", service, entity)})
+                json!({"query": format!("SELECT * FROM odata_scan('{}/{}')", sq_escape(service), sq_escape(entity))})
             });
 
         def!("org.knime.base.node.io.erpl.ERPLGraphQLReaderNodeFactory", "core.sql",
             |s| {
                 let endpoint = s.get("graphql_endpoint").and_then(|v| v.as_str()).unwrap_or("");
                 let query = s.get("query").and_then(|v| v.as_str()).unwrap_or("{ __typename }");
-                json!({"query": format!(
-                    "SELECT * FROM graphql_scan('{}', '{}')", endpoint, query)})
+                json!({"query": format!("SELECT * FROM graphql_scan({}, {})", sq_lit(endpoint), sq_lit(query))})
             });
 
         // ─── Web Macro / MiniJinja / Tera templating ───
@@ -2174,16 +2164,14 @@ impl KnimeNodeMapper {
             |s| {
                 let template = s.get("template").and_then(|v| v.as_str()).unwrap_or("");
                 let col = s.get("context_column").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT *, minijinja_render('{}', {}) AS rendered FROM input_0", template, col)})
+                json!({"query": format!("SELECT *, minijinja_render({}, {}) AS rendered FROM input_0", sq_lit(template), col)})
             });
 
         // ─── Data Diff — duckdb duck_diff extension ───
         def!("org.knime.base.node.preproc.diff.DataDiffNodeFactory", "core.sql",
             |s| {
                 let pk = s.get("primary_key").and_then(|v| v.as_str()).unwrap_or("id");
-                json!({"query": format!(
-                    "SELECT * FROM duck_diff(input_0, input_1, '{}')", pk)})
+                json!({"query": format!("SELECT * FROM duck_diff(input_0, input_1, {})", sq_lit(pk))})
             });
 
         // ─── DuckDB Events hook ───
@@ -2191,8 +2179,7 @@ impl KnimeNodeMapper {
             |s| {
                 let event = s.get("event_type").and_then(|v| v.as_str()).unwrap_or("query_finished");
                 let cmd = s.get("command").and_then(|v| v.as_str()).unwrap_or("echo 'query done'");
-                json!({"query": format!(
-                    "SELECT events_emit('{}', '{}') AS event_result", event, cmd)})
+                json!({"query": format!("SELECT events_emit({}, {}) AS event_result", sq_lit(event), sq_lit(cmd))})
             });
 
         // ─── Cron jobs in SQL — duckdb cronjob extension ───
@@ -2200,8 +2187,7 @@ impl KnimeNodeMapper {
             |s| {
                 let schedule = s.get("cron_expression").and_then(|v| v.as_str()).unwrap_or("0 * * * *");
                 let query = s.get("sql_query").and_then(|v| v.as_str()).unwrap_or("SELECT now()");
-                json!({"query": format!(
-                    "SELECT cronjob_schedule('{}', '{}') AS scheduled", schedule, query)})
+                json!({"query": format!("SELECT cronjob_schedule({}, {}) AS scheduled", sq_lit(schedule), sq_lit(query))})
             });
 
         // ─── Python UDF in SQL — duckdb python extension ───
@@ -2209,9 +2195,7 @@ impl KnimeNodeMapper {
             |s| {
                 let func_name = s.get("function_name").and_then(|v| v.as_str()).unwrap_or("my_udf");
                 let py_code = s.get("python_code").and_then(|v| v.as_str()).unwrap_or("return x * 2");
-                json!({"query": format!(
-                    "CREATE OR REPLACE FUNCTION {} (x) AS '{}' LANGUAGE python; SELECT * FROM input_0",
-                    func_name, py_code)})
+                json!({"query": format!("CREATE OR REPLACE FUNCTION {} (x) AS {} LANGUAGE python; SELECT * FROM input_0", func_name, sq_lit(py_code))})
             });
 
         // ═══════════════════════════════════════════════════════════════
@@ -2226,16 +2210,14 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.filehandling.ZIMReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM read_zim('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_zim({})", sq_lit(path))})
             });
 
         // ─── OpenStreetMap (osmium) ───
         def!("org.knime.geospatial.nodes.osm.OSMReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM read_osm('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_osm({})", sq_lit(path))})
             });
 
         // ─── Image → Vector Embeddings (pic2vec) ───
@@ -2243,8 +2225,7 @@ impl KnimeNodeMapper {
             |s| {
                 let path_col = s.get("image_path_column").and_then(|v| v.as_str()).unwrap_or("image_path");
                 let model = s.get("model").and_then(|v| v.as_str()).unwrap_or("vit_base_patch16_224");
-                json!({"query": format!(
-                    "SELECT *, pic2vec({}, '{}') AS img_embedding FROM input_0", path_col, model)})
+                json!({"query": format!("SELECT *, pic2vec({}, {}) AS img_embedding FROM input_0", path_col, sq_lit(model))})
             });
 
         // ─── In-Database Inference (infera) ───
@@ -2253,9 +2234,7 @@ impl KnimeNodeMapper {
                 let model_path = s.get("model_path").and_then(|v| v.as_str()).unwrap_or("/tmp/model.onnx");
                 let feat_cols = Self::parse_feats(s, "feature_columns");
                 let feat_args: Vec<String> = feat_cols.iter().map(|f| format!("\"{}\"", f)).collect();
-                json!({"query": format!(
-                    "SELECT *, infera_predict('{}', {}) AS prediction FROM input_0",
-                    model_path, feat_args.join(", "))})
+                json!({"query": format!("SELECT *, infera_predict({}, {}) AS prediction FROM input_0", sq_lit(model_path), feat_args.join(", "))})
             });
 
         // ─── Full-Text Search (DuckDB built-in FTS) ───
@@ -2263,17 +2242,14 @@ impl KnimeNodeMapper {
             |s| {
                 let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("documents");
                 let col = s.get("text_column").and_then(|v| v.as_str()).unwrap_or("content");
-                json!({"query": format!(
-                    "PRAGMA create_fts_index('{}', '{}', '*'); SELECT 'fts_index_created' AS status", table, col)})
+                json!({"query": format!("PRAGMA create_fts_index({}, {}, '*'); SELECT 'fts_index_created' AS status", sq_lit(table), sq_lit(col))})
             });
 
         def!("org.knime.base.node.text.FTSSearchNodeFactory", "core.sql",
             |s| {
                 let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("documents");
                 let query = s.get("search_query").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT *, fts_main_{}.match_bm25({}, '{}') AS score FROM {} WHERE score IS NOT NULL ORDER BY score DESC",
-                    table, "name", query, table)})
+                json!({"query": format!("SELECT *, fts_main_{}.match_bm25({}, {}) AS score FROM {} WHERE score IS NOT NULL ORDER BY score DESC", table, "name", sq_lit(query), table)})
             });
 
         // ─── JSONata — JSON transformation ───
@@ -2281,37 +2257,35 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let expr = s.get("jsonata_expression").and_then(|v| v.as_str()).unwrap_or("$");
-                json!({"query": format!(
-                    "SELECT *, jsonata({}, '{}') AS jsonata_result FROM input_0", col, expr)})
+                json!({"query": format!("SELECT *, jsonata({}, {}) AS jsonata_result FROM input_0", col, sq_lit(expr))})
             });
 
         // ─── DBF (dBase file) — read_dbf extension ───
         def!("org.knime.base.node.io.filehandling.DBFFileReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_dbf('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_dbf({})", sq_lit(path))})
             });
 
         // ─── AnnData (single-cell genomics) — anndata extension ───
         def!("org.knime.bioinformatics.node.io.AnnDataReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_h5ad('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_h5ad({})", sq_lit(path))})
             });
 
         // ─── Eurostat ───
         def!("org.knime.base.node.io.eurostat.EurostatReaderNodeFactory", "core.sql",
             |s| {
                 let dataset = s.get("dataset_code").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM eurostat('{}')", dataset)})
+                json!({"query": format!("SELECT * FROM eurostat({})", sq_lit(dataset))})
             });
 
         // ─── PRQL — alternative query language ───
         def!("org.knime.base.node.query.PRQLQueryNodeFactory", "core.sql",
             |s| {
                 let prql = s.get("prql_query").and_then(|v| v.as_str()).unwrap_or("from input_0");
-                json!({"query": format!("PRQL '{}' AS (SELECT * FROM input_0)", prql)})
+                json!({"query": format!("PRQL {} AS (SELECT * FROM input_0)", sq_lit(prql))})
             });
 
         // ─── Substrait query plan export → ducklink WASM component ───
@@ -2326,16 +2300,14 @@ impl KnimeNodeMapper {
             |s| {
                 let url = s.get("start_url").and_then(|v| v.as_str()).unwrap_or("");
                 let depth = s.get("max_depth").and_then(|v| v.as_str()).unwrap_or("2");
-                json!({"query": format!(
-                    "SELECT * FROM crawl('{}', max_depth={})", url, depth)})
+                json!({"query": format!("SELECT * FROM crawl({}, max_depth={})", sq_lit(url), depth)})
             });
 
         // ─── Sitemap Parser ───
         def!("org.knime.base.node.io.web.SitemapReaderNodeFactory", "core.sql",
             |s| {
                 let url = s.get("sitemap_url").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM read_sitemap('{}')", url)})
+                json!({"query": format!("SELECT * FROM read_sitemap({})", sq_lit(url))})
             });
 
         // ─── Web Markup Parser (webbed — HTML/XML SAX) ───
@@ -2343,7 +2315,7 @@ impl KnimeNodeMapper {
             |s| {
                 let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let xpath = s.get("xpath").and_then(|v| v.as_str()).unwrap_or("//table");
-                json!({"query": format!("SELECT * FROM webbed('{}', '{}')", url, xpath)})
+                json!({"query": format!("SELECT * FROM webbed({}, {})", sq_lit(url), sq_lit(xpath))})
             });
 
         // ─── Tera Templating ───
@@ -2351,8 +2323,7 @@ impl KnimeNodeMapper {
             |s| {
                 let template = s.get("template").and_then(|v| v.as_str()).unwrap_or("");
                 let data_col = s.get("data_column").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT *, tera_render('{}', {}) AS report FROM input_0", template, data_col)})
+                json!({"query": format!("SELECT *, tera_render({}, {}) AS report FROM input_0", sq_lit(template), data_col)})
             });
 
         // ─── ULID Generation (not yet a DuckDB extension) ───
@@ -2393,8 +2364,7 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.streaming.RawJSONIngestNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM rawduck_ingest('{}')", path)})
+                json!({"query": format!("SELECT * FROM rawduck_ingest({})", sq_lit(path))})
             });
 
         // ─── Chinese SQL query node → core.sql passthrough (chsql ClickHouse extension exists in community registry but not downloadable for DuckDB 1.5.2)
@@ -2423,7 +2393,7 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.filehandling.VortexReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT * FROM read_vortex('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_vortex({})", sq_lit(path))})
             });
 
         // ─── Altertable Lakehouse ───
@@ -2431,8 +2401,7 @@ impl KnimeNodeMapper {
             |s| {
                 let endpoint = s.get("endpoint").and_then(|v| v.as_str()).unwrap_or("");
                 let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM altertable_scan('{}', '{}')", endpoint, table)})
+                json!({"query": format!("SELECT * FROM altertable_scan({}, {})", sq_lit(endpoint), sq_lit(table))})
             });
 
         // ─── Hive Metastore ───
@@ -2440,8 +2409,7 @@ impl KnimeNodeMapper {
             |s| {
                 let uri = s.get("metastore_uri").and_then(|v| v.as_str()).unwrap_or("thrift://localhost:9083");
                 let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "ATTACH '{}' AS hive (TYPE hive); SELECT * FROM hive.{}", uri, table)})
+                json!({"query": format!("ATTACH {} AS hive (TYPE hive); SELECT * FROM hive.{}", sq_lit(uri), table)})
             });
 
         // ─── Delta Sharing ───
@@ -2451,16 +2419,14 @@ impl KnimeNodeMapper {
                 let share = s.get("share_name").and_then(|v| v.as_str()).unwrap_or("");
                 let schema = s.get("schema_name").and_then(|v| v.as_str()).unwrap_or("default");
                 let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM delta_share_scan('{}', '{}', '{}.{}')", endpoint, share, schema, table)})
+                json!({"query": format!("SELECT * FROM delta_share_scan({}, {}, '{}.{}')", sq_lit(endpoint), sq_lit(share), sq_escape(schema), sq_escape(table))})
             });
 
         // ─── DuckDB Lineage — OpenLineage emission ───
         def!("org.knime.base.node.monitor.DataLineageNodeFactory", "core.sql",
             |s| {
                 let backend = s.get("openlineage_backend").and_then(|v| v.as_str()).unwrap_or("http://localhost:5000");
-                json!({"query": format!(
-                    "SET duck_lineage_backend='{}'; SELECT * FROM input_0", backend)})
+                json!({"query": format!("SET duck_lineage_backend={}; SELECT * FROM input_0", sq_lit(backend))})
             });
 
         // ─── Additional KNIME factory variants ───
@@ -2469,7 +2435,7 @@ impl KnimeNodeMapper {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let op = Self::map_op(s.get("operator").and_then(|v| v.as_str()).unwrap_or("="));
                 let val = s.get("filter_value").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"expr": format!("{} {} {}", col, op, val)})
+                json!({"expr": format!("{} {} {}", col, op, sq_lit(val))})
             });
 
         def!("org.knime.base.node.statistics.StatisticsNodeFactory", "core.transform.profiler",
@@ -2497,24 +2463,21 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("html_column").and_then(|v| v.as_str()).unwrap_or("html");
                 let selector = s.get("css_selector").and_then(|v| v.as_str()).unwrap_or("body");
-                json!({"query": format!(
-                    "SELECT *, webbed_extract({}, '{}') AS extracted FROM input_0", col, selector)})
+                json!({"query": format!("SELECT *, webbed_extract({}, {}) AS extracted FROM input_0", col, sq_lit(selector))})
             });
 
         // ─── KNIME Big Data / Spark bridge ───
         def!("org.knime.bigdata.node.spark.SparkReaderNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM read_parquet('{}')", path)})
+                json!({"query": format!("SELECT * FROM read_parquet({})", sq_lit(path))})
             });
 
         // ─── KNIME Image Processing ───
         def!("org.knime.image.base.node.reader.ImageReader2NodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT *, read_blob('{}') AS image_data FROM input_0", path)})
+                json!({"query": format!("SELECT *, read_blob({}) AS image_data FROM input_0", sq_lit(path))})
             });
 
         // ─── JSON Schema validation ───
@@ -2522,24 +2485,21 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("json_column").and_then(|v| v.as_str()).unwrap_or("");
                 let schema = s.get("json_schema").and_then(|v| v.as_str()).unwrap_or("{}");
-                json!({"query": format!(
-                    "SELECT *, json_schema_valid({}, '{}') AS is_valid FROM input_0", col, schema)})
+                json!({"query": format!("SELECT *, json_schema_valid({}, {}) AS is_valid FROM input_0", col, sq_lit(schema))})
             });
 
         // ─── DuckDB Table Inspector ───
         def!("org.knime.base.node.meta.dbinspector.TableInspectorNodeFactory", "core.sql",
             |s| {
                 let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("input_0");
-                json!({"query": format!(
-                    "SELECT * FROM table_inspector('{}')", table)})
+                json!({"query": format!("SELECT * FROM table_inspector({})", sq_lit(table))})
             });
 
         // ─── DryRun — estimate scan cost ───
         def!("org.knime.base.node.optimizer.DryRunEstimatorNodeFactory", "core.sql",
             |s| {
                 let table = s.get("table_name").and_then(|v| v.as_str()).unwrap_or("input_0");
-                json!({"query": format!(
-                    "SELECT dryrun_estimate('SELECT * FROM {}') AS scan_bytes", table)})
+                json!({"query": format!("SELECT dryrun_estimate('SELECT * FROM {}') AS scan_bytes", sq_escape(table))})
             });
 
         // ─── LabKey Server reader ───
@@ -2548,8 +2508,7 @@ impl KnimeNodeMapper {
                 let server = s.get("server_url").and_then(|v| v.as_str()).unwrap_or("");
                 let schema = s.get("schema_name").and_then(|v| v.as_str()).unwrap_or("study");
                 let query = s.get("query_name").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM duck_lk('{}', '{}', '{}')", server, schema, query)})
+                json!({"query": format!("SELECT * FROM duck_lk({}, {}, {})", sq_lit(server), sq_lit(schema), sq_lit(query))})
             });
 
         // ─── GSheet — Google Sheets (no native extension; use cloudfs gdfs) ───
@@ -2571,8 +2530,7 @@ impl KnimeNodeMapper {
                 let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let key_id = s.get("key_pair_id").and_then(|v| v.as_str()).unwrap_or("");
                 let key_path = s.get("private_key_path").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!(
-                    "SELECT * FROM read_csv_auto('{}')", url)})
+                json!({"query": format!("SELECT * FROM read_csv_auto({})", sq_lit(url))})
             });
 
         // ─── DuckDB HTTPFS with caching ───
@@ -2580,8 +2538,7 @@ impl KnimeNodeMapper {
             |s| {
                 let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let ttl = s.get("cache_ttl_seconds").and_then(|v| v.as_str()).unwrap_or("3600");
-                json!({"query": format!(
-                    "SELECT * FROM read_parquet('cache_httpfs://{}?ttl={}')", url, ttl)})
+                json!({"query": format!("SELECT * FROM read_parquet('cache_httpfs://{}?ttl={}')", sq_escape(url), sq_escape(ttl))})
             });
 
         // ─── Geo-tagged raster analytics (raquet) ───
@@ -2589,8 +2546,7 @@ impl KnimeNodeMapper {
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
                 let band = s.get("band").and_then(|v| v.as_str()).unwrap_or("1");
-                json!({"query": format!(
-                    "SELECT *, raquet_read('{}', band={}) AS raster_data FROM input_0", path, band)})
+                json!({"query": format!("SELECT *, raquet_read({}, band={}) AS raster_data FROM input_0", sq_lit(path), band)})
             });
 
         // ─── Astro — astronomical calculations ───
@@ -2606,8 +2562,7 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.database.FirebirdConnectorNodeFactory", "core.sql",
             |s| {
                 let path = s.get("database_path").and_then(|v| v.as_str()).unwrap_or("/tmp/db.fdb");
-                json!({"query": format!(
-                    "ATTACH '{}' AS fdb (TYPE firebird)", path)})
+                json!({"query": format!("ATTACH {} AS fdb (TYPE firebird)", sq_lit(path))})
             });
 
         // ═══════════════════════════════════════════════════════════════
@@ -2620,7 +2575,7 @@ impl KnimeNodeMapper {
             |s| {
                 let dir = s.get("directory").and_then(|v| v.as_str()).unwrap_or("");
                 let pattern = s.get("file_pattern").and_then(|v| v.as_str()).unwrap_or("*");
-                json!({"query": format!("SELECT * FROM glob('{}{}')", dir, pattern)})
+                json!({"query": format!("SELECT * FROM glob('{}{}')", sq_escape(dir), sq_escape(pattern))})
             });
 
         // ─── Regex extractor ───
@@ -2628,8 +2583,7 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let pattern = s.get("pattern").and_then(|v| v.as_str()).unwrap_or(".*");
-                json!({"query": format!(
-                    "SELECT *, regexp_extract(\"{}\", '{}') AS extracted FROM input_0", col, pattern)})
+                json!({"query": format!("SELECT *, regexp_extract(\"{}\", {}) AS extracted FROM input_0", col, sq_lit(pattern))})
             });
 
         // ─── Row Aggregator → string_agg ───
@@ -2640,7 +2594,7 @@ impl KnimeNodeMapper {
                 let sep = s.get("separator").and_then(|v| v.as_str()).unwrap_or(",");
                 let agg_func = s.get("aggregation_method").and_then(|v| v.as_str()).unwrap_or("Concatenate");
                 let func = if agg_func == "Concatenate" {
-                    format!("string_agg(\"{}\", '{}')", agg_col, sep)
+                    format!("string_agg(\"{}\", {})", agg_col, sq_lit(sep))
                 } else {
                     format!("{}(\"{}\")", agg_func, agg_col)
                 };
@@ -2653,8 +2607,7 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let delim = s.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
-                json!({"query": format!(
-                    "SELECT *, UNNEST(string_split(\"{}\", '{}')) AS split_value FROM input_0", col, delim)})
+                json!({"query": format!("SELECT *, UNNEST(string_split(\"{}\", {})) AS split_value FROM input_0", col, sq_lit(delim))})
             });
 
         // ─── Multi-Column Math Expression ───
@@ -2779,7 +2732,7 @@ impl KnimeNodeMapper {
                 let cols_str = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
                 let cols: Vec<&str> = cols_str.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
                 let sep = s.get("separator").and_then(|v| v.as_str()).unwrap_or("_");
-                let concat = cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(&format!(" || '{}' || ", sep));
+                let concat = cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(&format!(" || {} || ", sq_lit(sep)));
                 json!({"query": format!("SELECT *, {} AS combined FROM input_0", concat)})
             });
 
@@ -2819,13 +2772,17 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.image.readimage.ReadImageFromUrlNodeFactory", "core.sql",
             |s| {
                 let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"query": format!("SELECT *, read_blob('{}') AS image_data FROM input_0", url)})
+                json!({"query": format!("SELECT *, read_blob({}) AS image_data FROM input_0", sq_lit(url))})
             });
 
         // ─── CSV Writer v2 ───
-        def!("org.knime.base.node.io.filehandling.csv.writer.CSVWriter2NodeFactory", "core.io.csv_read",
-            |s| json!({"path": s.get("file_name").and_then(|v| v.as_str()).unwrap_or(""),
-                       "delimiter": s.get("column_delimiter").and_then(|v| v.as_str()).unwrap_or(",")}));
+        // P1-7 fix (audit 2026-10-19): same as CSVWriterNodeFactory above -
+        // no CSV write node exists, so fail-closed with a placeholder + reason.
+        def!("org.knime.base.node.io.filehandling.csv.writer.CSVWriter2NodeFactory", "core.missing.placeholder",
+            |s| json!({"reason": "CSV Writer 无对应写节点（SwanFlow 无 core.io.csv_write），输出不会落盘",
+                       "knime_factory": "org.knime.base.node.io.filehandling.csv.writer.CSVWriter2NodeFactory",
+                       "path": s.get("file_name").and_then(|v| v.as_str()),
+                       "delimiter": s.get("column_delimiter").and_then(|v| v.as_str())}));
 
         // ─── Python Script v3 ───
         def!("org.knime.python3.scripting.nodes2.script.PythonScriptNodeFactory", "core.script.python",
@@ -2837,8 +2794,7 @@ impl KnimeNodeMapper {
             |s| {
                 let to = s.get("to").and_then(|v| v.as_str()).unwrap_or("");
                 let subject = s.get("subject").and_then(|v| v.as_str()).unwrap_or("SwanFlow notification");
-                json!({"query": format!(
-                    "SELECT *, 'EMAIL: {} | {}' AS email_status FROM input_0", to, subject)})
+                json!({"query": format!("SELECT *, 'EMAIL: {} | {}' AS email_status FROM input_0", sq_escape(to), sq_escape(subject))})
             });
 
         // ─── Breakpoint ───
@@ -2865,7 +2821,7 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.renderer2image.Renderer2ImageNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/output.png");
-                json!({"query": format!("COPY (SELECT * FROM input_0) TO '{}'", path)})
+                json!({"query": format!("COPY (SELECT * FROM input_0) TO {}", sq_lit(path))})
             });
 
         // ─── Table Row to Image ───
@@ -2954,8 +2910,7 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let pattern = s.get("pattern").and_then(|v| v.as_str()).unwrap_or(".*");
-                json!({"query": format!(
-                    "SELECT *, regexp_extract(\"{}\", '{}') AS substring FROM input_0", col, pattern)})
+                json!({"query": format!("SELECT *, regexp_extract(\"{}\", {}) AS substring FROM input_0", col, sq_lit(pattern))})
             });
 
         // ─── Regex To List ───
@@ -2963,8 +2918,7 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let pattern = s.get("pattern").and_then(|v| v.as_str()).unwrap_or(",");
-                json!({"query": format!(
-                    "SELECT *, string_split(regexp_replace(\"{}\", '{}', '|'), '|') AS list_val FROM input_0", col, pattern)})
+                json!({"query": format!("SELECT *, string_split(regexp_replace(\"{}\", {}, '|'), '|') AS list_val FROM input_0", col, sq_lit(pattern))})
             });
 
         // ─── Lag Column (alternative factory name) ───
@@ -3027,7 +2981,12 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let vals = s.get("included_values").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"expr": format!("\"{}\" IN ({})", col, vals)})
+                if vals.trim().is_empty() {
+                    json!({"error": "NominalValueRowFilter: included_values 配置缺失，拒绝生成空 IN()（fail-closed）"})
+                } else {
+                    let vals_list = vals.split(',').map(|v| sq_lit(v.trim())).collect::<Vec<_>>().join(", ");
+                    json!({"expr": format!("\"{}\" IN ({})", col, vals_list)})
+                }
             });
 
         // ─── Column Appender v2 ───
@@ -3039,7 +2998,7 @@ impl KnimeNodeMapper {
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("");
                 let sheet = s.get("sheet_name").and_then(|v| v.as_str()).unwrap_or("Sheet1");
-                json!({"query": format!("SELECT * FROM st_read('{}', layer='{}')", path, sheet)})
+                json!({"query": format!("SELECT * FROM st_read({}, layer={})", sq_lit(path), sq_lit(sheet))})
             });
 
         // ─── DateTime Shift (time series alt) ───
@@ -3048,8 +3007,7 @@ impl KnimeNodeMapper {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let shift = s.get("shift_amount").and_then(|v| v.as_str()).unwrap_or("1");
                 let unit = s.get("shift_unit").and_then(|v| v.as_str()).unwrap_or("DAY");
-                json!({"query": format!(
-                    "SELECT *, CAST({} AS DATE) + INTERVAL '{}' {} AS shifted FROM input_0", col, shift, unit)})
+                json!({"query": format!("SELECT *, CAST({} AS DATE) + INTERVAL {} {} AS shifted FROM input_0", col, sq_lit(shift), unit)})
             });
 
         // ─── DateTime Difference ───
@@ -3058,8 +3016,7 @@ impl KnimeNodeMapper {
                 let col1 = s.get("start_column").and_then(|v| v.as_str()).unwrap_or("");
                 let col2 = s.get("end_column").and_then(|v| v.as_str()).unwrap_or("");
                 let unit = s.get("unit").and_then(|v| v.as_str()).unwrap_or("day");
-                json!({"query": format!(
-                    "SELECT *, datediff('{}', CAST({} AS TIMESTAMP), CAST({} AS TIMESTAMP)) AS diff FROM input_0", unit, col1, col2)})
+                json!({"query": format!("SELECT *, datediff({}, CAST({} AS TIMESTAMP), CAST({} AS TIMESTAMP)) AS diff FROM input_0", sq_lit(unit), col1, col2)})
             });
 
         // ─── Moving Average (time series alt) ───
@@ -3200,7 +3157,7 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.filehandling.imagewriter.table.ImageWriterTableNodeFactory", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/output.png");
-                json!({"query": format!("COPY (SELECT * FROM input_0) TO '{}'", path)})
+                json!({"query": format!("COPY (SELECT * FROM input_0) TO {}", sq_lit(path))})
             });
 
         // ─── Data Explorer → DuckDB SUMMARIZE ───
@@ -3254,7 +3211,7 @@ impl KnimeNodeMapper {
                 let cols_str = s.get("included_column_names").and_then(|v| v.as_str()).unwrap_or("");
                 let cols: Vec<&str> = cols_str.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
                 let sep = s.get("separator").and_then(|v| v.as_str()).unwrap_or("_");
-                let concat = cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(&format!(" || '{}' || ", sep));
+                let concat = cols.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(&format!(" || {} || ", sq_lit(sep)));
                 json!({"query": format!("SELECT *, {} AS merged FROM input_0", concat)})
             });
 
@@ -3266,9 +3223,7 @@ impl KnimeNodeMapper {
                 let amount = s.get("amount").and_then(|v| v.as_str()).unwrap_or("1");
                 let unit = s.get("unit").and_then(|v| v.as_str()).unwrap_or("DAY");
                 let op = if operation == "ADD" { "+" } else { "-" };
-                json!({"query": format!(
-                    "SELECT *, CAST({} AS DATE) {} INTERVAL '{}' {} AS modified FROM input_0",
-                    col, op, amount, unit)})
+                json!({"query": format!("SELECT *, CAST({} AS DATE) {} INTERVAL {} {} AS modified FROM input_0", col, op, sq_lit(amount), unit)})
             });
 
         // ─── Empty Table Switch ───
@@ -3301,7 +3256,7 @@ impl KnimeNodeMapper {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let op = Self::map_op(s.get("operator").and_then(|v| v.as_str()).unwrap_or("="));
                 let val = s.get("filter_value").and_then(|v| v.as_str()).unwrap_or("");
-                json!({"expr": format!("\"{}\" {} {}", col, op, val)})
+                json!({"expr": format!("\"{}\" {} {}", col, op, sq_lit(val))})
             });
 
         def!("org.knime.base.node.preproc.colconvert.numbertostring2.NumberToString2NodeFactory", "core.sql",
@@ -3319,7 +3274,7 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.filehandling.pmml.reader.PMMLReaderNodeFactory3", "core.sql",
             |s| {
                 let path = s.get("file_name").and_then(|v| v.as_str()).unwrap_or("/tmp/model.pmml");
-                json!({"query": format!("SELECT * FROM ml_load_xgboost('imported_model', '{}')", path)})
+                json!({"query": format!("SELECT * FROM ml_load_xgboost('imported_model', {})", sq_lit(path))})
             });
 
         def!("org.knime.base.node.meta.looper.LoopStartIntervalDynamicNodeFactory", "core.sql",
@@ -3349,16 +3304,23 @@ impl KnimeNodeMapper {
                 let amount = s.get("amount").and_then(|v| v.as_str()).unwrap_or("1");
                 let unit = s.get("unit").and_then(|v| v.as_str()).unwrap_or("HOUR");
                 let op = if operation == "ADD" { "+" } else { "-" };
-                json!({"query": format!(
-                    "SELECT *, CAST({} AS TIMESTAMP) {} INTERVAL '{}' {} AS modified FROM input_0", col, op, amount, unit)})
+                json!({"query": format!("SELECT *, CAST({} AS TIMESTAMP) {} INTERVAL {} {} AS modified FROM input_0", col, op, sq_lit(amount), unit)})
             });
 
+        // P1-7 fix (audit 2026-10-19): removed the hardcoded silent
+        // 2000-01-01 / 2099-12-31 defaults; missing config -> explicit `error`
+        // field (core.transform.filter validation requires `expr` -> fail-closed).
         def!("org.knime.time.node.filter.datetimebasedrowfilter.DateTimeBasedRowFilterNodeFactory", "core.transform.filter",
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
-                let start = s.get("start_date").and_then(|v| v.as_str()).unwrap_or("'2000-01-01'");
-                let end = s.get("end_date").and_then(|v| v.as_str()).unwrap_or("'2099-12-31'");
-                json!({"expr": format!("\"{}\" BETWEEN {} AND {}", col, start, end)})
+                let start = s.get("start_date").and_then(|v| v.as_str());
+                let end = s.get("end_date").and_then(|v| v.as_str());
+                match (start, end) {
+                    (Some(start), Some(end)) => {
+                        json!({"expr": format!("\"{}\" BETWEEN {} AND {}", col, sq_lit(start), sq_lit(end))})
+                    }
+                    _ => json!({"error": "DateTimeBasedRowFilter: start_date/end_date 配置缺失，拒绝回退到硬编码日期范围（fail-closed）"}),
+                }
             });
 
         def!("com.vernalis.nodes.collection.list2set.List2SetNodeFactory", "core.sql",
@@ -3420,15 +3382,13 @@ impl KnimeNodeMapper {
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let delim = s.get("delimiter").and_then(|v| v.as_str()).unwrap_or(",");
-                json!({"query": format!(
-                    "SELECT *, UNNEST(string_split(\"{}\", '{}')) AS expanded FROM input_0", col, delim)})
+                json!({"query": format!("SELECT *, UNNEST(string_split(\"{}\", {})) AS expanded FROM input_0", col, sq_lit(delim))})
             });
 
         def!("org.knime.base.node.preproc.tablediff.TableDifferNodeFactory", "core.sql",
             |s| {
                 let pk = s.get("primary_key").and_then(|v| v.as_str()).unwrap_or("id");
-                json!({"query": format!(
-                    "SELECT * FROM duck_diff(input_0, input_1, '{}')", pk)})
+                json!({"query": format!("SELECT * FROM duck_diff(input_0, input_1, {})", sq_lit(pk))})
             });
 
         def!("org.knime.datageneration.counter.CounterGenerationNodeFactory", "core.sql",
@@ -3807,5 +3767,154 @@ impl KnimeNodeMapper {
 impl Default for KnimeNodeMapper {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! P1-7 regression tests (audit 2026-10-19, docs/reviews/2026-10-19-arkflow-paradigm-audit.md).
+
+    use super::*;
+
+    fn lookup<'a>(m: &'a KnimeNodeMapper, factory: &str) -> &'a SwanFlowNodeDef {
+        m.type_map
+            .get(factory)
+            .unwrap_or_else(|| panic!("factory not registered: {}", factory))
+    }
+
+    /// P1-7 #1: CSV Writer must map to a write node or a placeholder -
+    /// it must NEVER map to the read node core.io.csv_read (silent output loss).
+    #[test]
+    fn csv_writer_maps_to_placeholder_not_csv_read() {
+        let m = KnimeNodeMapper::new();
+        for factory in [
+            "org.knime.base.node.io.filehandling.CSVWriterNodeFactory",
+            "org.knime.base.node.io.filehandling.csv.writer.CSVWriter2NodeFactory",
+        ] {
+            let def = lookup(&m, factory);
+            assert_ne!(
+                def.swanflow_type, "core.io.csv_read",
+                "CSV writer {} mapped to a READ node - output would be silently lost", factory
+            );
+            assert_eq!(def.swanflow_type, "core.missing.placeholder");
+            let cfg = (def.config_fn)(&json!({}));
+            let reason = cfg.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(reason.contains("无对应写节点"), "placeholder must carry a reason, got: {}", reason);
+        }
+    }
+
+    /// P1-7 #1 (sweep): no KNIME *Writer* factory may be mapped to a read node.
+    #[test]
+    fn no_writer_factory_maps_to_read_node() {
+        let m = KnimeNodeMapper::new();
+        for entry in m.list_all() {
+            if entry.factory.contains("Writer") {
+                assert!(
+                    entry.sw_type != "core.io.csv_read" && entry.sw_type != "core.io.parquet_read",
+                    "writer {} mapped to read node {}", entry.factory, entry.sw_type
+                );
+            }
+        }
+    }
+
+    /// P1-7 #2: DBUpdate must not emit the bare, always-invalid UPDATE SQL.
+    #[test]
+    fn db_update_produces_no_raw_update_sql() {
+        let m = KnimeNodeMapper::new();
+        let def = lookup(&m, "org.knime.base.node.io.database.DBUpdateNodeFactory");
+        assert_eq!(def.swanflow_type, "core.missing.placeholder");
+        let cfg = (def.config_fn)(&json!({"table_name": "t'x"}));
+        assert!(cfg.get("query").is_none(), "DBUpdate must not generate SQL: {:?}", cfg);
+        let reason = cfg.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(reason.contains("DB Update 暂不支持"), "missing reason: {}", reason);
+        assert!(!reason.contains("SET ..."), "invalid UPDATE literal leaked: {}", reason);
+    }
+
+    /// P1-7 #3: DateTimeRange must not silently fall back to hardcoded 2020 dates.
+    #[test]
+    fn datetime_range_missing_config_fails_closed() {
+        let m = KnimeNodeMapper::new();
+        let def = lookup(&m, "org.knime.time.node.create.datetimerange.DateTimeRangeNodeFactory");
+        for settings in [json!({}), json!({"start_column": "2024-01-01"}), json!({"end_column": "2024-12-31"})] {
+            let cfg = (def.config_fn)(&settings);
+            assert!(cfg.get("query").is_none(), "missing config must not produce a query: {:?}", cfg);
+            let s = serde_json::to_string(&cfg).unwrap();
+            assert!(!s.contains("2020"), "hardcoded 2020 date leaked: {}", s);
+            assert!(cfg.get("error").is_some(), "must carry an explicit error field: {:?}", cfg);
+        }
+        // Present config -> configured (escaped) values are used, no 2020 anywhere.
+        let cfg = (def.config_fn)(&json!({"start_column": "2024-01-01", "end_column": "2024-12-31"}));
+        let q = cfg.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(q.contains("'2024-01-01'") && q.contains("'2024-12-31'"), "query: {}", q);
+        assert!(!q.contains("2020"), "hardcoded 2020 date leaked: {}", q);
+    }
+
+    /// P1-7 #4: RowFilter config values containing `'` must be escaped in the SQL.
+    #[test]
+    fn row_filter_value_is_escaped() {
+        let m = KnimeNodeMapper::new();
+        let def = lookup(&m, "org.knime.base.node.preproc.filter.row.RowFilterNodeFactory");
+        let cfg = (def.config_fn)(&json!({"column_name": "name", "operator": "=", "filter_value": "O'Brien"}));
+        let expr = cfg.get("expr").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(expr, "name = 'O''Brien'", "unescaped/injected filter value: {}", expr);
+    }
+
+    /// P1-7 #4: HTTP request url/body containing `'` must be escaped in the SQL.
+    #[test]
+    fn http_request_values_are_escaped() {
+        let m = KnimeNodeMapper::new();
+        let get = lookup(&m, "org.knime.rest.nodes.GETRequestNodeFactory");
+        let cfg = (get.config_fn)(&json!({"url": "http://x/a'b"}));
+        let q = cfg.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(q.contains("'http://x/a''b'"), "GET query not escaped: {}", q);
+
+        let post = lookup(&m, "org.knime.rest.nodes.POSTRequestNodeFactory");
+        let cfg = (post.config_fn)(&json!({"url": "http://x", "body": "v'w"}));
+        let q = cfg.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(q.contains("body := 'v''w'"), "POST body not escaped: {}", q);
+    }
+
+    /// P1-7 #4: more SQL-literal sites must escape single quotes from config values.
+    #[test]
+    fn sql_literals_escape_config_quotes() {
+        let m = KnimeNodeMapper::new();
+        let qv = "a'b";
+        let cases: [(&str, serde_json::Value, &str); 4] = [
+            (
+                "org.knime.base.node.io.filestore.FileDownloadNodeFactory",
+                json!({"file_name": qv}),
+                "read_csv_auto('a''b')",
+            ),
+            (
+                "org.knime.base.node.io.filehandling.node.FileListDirectoryNodeFactory",
+                json!({"directory": qv}),
+                "glob('a''b**')",
+            ),
+            (
+                "org.knime.base.node.io.database.DBConnectorMySQLNodeFactory",
+                json!({"database_url": qv}),
+                "ATTACH 'a''b' AS mysql_db (TYPE mysql)",
+            ),
+            (
+                "org.knime.base.node.io.http.HttpRetrieverNodeFactory",
+                json!({"url": qv}),
+                "read_json_auto('a''b')",
+            ),
+        ];
+        for (factory, settings, expected) in cases {
+            let def = lookup(&m, factory);
+            let cfg = (def.config_fn)(&settings);
+            let q = cfg.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(q.contains(expected), "factory {}: expected {} in SQL, got: {}", factory, expected, q);
+        }
+    }
+
+    /// The escape helper itself: `''` doubles single quotes (DuckDB standard strings).
+    #[test]
+    fn escape_helper_doubles_single_quotes() {
+        assert_eq!(sq_escape("a'b"), "a''b");
+        assert_eq!(sq_escape("no quotes"), "no quotes");
+        assert_eq!(sq_lit("O'Brien"), "'O''Brien'");
+        assert_eq!(sq_lit(""), "''");
     }
 }

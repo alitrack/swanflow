@@ -831,11 +831,22 @@ impl SwanFlowEngine {
                 .and_then(|cp| cp.completed_levels.iter().max().map(|l| l + 1))
                 .unwrap_or(0);
 
+            // P1-2 fix: a node failure under ErrorMode::Fail (or retry
+            // exhaustion) must abort the run. The executor previously kept
+            // executing subsequent levels and even wrote "completed"
+            // checkpoints, so a crashed level could be silently skipped on
+            // resume while the run reported success.
+            let mut run_hard_failed = false;
+
             // STAGED TOPOLOGICAL EXECUTION: run each level stage in order
-            for (level, mut terminals) in stages.into_iter().enumerate() {
+            'staged_run: for (level, mut terminals) in stages.into_iter().enumerate() {
                 // Skip levels already completed in a previous interrupted run
                 if level < resume_from {
                     continue;
+                }
+                if run_hard_failed {
+                    // P1-2: stop consuming further levels after a hard failure.
+                    break 'staged_run;
                 }
                 eprintln!("DEBUG: Executing Stage Level {}", level);
                 terminals
@@ -972,13 +983,38 @@ impl SwanFlowEngine {
                         )])
                         .expect("collect batch build");
                         let table_name = crate::core::node_table_name(node_id);
-                        if let Ok(df) = ctx_shared.read_batches(vec![batch]) {
-                            let _ = ctx_shared.register_table(&table_name, df.into_view());
-                            let _ = tx.send(NodeEvent::Materialized {
-                                node_id,
-                                table_name,
-                                parquet_path: "".to_string(),
+                        // r4 C3: same hard-fail contract as the main staged path.
+                        let mat = ctx_shared
+                            .read_batches(vec![batch])
+                            .and_then(|df| {
+                                ctx_shared
+                                    .register_table(&table_name, df.into_view())
+                                    .map(|_| ())
                             });
+                        match mat {
+                            Ok(()) => {
+                                let _ = tx.send(NodeEvent::Materialized {
+                                    node_id,
+                                    table_name,
+                                    parquet_path: "".to_string(),
+                                });
+                            }
+                            Err(e) => {
+                                let diagnostic = NodeDiagnostic::new(
+                                    node_id,
+                                    node_type.clone(),
+                                    NodeErrorClass::Execution,
+                                    format!("Collect materialization failed: {}", e),
+                                );
+                                let _ = tx.send(NodeEvent::Error {
+                                    node_id,
+                                    message: diagnostic.to_event_message(),
+                                });
+                                // r4 C3: collect-mode materialization failure is
+                                // a hard error, same as the main staged path.
+                                run_hard_failed = true;
+                                continue;
+                            }
                         }
                         println!(
                             "DEBUG: Collect stage {} gathered {} cells",
@@ -1136,14 +1172,43 @@ impl SwanFlowEngine {
                                     if !batches.is_empty() {
                                         let table_name =
                                             crate::core::node_table_name(node_id);
-                                        if let Ok(df) = ctx_shared.read_batches(batches.clone()) {
-                                            let _ = ctx_shared
-                                                .register_table(&table_name, df.into_view());
-                                            let _ = tx.send(NodeEvent::Materialized {
-                                                node_id,
-                                                table_name,
-                                                parquet_path: "".to_string(), // In-memory for now
+                                        // P1-3 fix: materialization/registration
+                                        // failure is a HARD node error. The old
+                                        // `if let Ok(..)` + `let _ =` silently
+                                        // dropped the table while the node still
+                                        // reported Executed — downstream nodes
+                                        // then failed with "table not found"
+                                        // and the run completed "successfully".
+                                        let materialized = ctx_shared
+                                            .read_batches(batches.clone())
+                                            .and_then(|df| {
+                                                ctx_shared
+                                                    .register_table(&table_name, df.into_view())
+                                                    .map(|_| ())
                                             });
+                                        match materialized {
+                                            Ok(()) => {
+                                                let _ = tx.send(NodeEvent::Materialized {
+                                                    node_id,
+                                                    table_name,
+                                                    parquet_path: "".to_string(), // In-memory for now
+                                                });
+                                            }
+                                            Err(e) => {
+                                                let diagnostic = NodeDiagnostic::new(
+                                                    node_id,
+                                                    node_type.clone(),
+                                                    NodeErrorClass::Execution,
+                                                    format!("Materialization failed: {}", e),
+                                                );
+                                                let _ = tx.send(NodeEvent::Error {
+                                                    node_id,
+                                                    message: diagnostic.to_event_message(),
+                                                });
+                                                // P1-2/P1-3: abort the run.
+                                                run_hard_failed = true;
+                                                continue;
+                                            }
                                         }
                                     }
 
@@ -1245,12 +1310,16 @@ impl SwanFlowEngine {
                                                     node_id,
                                                     message: diagnostic.to_event_message(),
                                                 });
+                                                // P1-2: retry exhaustion is a hard failure.
+                                                run_hard_failed = true;
                                             }
                                             crate::core::graph::ErrorMode::Fail => {
                                                 let _ = tx.send(NodeEvent::Error {
                                                     node_id,
                                                     message: diagnostic.to_event_message(),
                                                 });
+                                                // P1-2: Fail policy must abort the run.
+                                                run_hard_failed = true;
                                             }
                                         }
                                     }
@@ -1321,6 +1390,11 @@ impl SwanFlowEngine {
                                                     node_id,
                                                     message: diagnostic.to_event_message(),
                                                 });
+                                                // r4 C2: this exec-fail branch
+                                                // (initial planning failed, replan
+                                                // succeeded, execution failed) also
+                                                // hard-fails the run.
+                                                run_hard_failed = true;
                                             }
                                         }
                                     }
@@ -1372,12 +1446,16 @@ impl SwanFlowEngine {
                                                     node_id,
                                                     message: diagnostic.to_event_message(),
                                                 });
+                                                // P1-2: retry exhaustion is a hard failure.
+                                                run_hard_failed = true;
                                             }
                                             crate::core::graph::ErrorMode::Fail => {
                                                 let _ = tx.send(NodeEvent::Error {
                                                     node_id,
                                                     message: diagnostic.to_event_message(),
                                                 });
+                                                // P1-2: Fail policy must abort the run.
+                                                run_hard_failed = true;
                                             }
                                         }
                                     }
@@ -1391,36 +1469,49 @@ impl SwanFlowEngine {
                 sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
 
                 // Save checkpoint after each level
-                let _ = cm.save_checkpoint(&checkpoint::EngineCheckpoint {
-                    run_id: df_run_id.clone(),
-                    workflow_hash: df_wf_name.clone(),
-                    workflow_name: df_wf_name.clone(),
-                    completed_levels: (0..=level).collect(),
-                    total_levels: df_total_levels,
-                    materialized_tables: std::collections::HashMap::new(),
-                    flow_vars: std::collections::HashMap::new(),
-                    started_at: "".to_string(),
-                    completed_at: None,
-                    digest_version: crate::core::engine::assets::DIGEST_VERSION,
-                });
+                // P1-2: never record a level as completed after a hard
+                // failure — the resume path must replay the failed level.
+                if !run_hard_failed {
+                    let _ = cm.save_checkpoint(&checkpoint::EngineCheckpoint {
+                        run_id: df_run_id.clone(),
+                        workflow_hash: df_wf_name.clone(),
+                        workflow_name: df_wf_name.clone(),
+                        completed_levels: (0..=level).collect(),
+                        total_levels: df_total_levels,
+                        materialized_tables: std::collections::HashMap::new(),
+                        flow_vars: std::collections::HashMap::new(),
+                        started_at: "".to_string(),
+                        completed_at: None,
+                        digest_version: crate::core::engine::assets::DIGEST_VERSION,
+                    });
+                }
             }
 
             // Final Sync to ensure results are visible to main thread
             sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
 
-            // Mark workflow as completed
-            let _ = cm.save_checkpoint(&checkpoint::EngineCheckpoint {
-                run_id: df_run_id,
-                workflow_hash: df_wf_name.clone(),
-                workflow_name: df_wf_name.clone(),
-                completed_levels: (0..df_total_levels).collect(),
-                total_levels: df_total_levels,
-                materialized_tables: std::collections::HashMap::new(),
-                flow_vars: std::collections::HashMap::new(),
-                started_at: "".to_string(),
-                completed_at: Some("".to_string()),
-                digest_version: crate::core::engine::assets::DIGEST_VERSION,
-            });
+            // P1-2: only mark the workflow completed when every level
+            // actually succeeded. A hard-failed run leaves the last
+            // checkpoint incomplete so resume replays the failed level.
+            if run_hard_failed {
+                let _ = tx.send(NodeEvent::Error {
+                    node_id: Uuid::nil(),
+                    message: "workflow run aborted: node failure (ErrorMode::Fail/retry-exhausted)".to_string(),
+                });
+            } else {
+                let _ = cm.save_checkpoint(&checkpoint::EngineCheckpoint {
+                    run_id: df_run_id,
+                    workflow_hash: df_wf_name.clone(),
+                    workflow_name: df_wf_name.clone(),
+                    completed_levels: (0..df_total_levels).collect(),
+                    total_levels: df_total_levels,
+                    materialized_tables: std::collections::HashMap::new(),
+                    flow_vars: std::collections::HashMap::new(),
+                    started_at: "".to_string(),
+                    completed_at: Some("".to_string()),
+                    digest_version: crate::core::engine::assets::DIGEST_VERSION,
+                });
+            }
             let cache_mgr = cache::CacheManager::new(&df_cache_dir, df_max_cache);
             cache_mgr.evict();
         });

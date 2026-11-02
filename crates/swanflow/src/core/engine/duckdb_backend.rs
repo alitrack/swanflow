@@ -36,6 +36,38 @@ impl fmt::Debug for DuckDBEngine {
     }
 }
 
+/// Depth-first walk of a LogicalPlan collecting table names referenced by
+/// TableScan nodes (used to recover node_<uuid> upstream tables for SqlProxy
+/// input aliasing on the DuckDB backend).
+/// If `s` starts with keyword `kw` (case-insensitive, followed by a
+/// non-identifier char), return the remainder after the keyword; else None.
+fn keyword_split<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
+    if s.len() < kw.len() {
+        return None;
+    }
+    if !s[..kw.len()].eq_ignore_ascii_case(kw) {
+        return None;
+    }
+    let after = &s[kw.len()..];
+    match after.chars().next() {
+        Some(c) if c.is_ascii_alphanumeric() || c == '_' => None,
+        _ => Some(after),
+    }
+}
+
+fn walk_plan_tables(
+    plan: &datafusion::logical_expr::LogicalPlan,
+    f: &mut dyn FnMut(&str),
+) {
+    use datafusion::logical_expr::LogicalPlan;
+    if let LogicalPlan::TableScan(scan) = plan {
+        f(scan.table_name.table());
+    }
+    for input in plan.inputs() {
+        walk_plan_tables(input, f);
+    }
+}
+
 impl DuckDBEngine {
     /// Open or create a DuckDB database at the given path.
     /// Use `":memory:"` for an in-memory database.
@@ -462,9 +494,107 @@ impl QueryEngine for DuckDBEngine {
                 }
             }
             LP::Extension(ext) => {
-                // For SwanFlow-specific logical nodes (MaterializerLogical, StateProbeLogical, etc.)
-                // we pass through to the inner plan — the extension nodes are no-ops for SQL compilation.
+                // P1-4 fix: extension nodes are NOT all no-ops. Treating every
+                // single-input extension as a pass-through silently dropped
+                // whole SQL transforms (e.g. SqlProxy carries a real query —
+                // compiling it as its input made the node a no-op and user
+                // SQL/writes vanished from the DuckDB pipeline).
+                // Pass-through is only correct for pure wrapper nodes; a
+                // node that carries its own computation must be compiled,
+                // and unknown carriers must fail loudly instead of
+                // disappearing.
+                if ext.node.name() == "SqlProxy" {
+                    // Deferred import: nodes module is part of the same crate.
+                    if let Some(proxy) =
+                        crate::nodes::sql::SqlProxyLogical::from_extension(ext)
+                    {
+// r4 C4 (pass-2): the DuckDB staged executor registers upstream
+                        // outputs as node_<uuid> tables, but SqlProxy SQL
+                        // references input_0..N aliases. Alias them as CTEs so
+                        // the compiled result stays a SINGLE statement —
+                        // execute_sql rejects multi-statement strings.
+                        // (WITH input_0 AS (SELECT * FROM node_x), ... <query>)
+                        let mut ctes: Vec<String> = Vec::new();
+                        for (i, input_plan) in proxy.inputs.iter().enumerate() {
+                            let mut upstream_table: Option<String> = None;
+                            walk_plan_tables(input_plan, &mut |name| {
+                                if upstream_table.is_none()
+                                    && name.starts_with("node_")
+                                {
+                                    upstream_table = Some(name.to_string());
+                                }
+                            });
+                            match upstream_table {
+                                Some(src) => ctes.push(format!(
+                                    "input_{i} AS (SELECT * FROM {src})"
+                                )),
+                                None => {
+                                    // Cannot recover an upstream table: fail
+                                    // loudly instead of running SQL against an
+                                    // unresolved input_0 (silent wrong data).
+                                    return Err(
+                                        datafusion::error::DataFusionError::Plan(
+                                            "SqlProxy on the DuckDB backend requires resolvable node_<uuid> inputs for input_0..N aliasing".to_string(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        let inlined =
+                            crate::core::engine::planner::inline_placeholders(
+                                &proxy.query,
+                                &proxy.params,
+                            );
+                        if ctes.is_empty() {
+                            // No inputs (source SQL node): query as-is.
+                            return Ok(inlined);
+                        }
+                        let cte_list = ctes.join(", ");
+                        let q_trim = inlined.trim_start();
+                        // Word-boundary-aware keyword checks (r4 pass-4): a
+                        // query starting with the IDENTIFIER "recursively" is
+                        // not a WITH RECURSIVE clause.
+                        let after_with = match keyword_split(q_trim, "WITH") {
+                            Some(rest) => rest,
+                            None => {
+                                return Ok(format!(
+                                    "WITH {} {}",
+                                    cte_list, inlined
+                                ));
+                            }
+                        };
+                        // Trim before the inner check (r4 pass-5): the
+                        // remainder after WITH normally starts with a space,
+                        // which would defeat the prefix match and splice the
+                        // CTEs before a dangling RECURSIVE keyword.
+                        let after_with_trim = after_with.trim_start();
+                        return match keyword_split(after_with_trim, "RECURSIVE") {
+                            Some(after_rec) => Ok(format!(
+                                "WITH RECURSIVE {},{}",
+                                cte_list,
+                                after_rec
+                            )),
+                            None => Ok(format!(
+                                "WITH {},{}",
+                                cte_list,
+                                after_with_trim
+                            )),
+                        }
+                    }
+                }
+                if ext.node.name() == "MissingNodePlaceholder" {
+                    // r4 C7a: placeholders must fail loudly on this backend too.
+                    // A single-input pass-through silently forwarded the input,
+                    // defeating the fail-closed mapper contract for KNIME
+                    // writer nodes (output would appear to succeed).
+                    return Err(datafusion::error::DataFusionError::Plan(
+                        "missing-node placeholder cannot execute on the DuckDB backend"
+                            .to_string(),
+                    ));
+                }
                 if ext.node.inputs().len() == 1 {
+                    // Wrapper nodes (MaterializerLogical, StateProbeLogical,
+                    // etc.) transparently forward to their single input.
                     self.compile_to_sql(&ext.node.inputs()[0])
                 } else {
                     Err(datafusion::error::DataFusionError::NotImplemented(format!(
@@ -1036,4 +1166,29 @@ mod tests {
         });
     }
 
+}
+
+#[cfg(test)]
+mod keyword_split_tests {
+    use super::keyword_split;
+
+    #[test]
+    fn matches_word_boundary() {
+        assert_eq!(
+            keyword_split("WITH RECURSIVE t AS (SELECT 1)", "WITH"),
+            Some(" RECURSIVE t AS (SELECT 1)")
+        );
+        // identifier lookalikes must NOT match the keyword
+        assert_eq!(
+            keyword_split("WITH recursively AS (SELECT 1)", "WITH"),
+            Some(" recursively AS (SELECT 1)")
+        );
+        assert_eq!(keyword_split("recursively t AS (SELECT 1)", "WITH"), None);
+        // inner RECURSIVE check on a trimmed remainder
+        assert_eq!(
+            keyword_split("RECURSIVE walk AS (SELECT 1)", "RECURSIVE"),
+            Some(" walk AS (SELECT 1)")
+        );
+        assert_eq!(keyword_split(" recursively AS (SELECT 1)", "RECURSIVE"), None);
+    }
 }
