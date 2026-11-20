@@ -1205,7 +1205,11 @@ impl SwanFlowEngine {
                                                     message: diagnostic.to_event_message(),
                                                 });
                                                 // P1-2/P1-3: abort the run.
-                                                continue;
+                                                // P2-15 fix: this is a terminal
+                                                // outcome — exit the retry loop
+                                                // (a bare `continue` used to
+                                                // RE-EXECUTE the node instead).
+                                                break 'retry_loop;
                                             }
                                         }
                                     }
@@ -1263,6 +1267,11 @@ impl SwanFlowEngine {
                                             }
                                         }
                                     }
+                                    // P2-15 fix: the SUCCESS arm must exit the
+                                    // retry loop. It previously fell through to
+                                    // the next iteration and re-executed the
+                                    // node forever (staged run never finished).
+                                    break 'retry_loop;
                                 }
                                 Err(e) => {
                                     let diagnostic = NodeDiagnostic::new(
@@ -1302,6 +1311,7 @@ impl SwanFlowEngine {
                                                     node_id
                                                 );
                                             }
+                                            // P2-15 fix: terminal arm — exit loop.
                                             crate::core::graph::ErrorMode::Retry(max) => {
                                                 if attempt_no < retry_max {
                                                     let delay_ms =
@@ -1337,6 +1347,11 @@ impl SwanFlowEngine {
                                                 // P1-2: Fail policy must abort the run.
                                             }
                                         }
+                                        // P2-15 fix: reaching here means a
+                                        // terminal arm (Skip / exhausted / Fail)
+                                        // ran — exit the retry loop instead of
+                                        // re-executing the node forever.
+                                        break 'retry_loop;
                                     }
                                 }
                             }
@@ -1372,6 +1387,10 @@ impl SwanFlowEngine {
                                                 node_id,
                                                 state: crate::nodes::NodeState::Executed,
                                             });
+                                            // P2-15 fix: replan-succeeded arm must
+                                            // also exit the retry loop (it used to
+                                            // fall through and re-execute forever).
+                                            break 'retry_loop;
                                         }
                                         Err(e) => {
                                             let diagnostic = NodeDiagnostic::new(
@@ -1454,6 +1473,7 @@ impl SwanFlowEngine {
                                                     node_id
                                                 );
                                             }
+                                            // P2-15 fix: terminal arm — exit loop.
                                             crate::core::graph::ErrorMode::Retry(max) => {
                                                 if attempt_no < retry_max {
                                                     let delay_ms =
@@ -1489,6 +1509,11 @@ impl SwanFlowEngine {
                                                 // P1-2: Fail policy must abort the run.
                                             }
                                         }
+                                        // P2-15 fix: reaching here means a
+                                        // terminal arm (Skip / exhausted / Fail)
+                                        // ran — exit the retry loop instead of
+                                        // re-executing the node forever.
+                                        break 'retry_loop;
                                     }
                                 }
                             }
