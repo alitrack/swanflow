@@ -87,3 +87,77 @@
 - 不修改 `query-engine`（`core.sql` 节点的注册/契约）与 `async-staged-execution`
   （stage 调度）的既有 spec；本 change 新增 `sql-group-by-correctness` 能力，
   只对"分组/聚合结果的正确性"这一横切性质负责。
+
+## 阶段 A 实测（2026-11-20，main @ 7eace18）
+
+### 0. 环境事实：默认 staged 执行路径在 main 上整体挂死（与 GROUP BY 无关，但阻塞 A1 命令）
+
+- 现象：`swanflow run <yaml>`（默认 `execute_workflow`，`crates/swanflow/src/core/engine/mod.rs:668`）
+  在**任何** workflow 上永不结束：节点首次执行成功后，`'retry_loop`（`mod.rs:1149-1497`，
+  由 `b0f9c85` 2026-10-19 P2-15 批次引入）成功分支**没有 `break`**——循环下一轮重跑同一节点，
+  第二次 `register_table(node_...)` 报 `The table ... already exists`（`mod.rs:1185-1204`，硬错误后
+  是裸 `continue`），无限重试；retry 耗尽/Fail 分支（`:1314-1338`）同样没有 `break`
+  （全文只有 2 处 `continue 'retry_loop`，0 处 `break`）。
+- 最小复现（仓库自带 example）：`timeout 60 target/debug/swanflow run examples/etl_flow.yaml` →
+  2 节点 workflow 挂死，日志 `.campaign/pi-sql/run/etlcheck/run_etl.log`。
+- 量化证据：A1 YAML 的 staged run 在 300s 内产生 **4584 次** "Recording materialization"、
+  **4583 次** "already exists" 错误（`.campaign/pi-sql/run/a1/run_a1.log`，约 15 次/秒空转）。
+- 可用路径：`--legacy-yaml`（`execute_yaml_workflow` → `compile_and_execute_node`，`mod.rs:2218`，
+  每节点恰执行一次、无 retry 循环）**可以完成**，且驱动的是同一个 `SwanFlowPlanner` 晚绑定
+  （`mod.rs:2339-2358`）。下表 CLI 证据均由 `--legacy-yaml` 采集。
+- 该挂死是独立于本 change 的既有缺陷（P2-15 实现缺 `break`），**不在阶段 A 修复范围**，
+  已在 REPORT 中单独上报协调者。
+
+### 1. 形状矩阵（真实数字，全部 2026-11-20 实测）
+
+| 形状 | 执行路径 | 组数 | 坍缩? | 证据文件 |
+|---|---|---|---|---|
+| A1 基线：duckdb_read(Utf8View) → core.sql GROUP BY → duckdb_write | legacy | 3（a=3,b=2,c=1） | 否 | `.campaign/pi-sql/run/a1/run_a1_legacy.log`；`duckdb repro_out.duckdb "SELECT * FROM groupby_out"` |
+| A1 同形状走默认 staged run | staged（execute_workflow） | — | N/A：P2-15 挂死，SqlProxy 节点从未被执行（§0） | `.campaign/pi-sql/run/a1/run_a1.log` |
+| A2a 物化：seed → duckdb_write → duckdb_read 回读 → GROUP BY | legacy | 3 | 否 | `.campaign/pi-sql/run/a2a_materialize/run_a2a_materialize.log` |
+| A2b **fan-out**：两个 core.sql 共享同一上游（P1-6 历史形状） | legacy | 每分支 3，两分支一致 | 否 | `.campaign/pi-sql/run/a2b_fanout/run_a2b_fanout.log` |
+| A2c DataFusion 字面量源（Utf8，SqlProxy→SqlProxy） | legacy | 3 | 否 | `.campaign/pi-sql/run/a2c_literal_source/run_a2c_literal_source.log` |
+| A2d 规模：1000 行 / 50 键 | legacy | 50（每组 n=20，总 1000，无异常组） | 否 | `.campaign/pi-sql/run/a2d_big/run_a2d_big.log` |
+| staged s1：duckdb_read(Utf8View) → GROUP BY（2 级） | staged 机器（测试驱动） | 3 | 否 | `tests/sql_group_by_collapse.rs::shape1_duckdb_source_groupby` |
+| staged s2：duckdb_read → filter → GROUP BY（3 级，stage 边界落在 SqlProxy 前、中间节点经 flow_metadata 物化） | 同上 | 3 | 否 | `::shape2_multistage_filter_before_groupby` |
+| staged s3：fan-out 两个 GROUP BY 同层（P1-6 形状，staged 顺序执行版） | 同上 | 各 3，分支一致 | 否 | `::shape3_fanout_two_sql_same_level` |
+| staged s4：字面量 Utf8 源（SqlProxy→SqlProxy） | 同上 | 3 | 否 | `::shape4_literal_utf8_sqlproxy_source` |
+| staged s5：parquet 文件源（真 Utf8） → GROUP BY | 同上 | 3 | 否 | `::shape5_parquet_utf8_source` |
+| staged s6：1000 行 / 50 键 | 同上 | 50×20 | 否 | `::shape6_big_1000_rows_50_keys` |
+| 既有单元探针（MemTable + into_view 镜像，非本阶段新增） | unit | 3（string+int） | 否 | `src/core/sql_collapse_probe.rs`（`cargo test -p swanflow --lib sql_collapse_probe`） |
+
+"staged 机器（测试驱动）"＝`tests/sql_group_by_collapse.rs::run_staged`：
+`WorkflowCompiler::with_cache_dir(true, ..).compile(..)`（同 `mod.rs:673-682`）＋每层
+`sync_metadata_to_context` 等价逻辑（同 `mod.rs:158-182`）＋与 `mod.rs:708-716` 逐字相同的
+`DefaultPhysicalPlanner::with_extension_planners([SwanFlowPlanner])`/`SwanFlowQueryPlanner`/
+`SessionStateBuilder` 栈＋`create_physical_plan`+`collect`（同 `mod.rs:1151-1158`）——
+即 `execute_workflow` 的每节点代码本体，唯一缺的是会挂死的 P2-15 循环本身。
+
+### 2. 一句话判定
+
+**历史 string GROUP BY 坍缩在 7eace18（2026-11-20）上不可复现**，排除的形状覆盖：
+DuckDB 回读（Utf8View）/ DataFusion 字面量（Utf8）/ parquet（Utf8）三种字符串源 ×
+2 级 / 3 级（中间物化）/ 同层 fan-out（P1-6 形状）/ 1000 行×50 键规模，
+CLI（legacy 路径）与 staged 编译器机器双路径均验证。最可能的历史触发器——
+**共享 ctx 的 `input_0` 别名互踩**（同 stage 多个 SqlProxy 注册同一别名）——已被
+**P1-6（`19868e1`，2026-10-19）的 per-proxy scratch `SessionContext` 修复**
+（`planner.rs:369-378`）移除：现在每个 proxy 的 `input_0` 注册在独立 scratch ctx，
+别名共享在构造上不可能，坍缩失去可观察形状。
+
+### 3. 未排除项（诚实边界）
+
+1. **默认 staged 路径的端到端 run**：因 P2-15 挂死（§0）无法在 main 上完整跑完；
+   staged 侧证据来自逐字相同的编译器机器测试驱动。若该挂死被独立修复，应把 s3
+   fan-out 形状放回真实 staged 循环重跑一次（含未来若引入 `tokio::join` 真并发版本）。
+2. **真并发 fan-out**（多个 SqlProxy 并行注册）：当前 staged 循环是层内顺序执行
+   （`mod.rs:854` for 循环，非 join），且 P1-6 后无共享别名，故无可测的竞争窗口；
+   这不是"验证过并发安全"，而是"当前代码没有竞争表面"。
+3. **DataFusion 版本相关 Utf8View 聚合 bug**（候选成因 4，最低怀疑度）：
+   单元探针 + 6 个 workflow 形状全绿，无观察到的触发条件，维持不可判定（无形状可挂）。
+
+### 4. A3 处置（A-出口）
+
+坍缩未复现 → 按 tasks.md A-出口，本 change 的 A3 交付物
+`crates/swanflow/tests/sql_group_by_collapse.rs` 定位为**永久护栏**而非红复现
+（文件头已写明 STATUS；任一形状再现坍缩会以显式 "COLLAPSE DETECTED" 失败）。
+C1（"探针转正为永久回归"）由既有单元探针 + 该 e2e 护栏共同满足。

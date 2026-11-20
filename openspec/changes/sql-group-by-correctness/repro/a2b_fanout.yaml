@@ -1,0 +1,70 @@
+# A2 shape 2 (PRIORITY — the P1-6 historical-defect shape) — FAN-OUT:
+# two `core.sql` nodes in the SAME topological level share one upstream.
+#
+#   duckdb_read (seed, :memory:)
+#     -> core.sql (GROUP BY cat) -> duckdb_write (groupby_out_fan1)
+#     -> core.sql (GROUP BY cat) -> duckdb_write (groupby_out_fan2)
+#
+# Hypothesis tested: with a shared SessionContext, two SqlProxy nodes
+# registering the same `input_0` alias could clobber each other (cross-node
+# data mixup) or one branch could see an empty/other view -> GROUP BY
+# collapses or returns a foreign key.
+#
+# Expected healthy: BOTH outputs = 3 groups a=3,b=2,c=1.
+# Collapse signatures: 1 row / empty key / different keys per branch.
+#
+# Run:
+#   swanflow run --legacy-yaml repro/a2b_fanout.yaml
+#   duckdb repro_out.duckdb "SELECT 'fan1', count(*) FROM groupby_out_fan1 UNION ALL SELECT 'fan2', count(*) FROM groupby_out_fan2"
+name: "A2b fanout two-sql-nodes-shared-upstream"
+id: "b2000000-0000-0000-0000-0000000000b2"
+graph:
+  nodes:
+    - id: "b2000000-0000-0000-0000-000000000001"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: |
+          SELECT 'a' AS cat, 1 AS v
+          UNION ALL SELECT 'a', 2
+          UNION ALL SELECT 'a', 3
+          UNION ALL SELECT 'b', 4
+          UNION ALL SELECT 'b', 5
+          UNION ALL SELECT 'c', 6
+      state: "Configured"
+      sub_workflow: null
+    - id: "b2000000-0000-0000-0000-000000000002"
+      type_id: "core.sql"
+      config:
+        query: "SELECT cat, count(*) AS n FROM input_0 GROUP BY cat ORDER BY cat"
+      state: "Configured"
+      sub_workflow: null
+    - id: "b2000000-0000-0000-0000-000000000003"
+      type_id: "core.sql"
+      config:
+        query: "SELECT cat, count(*) AS n FROM input_0 GROUP BY cat ORDER BY cat"
+      state: "Configured"
+      sub_workflow: null
+    - id: "b2000000-0000-0000-0000-000000000004"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "repro_out.duckdb"
+        table: "groupby_out_fan1"
+        mode: "replace"
+      state: "Configured"
+      sub_workflow: null
+    - id: "b2000000-0000-0000-0000-000000000005"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "repro_out.duckdb"
+        table: "groupby_out_fan2"
+        mode: "replace"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [0, 2, { source_port: 0, target_port: 0 }]
+    - [1, 3, { source_port: 0, target_port: 0 }]
+    - [2, 4, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

@@ -1,0 +1,48 @@
+# A2 shape 3 — string source is DataFusion-native (literal `SELECT '...'`),
+# NOT a DuckDB read-back (Utf8View). Tests a SqlProxy feeding a SqlProxy:
+# the GROUP BY node's `input_0` view wraps another SqlProxy plan.
+#
+#   core.sql (literals: 6 rows, keys a x3 / b x2 / c x1)
+#     -> core.sql (GROUP BY cat)
+#     -> duckdb_write (repro_out.duckdb / groupby_out)
+#
+# Expected healthy: 3 groups a=3,b=2,c=1.  Collapse: 1 row (NULL/empty) or 0.
+#
+# Run:
+#   swanflow run --legacy-yaml repro/a2c_literal_source.yaml
+#   duckdb repro_out.duckdb "SELECT * FROM groupby_out ORDER BY cat"
+name: "A2c literal-sql-source-groupby"
+id: "b2000000-0000-0000-0000-0000000000c2"
+graph:
+  nodes:
+    - id: "b2000000-0000-0000-0000-000000000001"
+      type_id: "core.sql"
+      config:
+        query: |
+          SELECT 'a' AS cat, 1 AS v
+          UNION ALL SELECT 'a', 2
+          UNION ALL SELECT 'a', 3
+          UNION ALL SELECT 'b', 4
+          UNION ALL SELECT 'b', 5
+          UNION ALL SELECT 'c', 6
+      state: "Configured"
+      sub_workflow: null
+    - id: "b2000000-0000-0000-0000-000000000002"
+      type_id: "core.sql"
+      config:
+        query: "SELECT cat, count(*) AS n FROM input_0 GROUP BY cat ORDER BY cat"
+      state: "Configured"
+      sub_workflow: null
+    - id: "b2000000-0000-0000-0000-000000000003"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "repro_out.duckdb"
+        table: "groupby_out"
+        mode: "replace"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"

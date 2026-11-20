@@ -1,0 +1,74 @@
+# A2 shape 1 — upstream MATERIALIZATION before the GROUP BY node.
+#
+#   duckdb_read (seed, :memory:)
+#     -> duckdb_write (seed_store.duckdb / seed_tbl)     <- file round-trip
+#     -> duckdb_read (SELECT * FROM seed_tbl)            <- read back (Utf8View)
+#     -> core.sql (GROUP BY cat)
+#     -> duckdb_write (repro_out.duckdb / groupby_out)
+#
+# Hypothesis tested: a stage-boundary materialization (write -> read back)
+# before the SqlProxy could degrade the string column / change its logical
+# view so the late-binding GROUP BY collapses.
+#
+# Expected healthy: 3 groups a=3,b=2,c=1.  Collapse: 1 row (NULL/empty key) or 0.
+#
+# Run (from any directory; outputs are relative to the CWD):
+#   swanflow run --legacy-yaml repro/a2a_materialize.yaml
+#     --legacy-yaml: on the current main commit the default staged executor
+#     hangs on EVERY workflow (pre-existing bug, see design.md §阶段A实测);
+#     the legacy per-node executor runs the same SqlProxy late-binding
+#     planner code and completes.
+#   duckdb repro_out.duckdb "SELECT count(*) FROM groupby_out"
+name: "A2a materialize-before-groupby"
+id: "b2000000-0000-0000-0000-0000000000a2"
+graph:
+  nodes:
+    - id: "b2000000-0000-0000-0000-000000000001"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: |
+          SELECT 'a' AS cat, 1 AS v
+          UNION ALL SELECT 'a', 2
+          UNION ALL SELECT 'a', 3
+          UNION ALL SELECT 'b', 4
+          UNION ALL SELECT 'b', 5
+          UNION ALL SELECT 'c', 6
+      state: "Configured"
+      sub_workflow: null
+    - id: "b2000000-0000-0000-0000-000000000002"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "seed_store.duckdb"
+        table: "seed_tbl"
+        mode: "replace"
+      state: "Configured"
+      sub_workflow: null
+    - id: "b2000000-0000-0000-0000-000000000003"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: "seed_store.duckdb"
+        query: "SELECT * FROM seed_tbl"
+      state: "Configured"
+      sub_workflow: null
+    - id: "b2000000-0000-0000-0000-000000000004"
+      type_id: "core.sql"
+      config:
+        query: "SELECT cat, count(*) AS n FROM input_0 GROUP BY cat ORDER BY cat"
+      state: "Configured"
+      sub_workflow: null
+    - id: "b2000000-0000-0000-0000-000000000005"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "repro_out.duckdb"
+        table: "groupby_out"
+        mode: "replace"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+    - [2, 3, { source_port: 0, target_port: 0 }]
+    - [3, 4, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
