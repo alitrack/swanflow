@@ -181,7 +181,7 @@ mod tests {
         let q = WebhookQueue::new();
         assert!(q.fired_set().await.is_empty());
         // Record coalesces at QUEUE_CAP.
-        for i in 0..(QUEUE_CAP + 10) {
+        for _i in 0..(QUEUE_CAP + 10) {
             q.record("/a").await;
         }
         assert_eq!(q.total_pending().await, QUEUE_CAP);

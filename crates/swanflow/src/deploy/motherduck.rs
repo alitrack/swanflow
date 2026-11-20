@@ -5,8 +5,8 @@
 //! zero network — the deployer CLI lives in main.rs and reuses
 //! `crate::mcp::http::HttpMcpClient`.
 
-use super::{node_table, py_str, render_template, sql_quote, topo_order, FlightProgram};
-use crate::core::graph::{EdgeInstance, NodeInstance, Workflow};
+use super::{node_table, render_template, sql_quote, topo_order, FlightProgram};
+use crate::core::graph::{NodeInstance, Workflow};
 use petgraph::visit::EdgeRef;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -147,7 +147,7 @@ fn compile_node(
                 })
                 .unwrap_or_default();
             cfg_map.push(format!("'RUN_KEY': '_deploy_{}'", node.id.simple()));
-            let cfg_literal = format!("{{{}}}", cfg_map.join(", "));
+            let _cfg_literal = format!("{{{}}}", cfg_map.join(", "));
             lines.push(format!(
                 "_con.execute(\"CREATE TABLE {table} AS SELECT * FROM MD_RUN_FLIGHT(flight_id := '{}', config := MAP {{{}}})\"",
                 sql_quote(&fid),
@@ -362,6 +362,7 @@ fn build_scheduler(workflow: &Workflow, order: &[uuid::Uuid]) -> FlightProgram {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::graph::EdgeInstance;
     use super::*;
     use petgraph::stable_graph::StableGraph;
 

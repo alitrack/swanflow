@@ -1,34 +1,15 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use calamine::{open_workbook, Data, Reader, Xlsx};
-use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, StringBuilder};
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::array::{ArrayRef, StringBuilder};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::datasource::listing::{
-    ListingOptions, ListingTable, ListingTableConfig, ListingTableConfigExt, ListingTableUrl,
-};
-use datafusion::error::DataFusionError;
-use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream,
-};
-use datafusion::prelude::*;
-use duckdb::Connection;
-use futures::future::BoxFuture;
-use futures::Stream;
-use futures::StreamExt;
+use datafusion::logical_expr::{Extension, LogicalPlan};
 use serde_json::json;
 use serde_json::Value as JsonValue;
-use std::fmt;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
 use crate::nodes::config as cfg;

@@ -176,10 +176,6 @@ pub(crate) fn sql_quote(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Escape a string for single-quoted Python literal.
-pub(crate) fn py_str(s: &str) -> String {
-    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
-}
 
 #[cfg(test)]
 mod tests {

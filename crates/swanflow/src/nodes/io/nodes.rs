@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use calamine::{open_workbook, Data, Reader, Xlsx};
-use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, StringBuilder};
+use datafusion::arrow::array::{Float64Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
@@ -25,12 +24,10 @@ use futures::StreamExt;
 use serde_json::json;
 use serde_json::Value as JsonValue;
 use std::fmt;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use crate::core::datasource::{ExcelScanLogical, ExcelScanMode, ExcelSinkLogical};
 use crate::nodes::config as cfg;
 use crate::nodes::connectors::clickhouse::ClickHouseConnector;
 use crate::nodes::connectors::{ConnConfig, Connector};

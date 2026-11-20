@@ -5,7 +5,6 @@
 //! Mock impls return pre-configured responses for unit testing.
 
 use async_trait::async_trait;
-use std::collections::HashMap;
 
 use crate::core::error::CoreResult;
 

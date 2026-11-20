@@ -187,7 +187,7 @@ impl QueryEngine for DuckDBEngine {
 
     async fn register_table(&self, table: RegisteredTable) -> Result<()> {
         let name = table.name.clone();
-        let conn = self.conn.clone();
+        let _conn = self.conn.clone();
 
         match &table.source {
             TableSource::InMemory { batches } => {
@@ -483,7 +483,7 @@ impl QueryEngine for DuckDBEngine {
                 let inputs = plan.inputs();
                 let inner = self.compile_to_sql(inputs[0])?;
                 // Extract alias name from the plan's display
-                let alias_name = format!("{}", plan.schema().as_ref());
+                let _alias_name = format!("{}", plan.schema().as_ref());
                 Ok(format!("({}) AS _subquery_alias", inner))
             }
             LP::EmptyRelation(empty) => {

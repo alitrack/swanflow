@@ -9,7 +9,7 @@ use super::{DeployManifest, FlightProgram, FlightRecord};
 use crate::mcp::http::{HttpMcpClient, HttpMcpConfig};
 use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn manifest_file_name(dag_id: &str) -> String {
     format!("swanflow-deploy-{dag_id}.json")
@@ -106,7 +106,7 @@ pub async fn deploy(
         deployed_at: chrono::Utc::now().to_rfc3339(),
         owner_hint: owner_hint(&token),
         flights: records,
-        rollback: previous.map(|m| manifest_file_name(dag_id)),
+        rollback: previous.map(|_m| manifest_file_name(dag_id)),
     };
     std::fs::create_dir_all(manifest_dir)?;
     std::fs::write(

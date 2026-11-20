@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use datafusion::arrow::array::{Array, RecordBatch, StringBuilder, StringArray};
-use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::LogicalPlan;

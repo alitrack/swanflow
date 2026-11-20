@@ -167,7 +167,7 @@ impl PlanMiddleware for ColumnRenameMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::logical_expr::LogicalPlanBuilder;
+    
     use datafusion::prelude::*;
     use serde_json::json;
 

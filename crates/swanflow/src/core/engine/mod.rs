@@ -16,33 +16,20 @@ pub use datafusion_backend::DataFusionEngine;
 pub use duckdb_backend::DuckDBEngine;
 
 use async_trait::async_trait;
-use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
 use datafusion::error::Result;
-use datafusion::execution::context::{QueryPlanner, SessionState};
 use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
+use datafusion::physical_planner::DefaultPhysicalPlanner;
 use datafusion::prelude::*;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc::{self};
 use uuid::Uuid;
 
 use crate::core::compiler::WorkflowCompiler;
-use crate::core::datasource::{
-    DuckDBScanExec, DuckDBScanLogical, ExcelReportExec, ExcelReportSinkLogical, ExcelScanExec,
-    ExcelScanLogical, ExcelSinkExec, ExcelSinkLogical, ExcelTemplateExec, ExcelTemplateSinkLogical,
-};
 use crate::core::graph::Workflow;
-use crate::core::observer::{
-    MaterializerExec, MaterializerLogical, StateProbeExec, StateProbeLogical,
-};
-use crate::nodes::missing::{MissingNodeExec, MissingNodeLogical};
 use petgraph::visit::EdgeRef;
 use crate::nodes::registry::NodeRegistry;
-use crate::nodes::sql::SqlProxyLogical;
 use crate::nodes::{NodeDiagnostic, NodeErrorClass, NodeEvent};
 
 use duckdb::Connection;
@@ -878,7 +865,7 @@ impl SwanFlowEngine {
                     // cell contains the `when` substring.
                     if let Some(when) = &conditional_when {
                         // evaluate against workflow graph predecessors
-                        let mut matched = false;
+                        let matched;
                         {
                             let map = &workflow_pred_ids;
                             {
@@ -1218,7 +1205,6 @@ impl SwanFlowEngine {
                                                     message: diagnostic.to_event_message(),
                                                 });
                                                 // P1-2/P1-3: abort the run.
-                                                run_hard_failed = true;
                                                 continue;
                                             }
                                         }
@@ -1285,7 +1271,7 @@ impl SwanFlowEngine {
                                         NodeErrorClass::Execution,
                                         format!("Execution error: {}", e),
                                     );
-                                    let mut handled = false;
+                                    let handled = false;
                                     if let Some(hook) = &hook_shared {
                                         if should_invoke_self_healing(&diagnostic) {
                                             if let Some(repair) = hook
@@ -1342,7 +1328,6 @@ impl SwanFlowEngine {
                                                     message: diagnostic.to_event_message(),
                                                 });
                                                 // P1-2: retry exhaustion is a hard failure.
-                                                run_hard_failed = true;
                                             }
                                             crate::core::graph::ErrorMode::Fail => {
                                                 let _ = tx.send(NodeEvent::Error {
@@ -1350,7 +1335,6 @@ impl SwanFlowEngine {
                                                     message: diagnostic.to_event_message(),
                                                 });
                                                 // P1-2: Fail policy must abort the run.
-                                                run_hard_failed = true;
                                             }
                                         }
                                     }
@@ -1396,7 +1380,7 @@ impl SwanFlowEngine {
                                                 NodeErrorClass::Execution,
                                                 format!("Execution error: {}", e),
                                             );
-                                            let mut handled = false;
+                                            let handled = false;
                                             if let Some(hook) = &hook_shared {
                                                 if should_invoke_self_healing(&diagnostic) {
                                                     if let Some(repair) = hook
@@ -1425,7 +1409,6 @@ impl SwanFlowEngine {
                                                 // (initial planning failed, replan
                                                 // succeeded, execution failed) also
                                                 // hard-fails the run.
-                                                run_hard_failed = true;
                                             }
                                         }
                                     }
@@ -1440,7 +1423,7 @@ impl SwanFlowEngine {
                                             e2, e
                                         ),
                                     );
-                                    let mut handled = false;
+                                    let handled = false;
                                     if let Some(hook) = &hook_shared {
                                         if should_invoke_self_healing(&diagnostic) {
                                             if let Some(repair) = hook
@@ -1497,7 +1480,6 @@ impl SwanFlowEngine {
                                                     message: diagnostic.to_event_message(),
                                                 });
                                                 // P1-2: retry exhaustion is a hard failure.
-                                                run_hard_failed = true;
                                             }
                                             crate::core::graph::ErrorMode::Fail => {
                                                 let _ = tx.send(NodeEvent::Error {
@@ -1505,7 +1487,6 @@ impl SwanFlowEngine {
                                                     message: diagnostic.to_event_message(),
                                                 });
                                                 // P1-2: Fail policy must abort the run.
-                                                run_hard_failed = true;
                                             }
                                         }
                                     }
@@ -2534,7 +2515,7 @@ pub fn reorder_for_variable_deps(
         }
         let mut refs = HashSet::new();
         crate::core::templating::TemplateEngine::extract_variable_refs(&n.config, &mut refs);
-        let mut reqs = refs.iter().filter_map(|r| producers.get(r).copied()).collect::<HashSet<_>>();
+        let reqs = refs.iter().filter_map(|r| producers.get(r).copied()).collect::<HashSet<_>>();
         if !reqs.is_empty() {
             required_by.insert(*i, reqs);
         }

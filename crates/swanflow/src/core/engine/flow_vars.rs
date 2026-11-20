@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_resolve_simple_variable() {
-        let mut m = ctx();
+        let m = ctx();
         let mut config = json!({ "query": "SELECT * FROM {{name}}" });
         resolve_template_vars(&mut config, &m);
         assert_eq!(config["query"], "SELECT * FROM test-wf");
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_resolve_variable_with_default() {
-        let mut m = ctx();
+        let m = ctx();
         // missing_var not in context — should use default "10"
         let mut config = json!({ "limit": "{{missing_var:10}}" });
         resolve_template_vars(&mut config, &m);
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_resolve_variable_missing_no_default_keeps_template() {
-        let mut m = ctx();
+        let m = ctx();
         let mut config = json!({ "filter": "{{undefined_var}}" });
         resolve_template_vars(&mut config, &m);
         // Template left as-is for downstream handling
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_resolve_numeric_and_bool_vars() {
-        let mut m = ctx();
+        let m = ctx();
         let mut config = json!({
             "min_val": "{{threshold}}",
             "max_rows": "{{rows}}",
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_resolve_knime_style_percent_vars() {
-        let mut m = ctx();
+        let m = ctx();
         let mut config = json!({ "path": "/data/%%name%%/output.csv" });
         resolve_template_vars(&mut config, &m);
         assert_eq!(config["path"], "/data/test-wf/output.csv");
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_resolve_knime_style_with_default() {
-        let mut m = ctx();
+        let m = ctx();
         let mut config = json!({ "timeout": "%%timeout_sec:3600%%" });
         resolve_template_vars(&mut config, &m);
         assert_eq!(config["timeout"], "3600");
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_resolve_in_nested_object() {
-        let mut m = ctx();
+        let m = ctx();
         let mut config = json!({
             "source": {
                 "table": "{{name}}",
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_resolve_in_array() {
-        let mut m = ctx();
+        let m = ctx();
         let mut config = json!({
             "columns": ["{{name}}_a", "{{name}}_b"]
         });
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_resolve_no_templates_unchanged() {
-        let mut m = ctx();
+        let m = ctx();
         let mut config = json!({ "query": "SELECT 1" });
         resolve_template_vars(&mut config, &m);
         assert_eq!(config["query"], "SELECT 1");

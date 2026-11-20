@@ -24,7 +24,7 @@
 //!   query_timeout: 60
 //!   ```
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;

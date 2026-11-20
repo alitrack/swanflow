@@ -238,7 +238,7 @@ mod tests {
         use crate::nodes::middleware::builtins::{
             column_rename_builder, row_limit_builder,
         };
-        use datafusion::logical_expr::LogicalPlanBuilder;
+        
         use datafusion::prelude::*;
 
         // Base plan with columns a, b and 2 rows.

@@ -1,19 +1,15 @@
 use datafusion::prelude::*;
 use std::any::Any;
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
-use calamine::{open_workbook, Data, Reader, Xlsx};
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanBuilder, Float64Array, Float64Builder, Int64Array, Int64Builder,
-    StringArray, StringBuilder, TimestampNanosecondBuilder,
+    ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, StringBuilder, TimestampNanosecondBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
@@ -26,9 +22,6 @@ use datafusion::physical_plan::{
 };
 use futures::Stream;
 use futures::StreamExt;
-use rust_xlsxwriter::{Chart, ChartType, Color, Format, Workbook};
-use serde_json::Value as JsonValue;
-use std::collections::HashMap;
 
 #[non_exhaustive]
 pub enum DynamicArrayBuilder {
@@ -509,7 +502,6 @@ impl ExecutionPlan for DuckDBScanExec {
             // Materialize upstream inputs as DuckDB tables input_0..N via temp
             // parquet (same bridge technique as sql_duckdb::run_duckdb_query).
             for (i, plan) in input_plans.iter().enumerate() {
-                use futures::TryStreamExt;
                 let mut stream = plan.execute(0, task_context.clone())?;
                 let f = std::env::temp_dir()
                     .join(format!("rustflow_dbscan_in_{}_{}.parquet", i, uuid::Uuid::new_v4()));
@@ -634,7 +626,7 @@ impl Default for ConnConfig {
     }
 }
 
-use crate::core::error::{CoreResult, SwanFlowError};
+use crate::core::error::CoreResult;
 
 /// Formal Connector trait — implement for each database backend.
 #[async_trait::async_trait]
@@ -978,7 +970,6 @@ impl DuckDBWriteSinkExec {
         // window is normal under concurrent runs — retry for a few
         // seconds before surfacing the error to the node.
         let mut conn = None;
-        let mut last_err = None;
         for attempt in 0..40 {
             match duckdb::Connection::open_with_flags(db_path, duckdb::Config::default()) {
                 Ok(c) => {
@@ -989,7 +980,6 @@ impl DuckDBWriteSinkExec {
                     let msg = e.to_string();
                     if msg.contains("Conflicting lock") && attempt < 39 {
                         std::thread::sleep(std::time::Duration::from_millis(250));
-                        last_err = Some(e);
                         continue;
                     }
                     return Err(datafusion::error::DataFusionError::External(Box::new(e)));

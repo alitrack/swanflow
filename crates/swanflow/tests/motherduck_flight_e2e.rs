@@ -134,7 +134,7 @@ async fn handle_mcp(
                         MockScenario::Succeed => {
                             if n == 0 { "RUNNING" } else { "SUCCEEDED" }
                         }
-                        MockScenario::FailWithExit(code) => {
+                        MockScenario::FailWithExit(_code) => {
                             if n == 0 { "RUNNING" } else { "FAILED" }
                         }
                         MockScenario::NeverTerminate => "RUNNING",

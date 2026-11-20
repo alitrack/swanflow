@@ -2,26 +2,23 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use async_trait::async_trait;
 use calamine::{open_workbook, Data, Reader, Xlsx};
 use datafusion::arrow::array::{
     Array, ArrayRef, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
     StringBuilder, UInt32Array, UInt64Array,
 };
 use arrow::array::StringViewArray;
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
-use datafusion::error::{DataFusionError, Result};
+use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::error::Result;
 use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
@@ -32,9 +29,7 @@ use rust_xlsxwriter::{
     Chart, ChartType, Color, ConditionalFormatCell, ConditionalFormatCellRule,
     ConditionalFormatDataBar, ConditionalFormatType, Format, Workbook,
 };
-use serde_json::json;
 use serde_json::Value as JsonValue;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExcelTemplateSinkLogical {
@@ -1672,6 +1667,7 @@ impl ExcelReportWritingStream {
 
 #[cfg(test)]
 mod conditional_format_tests {
+    use serde_json::json;
     use super::*;
     use rust_xlsxwriter::Workbook;
 

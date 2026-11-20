@@ -1,11 +1,11 @@
 use crate::nodes::ai::ConfigWizard;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use datafusion::arrow::array::{StringArray, StringBuilder, UInt32Builder};
+use datafusion::arrow::array::{StringBuilder, UInt32Builder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::error::{DataFusionError, Result as DFResult};
+use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_plan::{
@@ -1673,6 +1673,7 @@ impl RerankerNode {
 
 #[cfg(test)]
 mod xform_tests {
+    use datafusion::arrow::array::StringArray;
     use super::*;
 
     #[test]

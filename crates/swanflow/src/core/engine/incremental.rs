@@ -4,7 +4,7 @@
 //! can detect the last completed level and skip it on re-run, starting from
 //! the next uncompleted level.
 
-use crate::core::engine::checkpoint::{CheckpointManager, EngineCheckpoint};
+use crate::core::engine::checkpoint::EngineCheckpoint;
 
 /// Given a list of resumable checkpoints, find the one that matches the
 /// given workflow name and return the next level to execute.

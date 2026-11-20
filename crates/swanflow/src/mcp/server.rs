@@ -771,11 +771,6 @@ impl McpServer {
         }
     }
 
-    /// Parse a workflow from YAML or JSON text.
-    fn parse_workflow_text(yaml_str: &str) -> anyhow::Result<Workflow> {
-        parse_workflow(yaml_str)
-    }
-
     /// Execute a workflow with params merged into its context, then read back
     /// materialized outputs for the given output specs (empty = summary only).
     async fn execute_with_params(

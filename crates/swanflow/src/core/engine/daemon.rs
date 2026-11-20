@@ -13,12 +13,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -174,29 +172,11 @@ struct NodeStatusInfo {
     state: String,
 }
 
-#[derive(Debug, Serialize)]
-struct DaemonEvent {
-    event: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    workflow_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    node_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    nodes_executed: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    errors: Option<usize>,
-}
-
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Running workflow handle
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 struct RunningWorkflow {
-    id: Uuid,
     name: String,
     cancel_token: CancellationToken,
     state: Arc<Mutex<WorkflowRunState>>,
@@ -1619,7 +1599,6 @@ async fn submit_workflow(
         wfs.insert(
             wf_id,
             RunningWorkflow {
-                id: wf_id,
                 name: wf_name.clone(),
                 cancel_token: cancel_token.clone(),
                 state: run_state.clone(),

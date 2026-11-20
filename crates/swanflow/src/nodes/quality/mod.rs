@@ -20,7 +20,6 @@ use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
 use serde_json::Value as JsonValue;
-use std::sync::Arc;
 
 use crate::nodes::config as cfg;
 use crate::nodes::{NodeBehavior, NodeCapability, NodeSpec, PortSpec};
@@ -98,7 +97,7 @@ impl NodeBehavior for NullCheckNode {
             anyhow::bail!("NullCheckNode requires at least one input");
         }
 
-        let max_ratio = config
+        let _max_ratio = config
             .get("max_null_ratio")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
@@ -119,7 +118,7 @@ impl NodeBehavior for NullCheckNode {
         // Build null check expressions per column
         let total_rows_sql = "SELECT COUNT(*) AS total_rows FROM null_input";
         let total_df = ctx.sql(total_rows_sql).await?;
-        let total_plan = total_df.into_optimized_plan()?;
+        let _total_plan = total_df.into_optimized_plan()?;
 
         // Generate report: per-column null stats
         let mut report_parts = Vec::new();
@@ -543,6 +542,7 @@ impl NodeBehavior for ValueRangeCheckNode {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use super::*;
     use datafusion::arrow::array::{Float64Array, Int64Array, StringArray};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};

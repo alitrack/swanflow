@@ -34,7 +34,6 @@ use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datafusion::physical_plan::{ExecutionPlan, PlanProperties};
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion::physical_plan::memory::MemoryStream;
 use futures::stream::Stream;
 use serde_json::Value as JsonValue;
 

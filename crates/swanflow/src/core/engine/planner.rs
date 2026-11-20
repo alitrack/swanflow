@@ -1,18 +1,15 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
-use datafusion::common::{DFSchema, DFSchemaRef, ScalarValue};
+use datafusion::common::{DFSchema, ScalarValue};
 use datafusion::error::Result;
 use datafusion::execution::context::{QueryPlanner, SessionState};
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
-use datafusion::physical_plan::displayable;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
+use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
 use tokio::sync::mpsc::UnboundedSender;
-use uuid::Uuid;
 
 use crate::core::datasource::{
     ClickHouseScanExec, ClickHouseScanLogical, DuckDBScanExec, DuckDBScanLogical, DuckDBWriteSinkExec,
@@ -400,7 +397,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
             })?;
 
             let logical_plan = df.into_optimized_plan()?;
-            let logical_schema = proxy.schema.clone();
+            let _logical_schema = proxy.schema.clone();
             let physical_plan = _planner
                 .create_physical_plan(&logical_plan, &scratch.state())
                 .await?;

@@ -134,7 +134,7 @@ fn collect_cte_names(stmt: &Statement, c: &mut Collector) {
     // WITH clauses hang off Query.bodies / TableFactor derived tables; the
     // robust generic way is to walk every Cte node in the AST.
     let mut cte_visitor = CteNameVisitor { names: &mut c.cte_names };
-    stmt.visit(&mut cte_visitor);
+    let _ = stmt.visit(&mut cte_visitor);
 }
 
 struct CteNameVisitor<'a> {

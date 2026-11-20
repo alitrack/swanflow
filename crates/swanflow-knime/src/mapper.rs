@@ -985,7 +985,7 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.database.DBConnectorMongoDBNodeFactory", "core.sql",
             |s| json!({"query": format!("ATTACH {} AS mongo_db (TYPE mongodb)", sq_lit(s.get("connection_string").and_then(|v| v.as_str()).unwrap_or("")))}));
         def!("org.knime.base.node.io.database.DBConnectorSalesforceNodeFactory", "core.sql",
-            |s| json!({"query": format!("ATTACH '' AS sf (TYPE salesforce)",
+            |_s| json!({"query": format!("ATTACH '' AS sf (TYPE salesforce)",
                 )}));
 
         // ─── Spatial / Geo (DuckDB spatial extension) ───
@@ -1580,7 +1580,7 @@ impl KnimeNodeMapper {
         def!("org.knime.time.node.extract.datetime.ExtractDateTimeFieldsNodeFactory", "core.sql",
             |s| {
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
-                let fields = s.get("extracted_fields").and_then(|v| v.as_str()).unwrap_or("YEAR,MONTH,DAY");
+                let _fields = s.get("extracted_fields").and_then(|v| v.as_str()).unwrap_or("YEAR,MONTH,DAY");
                 json!({"query": format!("SELECT *, EXTRACT(YEAR FROM CAST({} AS DATE)) AS year, EXTRACT(MONTH FROM CAST({} AS DATE)) AS month, EXTRACT(DAY FROM CAST({} AS DATE)) AS day FROM input_0", col, col, col)})
             });
         def!("org.knime.time.node.convert.stringtodatetime.StringToDateTimeNodeFactory", "core.sql",
@@ -1853,7 +1853,7 @@ impl KnimeNodeMapper {
         // ─── DuckDB AI (LLM / Embedding in SQL) ───
         def!("org.knime.base.node.mine.ai.LLMPromptNodeFactory", "core.sql",
             |s| {
-                let prompt = s.get("prompt").and_then(|v| v.as_str()).unwrap_or("Summarize this");
+                let _prompt = s.get("prompt").and_then(|v| v.as_str()).unwrap_or("Summarize this");
                 let col = s.get("column_name").and_then(|v| v.as_str()).unwrap_or("");
                 let model = s.get("model").and_then(|v| v.as_str()).unwrap_or("gpt-4o");
                 json!({"query": format!("SELECT *, prompt({}, {}) AS ai_response FROM input_0", sq_lit(model), col)})
@@ -2528,8 +2528,8 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.cloud.CloudFrontReaderNodeFactory", "core.sql",
             |s| {
                 let url = s.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                let key_id = s.get("key_pair_id").and_then(|v| v.as_str()).unwrap_or("");
-                let key_path = s.get("private_key_path").and_then(|v| v.as_str()).unwrap_or("");
+                let _key_id = s.get("key_pair_id").and_then(|v| v.as_str()).unwrap_or("");
+                let _key_path = s.get("private_key_path").and_then(|v| v.as_str()).unwrap_or("");
                 json!({"query": format!("SELECT * FROM read_csv_auto({})", sq_lit(url))})
             });
 
@@ -2630,7 +2630,7 @@ impl KnimeNodeMapper {
         // ─── Shuffle rows ───
         def!("org.knime.base.node.preproc.shuffle.ShuffleNodeFactory", "core.sql",
             |s| {
-                let seed = s.get("seed").and_then(|v| v.as_str()).unwrap_or("42");
+                let _seed = s.get("seed").and_then(|v| v.as_str()).unwrap_or("42");
                 json!({"query": format!(
                     "SELECT *, RANDOM() AS _rand FROM input_0 ORDER BY _rand")})
             });
@@ -3030,7 +3030,7 @@ impl KnimeNodeMapper {
 
         // ─── Column Auto Type Cast ───
         def!("org.knime.base.node.preproc.colautotypecast.ColumnAutoTypeCasterNodeFactory", "core.sql",
-            |s| {
+            |_s| {
                 json!({"query": "SELECT *, TRY_CAST(col AS DOUBLE) AS col_num FROM input_0".to_string()})
             });
 
@@ -3756,7 +3756,6 @@ impl KnimeNodeMapper {
         match sw_type {
             "core.missing.placeholder" => "Unsupported",
             "pass_through" => "Passthrough",
-            "core.missing.placeholder" => "Full",
             t if t.starts_with("core.transform.profiler") => "Degraded",
             t if t == "core.sql" => "Emulated",
             _ => "Full",

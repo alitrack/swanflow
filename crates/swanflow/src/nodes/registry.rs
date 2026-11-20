@@ -82,7 +82,7 @@ impl NodeRegistry {
             CsvReadNode, DbConnectorNode, DuckDBReadNode, DuckDBWriteNode, ExcelReadNode,
             ExcelReportNode, ExcelSheetNamesNode, ExcelTemplateNode, ExcelWriteNode,
             GraphIndexWriterNode, HttpFetchNode, OssieExportNode, OssieReadNode,
-            ParquetReadNode, SemanticAnnotateNode, SemanticExtractNode,
+            ParquetReadNode, SemanticExtractNode,
             SemanticFkInferNode, UniversalReadNode,
         };
         use crate::nodes::luajit::LuaJitNode;

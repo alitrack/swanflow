@@ -75,7 +75,7 @@ pub trait QueryEngine: Send + Sync + Debug {
     async fn execute_parameterized(
         &self,
         sql: &str,
-        params: &[datafusion::common::ScalarValue],
+        _params: &[datafusion::common::ScalarValue],
     ) -> Result<Vec<RecordBatch>> {
         // Default: ignore params (engines that support parameterized queries override this).
         self.execute_sql(sql).await
@@ -88,7 +88,7 @@ pub trait QueryEngine: Send + Sync + Debug {
     /// Compile a DataFusion LogicalPlan to this engine's native SQL dialect.
     /// Only engines with `sql_compilation` capability support this.
     /// Returns the generated SQL string.
-    fn compile_to_sql(&self, plan: &LogicalPlan) -> Result<String> {
+    fn compile_to_sql(&self, _plan: &LogicalPlan) -> Result<String> {
         Err(datafusion::error::DataFusionError::NotImplemented(
             format!("{} does not support SQL compilation", self.name()),
         ))

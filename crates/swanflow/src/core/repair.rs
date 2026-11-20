@@ -9,7 +9,6 @@
 use crate::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use crate::nodes::NodeState;
 use anyhow::{anyhow, Result};
-use serde_json::Value;
 use swanflow_core::repair::{
     RepairOperator, RepairOutcome, DEFAULT_REPAIR_HOPS, MAX_REPAIR_EDGES,
 };
@@ -139,7 +138,7 @@ pub fn apply_repair(
                 ));
             }
             let mut touched: Vec<Uuid> = Vec::new();
-            let mut record =
+            let record =
                 |workflow: &Workflow,
                  idx: petgraph::stable_graph::NodeIndex,
                  touched: &mut Vec<Uuid>| {
@@ -416,7 +415,7 @@ mod tests {
         let (mut wf, ids) = build_chain(3);
         let failed = ids[1];
         let edges: Vec<RepairEdgeSpec> = (0..6)
-            .map(|i| RepairEdgeSpec {
+            .map(|_i| RepairEdgeSpec {
                 source: ids[0].to_string(),
                 target: ids[2].to_string(),
                 source_port: 0,

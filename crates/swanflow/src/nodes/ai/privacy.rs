@@ -4,7 +4,7 @@ use datafusion::arrow::array::{StringArray, StringBuilder, UInt32Builder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::error::{DataFusionError, Result as DFResult};
+use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::physical_plan::{

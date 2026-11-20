@@ -11,7 +11,6 @@ use swanflow::nodes::registry::NodeRegistry;
 use swanflow::nodes::{NodeEvent, NodeState};
 use swanflow_knime::KnwfParser;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "swanflow")]
@@ -835,7 +834,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 let mut added = std::collections::BTreeSet::<(String, String)>::new();
-                let mut add_edge = |from: &str, to: &str,
+                let add_edge = |from: &str, to: &str,
                                     idx_by_task: &std::collections::HashMap<
                     String,
                     petgraph::graph::NodeIndex,
@@ -1172,7 +1171,7 @@ async fn main() -> anyhow::Result<()> {
                 // independent DuckDB instances writing one file corrupt it
                 // (SerializationException: field id mismatch). Reopen per
                 // day AFTER the run completes to record the interval.
-                use swanflow::core::graph::Workflow;
+                
 
                 // Build the upstream-closure subgraph once.
                 let sub = upstream_closure(&workflow, node_id);
@@ -1811,7 +1810,7 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
                     child.arg("--quack-token").arg(t);
                 }
             }
-            let mut child = child.spawn()?;
+            let child = child.spawn()?;
             let pid = child.id();
             // Don't wait — let it run
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -2041,7 +2040,7 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
             anyhow::ensure!(status.success(), "Remote daemon start failed");
         }
         DaemonCommands::Stop { .. } => {
-            let status = Command::new("ssh").arg(host)
+            let _status = Command::new("ssh").arg(host)
                 .arg("swanflow").arg("daemon").arg("stop")
                 .status()?;
         }

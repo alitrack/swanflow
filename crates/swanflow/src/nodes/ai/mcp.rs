@@ -17,7 +17,6 @@ use tokio::sync::Mutex;
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
-use datafusion::arrow::array::{BooleanBuilder, StringBuilder};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;

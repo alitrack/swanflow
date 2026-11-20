@@ -409,7 +409,7 @@ impl Stream for EntityExtractionStream {
                             // so string columns are accepted as-is (same policy
                             // as ai.community_batches, see communities.rs).
                             let text_array: ArrayRef =
-                                if let Some(sa) = batch
+                                if let Some(_sa) = batch
                                     .column(0)
                                     .as_any()
                                     .downcast_ref::<datafusion::arrow::array::StringArray>()

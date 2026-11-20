@@ -19,7 +19,6 @@ use crate::core::datasource::{ConnConfig, Connector, DynamicArrayBuilder};
 /// via the `?format=Arrow` query parameter.
 pub struct ClickHouseConnector {
     url: String,
-    config: ConnConfig,
     client: reqwest::Client,
 }
 
@@ -51,7 +50,6 @@ impl Connector for ClickHouseConnector {
 
         Ok(Self {
             url: config.url.trim_end_matches('/').to_string(),
-            config,
             client,
         })
     }

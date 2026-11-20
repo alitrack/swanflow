@@ -21,7 +21,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::logical_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::logical_expr::{Extension, LogicalPlan};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
@@ -293,13 +293,6 @@ fn is_safe_ident(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some('a'..='z' | 'A'..='Z' | '_'))
         && chars.all(|c| matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_'))
-}
-
-impl ExtFnDef {
-    /// Registration-time gate: None when the row must be skipped (logged).
-    fn vetted(&self) -> bool {
-        is_safe_ident(&self.extension) && is_safe_ident(&self.function)
-    }
 }
 
 /// Render `config.args` into a SQL fragment.

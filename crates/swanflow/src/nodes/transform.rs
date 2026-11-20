@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::ScalarValue;
 use datafusion::common::DFSchemaRef;
 use datafusion::logical_expr::Extension;
 use datafusion::logical_expr::LogicalPlan;

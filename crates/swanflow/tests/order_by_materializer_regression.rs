@@ -55,7 +55,7 @@ async fn order_by_survives_materializer_wrapping() {
     // whole tree through the session planner (physical optimizer runs here).
     let state = ctx.state();
     let physical = state.create_physical_plan(&logical).await.unwrap();
-    let (event_tx, _event_rx): (
+    let (_event_tx, _event_rx): (
         tokio::sync::mpsc::UnboundedSender<swanflow::nodes::NodeEvent>,
         _,
     ) = tokio::sync::mpsc::unbounded_channel();

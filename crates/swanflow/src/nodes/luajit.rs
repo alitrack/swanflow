@@ -1,14 +1,12 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore, Extension};
+use datafusion::logical_expr::{LogicalPlan, Extension};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
 use crate::nodes::{NodeBehavior, TypedNodeBehavior, NodeSpec, PortSpec};
-use crate::core::datasource::{DuckDBScanExec, DuckDBScanLogical};
+use crate::core::datasource::DuckDBScanLogical;
 
 /// LuaJIT shell node — runs a Lua function through the duckdb-luajit
 /// extension. This is the "self-evolution" escape hatch: a model writes a
@@ -147,7 +145,7 @@ impl NodeBehavior for LuaJitNode {
                 }
                 // Wrap the upstream plan as input_0 and apply the scalar UDF to
                 // each selected column, producing a result column per input.
-                let selects: Vec<String> = cols
+                let _selects: Vec<String> = cols
                     .iter()
                     .map(|c| {
                         // luajit_s(source, col) — value flows as second arg.
@@ -650,6 +648,9 @@ fn map_duckdb_type(col_type: &str) -> datafusion::arrow::datatypes::DataType {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::arrow::datatypes::SchemaRef;
+    use datafusion::arrow::record_batch::RecordBatch;
+    use crate::core::datasource::DuckDBScanExec;
     use super::*;
 
     #[test]

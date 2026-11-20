@@ -250,7 +250,7 @@ pub fn compute_digest(
     // so merely re-ordering JSON keys in a rendered value cannot produce a
     // phantom-stale digest (rendered output is always valid JSON).
     let canon_rendered = canonicalize_json_str(rendered_config);
-    let mut upd = |h: &mut Sha256, b: &[u8]| {
+    let upd = |h: &mut Sha256, b: &[u8]| {
         h.update(&(b.len() as u64).to_le_bytes());
         h.update(b);
     };

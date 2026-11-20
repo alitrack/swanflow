@@ -3,7 +3,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{DFSchemaRef, Result};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{EquivalenceProperties, OrderingRequirements};
+use datafusion::physical_expr::OrderingRequirements;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
