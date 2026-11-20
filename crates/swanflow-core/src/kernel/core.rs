@@ -5,10 +5,8 @@
 
 use async_trait::async_trait;
 use datafusion::physical_plan::SendableRecordBatchStream;
-use std::collections::HashMap;
-use std::sync::Arc;
 
-use crate::error::{CoreResult, SwanFlowError};
+use crate::error::CoreResult;
 
 // ---------------------------------------------------------------------------
 // DbRead / DbWrite

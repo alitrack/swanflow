@@ -1,13 +1,12 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
 use datafusion::logical_expr::LogicalPlan;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 

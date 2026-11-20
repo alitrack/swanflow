@@ -1,5 +1,5 @@
 use crate::nodes::{
-    DesignerMetadata, NodeBehavior, NodeCapability, NodeSpec, TypedNodeBehavior,
+    DesignerMetadata, NodeBehavior, NodeCapability, NodeSpec,
 };
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
