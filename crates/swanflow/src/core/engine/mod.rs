@@ -1181,6 +1181,12 @@ impl SwanFlowEngine {
                                         let materialized = ctx_shared
                                             .read_batches(batches.clone())
                                             .and_then(|df| {
+                                                // Re-run semantics: sync_metadata_to_context
+                                                // may have registered this node's table at
+                                                // startup — replace it (same pattern as the
+                                                // skip-checkpoint path below).
+                                                let _ = ctx_shared
+                                                    .deregister_table(&table_name);
                                                 ctx_shared
                                                     .register_table(&table_name, df.into_view())
                                                     .map(|_| ())
