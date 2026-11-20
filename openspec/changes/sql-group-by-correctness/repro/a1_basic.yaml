@@ -1,0 +1,46 @@
+# A1 baseline shape: duckdb_read -> core.sql (GROUP BY string) -> duckdb_write
+#
+# Seed: 6 rows, 3 distinct string keys with duplicates:
+#   a x3, b x2, c x1  =>  correct GROUP BY yields 3 rows: a=3, b=2, c=1
+# Collapse signature: 1 row (single NULL/empty key) or 0 rows.
+#
+# Run from any directory (output paths are relative to the CWD):
+#   swanflow run openspec/changes/sql-group-by-correctness/repro/a1_basic.yaml
+#   duckdb repro_out.duckdb "SELECT count(*) FROM groupby_out"          # 3 = ok, 1/0 = collapsed
+#   duckdb repro_out.duckdb "SELECT * FROM groupby_out ORDER BY cat"    # a=3,b=2,c=1
+name: "A1 basic GROUP BY (string key via core.sql)"
+id: "b1000000-0000-0000-0000-0000000000a1"
+graph:
+  nodes:
+    - id: "b1000000-0000-0000-0000-000000000001"
+      type_id: "core.io.duckdb_read"
+      config:
+        path: ":memory:"
+        query: |
+          SELECT 'a' AS cat, 1 AS v
+          UNION ALL SELECT 'a', 2
+          UNION ALL SELECT 'a', 3
+          UNION ALL SELECT 'b', 4
+          UNION ALL SELECT 'b', 5
+          UNION ALL SELECT 'c', 6
+      state: "Configured"
+      sub_workflow: null
+    - id: "b1000000-0000-0000-0000-000000000002"
+      type_id: "core.sql"
+      config:
+        query: "SELECT cat, count(*) AS n FROM input_0 GROUP BY cat ORDER BY cat"
+      state: "Configured"
+      sub_workflow: null
+    - id: "b1000000-0000-0000-0000-000000000003"
+      type_id: "core.io.duckdb_write"
+      config:
+        path: "repro_out.duckdb"
+        table: "groupby_out"
+        mode: "replace"
+      state: "Configured"
+      sub_workflow: null
+  edges:
+    - [0, 1, { source_port: 0, target_port: 0 }]
+    - [1, 2, { source_port: 0, target_port: 0 }]
+  node_holes: []
+  edge_property: "directed"
