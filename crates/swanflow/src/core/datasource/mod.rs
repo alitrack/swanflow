@@ -685,6 +685,30 @@ pub enum WriteMode {
     /// partition (per the partition key spec) are deleted first, making
     /// per-interval backfills idempotent.
     Append { partition_by: Vec<PartitionCol> },
+    /// Upsert by primary key(s): incoming rows whose key exists in the
+    /// target are updated (non-key columns), others inserted. Idempotent —
+    /// re-running the same batch yields the same table state.
+    /// (Ported from Starlake's writeStrategy APPEND_WITH_MERGE family,
+    ///  #2026111603 spike.)
+    Merge { keys: Vec<String> },
+    /// Type-2 slowly changing dimension: keyed rows are closed (valid_to =
+    /// run marker, is_current = false) when any tracked attribute changed,
+    /// and the new version inserted as current. First run creates the table
+    /// with the SCD2 control columns.
+    /// (Ported from Starlake's writeStrategy SCD2, #2026111603 spike.)
+    Scd2 {
+        keys: Vec<String>,
+        /// Attribute columns tracked for change detection. Empty = all
+        /// non-key columns.
+        tracked: Vec<String>,
+        /// Start-of-validity column added to the table (default
+        /// `_valid_from`).
+        valid_from: String,
+        /// End-of-validity column (default `_valid_to`, NULL = current).
+        valid_to: String,
+        /// Current-row flag column (default `_is_current`).
+        is_current: String,
+    },
 }
 
 /// One partition key column. `trunc` (e.g. "day"/"hour") applies
@@ -808,20 +832,53 @@ impl DuckDBWriteSinkExec {
         }
     }
 
+    /// Guard shared by `merge` / `scd2`: a batch that carries two rows under
+    /// the same key has no order-independent result. `merge` would leave both
+    /// rows behind (DELETE+INSERT without a PK constraint), `scd2` would open
+    /// two `is_current` versions for the key. Either outcome depends on batch
+    /// layout, so fail loudly instead — the caller dedupes upstream
+    /// (adversarial review F4/F5, 2026-11-20).
+    fn reject_duplicate_keys(
+        conn: &duckdb::Connection,
+        parquet: &str,
+        keys: &[String],
+        mode: &str,
+    ) -> std::result::Result<(), String> {
+        let cols = keys
+            .iter()
+            .map(|k| format!("\"{}\"", k.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT count(*) FROM (SELECT 1 FROM read_parquet('{parquet}') \
+             GROUP BY {cols} HAVING count(*) > 1)"
+        );
+        let dup: i64 = conn.query_row(&sql, [], |r| r.get(0)).map_err(|e| {
+            format!("duckdb_write mode '{mode}': cannot check primary key uniqueness: {e}")
+        })?;
+        if dup == 0 {
+            return Ok(());
+        }
+        Err(format!(
+            "duckdb_write mode '{mode}': this batch contains {dup} duplicate primary key \
+             combination(s) over key(s) [{}]. Each key may appear at most once per batch — \
+             dedupe upstream (a batch with repeated keys has no order-independent result).",
+            keys.join(", ")
+        ))
+    }
+
     /// Core write routine: record batches -> temp parquet file -> DuckDB
-    /// table via `read_parquet(...)`. Mirrors `DuckDBScanExec`'s read
-    /// direction (also a temp-parquet bridge), which is proven to work with
-    /// the bundled libduckdb; `read_arrow` is an extension function and not
-    /// guaranteed present. Exposed `pub` so unit tests verify the durable
-    /// write without a full execution plan.
+    /// table via `read_parquet(...)` (the same temp-parquet bridge
+    /// `DuckDBScanExec` uses for reads; `read_arrow` is an extension function
+    /// and not guaranteed present). Exposed `pub` so unit tests verify the
+    /// durable write without a full execution plan.
     ///
-    /// Concurrency: DuckDB connections opened within one process to the
-    /// same file share a single database instance, and concurrent
-    /// `CREATE TABLE` transactions hit catalog write-write conflicts —
-    /// observed as silently lost rows (8 writers, 1 row durable). A
-    /// per-db-path process-local mutex serializes writers; a second
-    /// process is kept out by DuckDB's own file lock, which we retry on
-    /// for a few seconds before failing.
+    /// Concurrency: DuckDB connections opened within one process to the same
+    /// file share one database instance, and concurrent `CREATE TABLE`
+    /// transactions hit catalog write-write conflicts — observed as silently
+    /// lost rows (8 writers, 1 row durable). A per-db-path process-local
+    /// mutex serializes writers; a second process is kept out by DuckDB's own
+    /// file lock, retried for a few seconds before failing.
     pub fn write_batches(
         db_path: &str,
         table: &str,
@@ -1027,6 +1084,198 @@ impl DuckDBWriteSinkExec {
                             cond = cond
                         ))
                     })
+                    .map_err(|e| {
+                        let _ = std::fs::remove_file(&tmp_file);
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        datafusion::error::DataFusionError::External(Box::new(e))
+                    })
+                    .map(|_| {
+                        let _ = std::fs::remove_file(&tmp_file);
+                        total_rows
+                    })
+            }
+            // ---- #2026111603 spike: Starlake writeStrategy ports ----
+            WriteMode::Merge { keys } => {
+                // Upsert by primary key in one transaction: staging rows
+                // drive a single-pass DELETE-matching-target + INSERT
+                // (equivalent to MERGE WHEN MATCHED THEN UPDATE /
+                // WHEN NOT MATCHED THEN INSERT for full-row replacement,
+                // which DuckDB also spells DELETE+INSERT; DuckDB 1.4+
+                // lacks a native MERGE statement on plain tables).
+                //
+                // `BY NAME` (not positional) so an upstream column reorder
+                // cannot silently write values into the wrong columns — the
+                // `append` branch already does it this way (review F2).
+                if let Err(msg) = Self::reject_duplicate_keys(&conn, &tmp, keys, "merge") {
+                    let _ = std::fs::remove_file(&tmp_file);
+                    return Err(datafusion::error::DataFusionError::Execution(msg));
+                }
+                let key_cond = keys
+                    .iter()
+                    .map(|k| {
+                        let k = k.replace('"', "\"\"");
+                        format!("t.\"{k}\" IS NOT DISTINCT FROM s.\"{k}\"")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                let sql = format!(
+                    "BEGIN TRANSACTION;\n\
+                     CREATE TABLE IF NOT EXISTS \"{t}\" AS SELECT * FROM read_parquet('{p}') LIMIT 0;\n\
+                     DELETE FROM \"{t}\" t WHERE EXISTS (SELECT 1 FROM read_parquet('{p}') s WHERE {kc});\n\
+                     INSERT INTO \"{t}\" BY NAME SELECT * FROM read_parquet('{p}');\n\
+                     COMMIT;",
+                    t = safe_table,
+                    p = tmp,
+                    kc = key_cond
+                );
+                conn.execute_batch(&sql)
+                    .map_err(|e| {
+                        let _ = std::fs::remove_file(&tmp_file);
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        datafusion::error::DataFusionError::External(Box::new(e))
+                    })
+                    .map(|_| {
+                        let _ = std::fs::remove_file(&tmp_file);
+                        total_rows
+                    })
+            }
+            WriteMode::Scd2 { keys, tracked, valid_from, valid_to, is_current } => {
+                // Type-2 SCD, Starlake-style, in one transaction:
+                //  1. create-if-missing with control columns bolted on;
+                //  2. CLOSE changed current rows in place (valid_to = this
+                //     run's epoch marker, is_current = false) — history is
+                //     kept, never deleted;
+                //  3. insert the incoming rows as new current versions,
+                //     but only keys that have no open current row (changed
+                //     or brand-new). Unchanged keys keep their existing
+                //     validity window untouched — re-running the same batch
+                //     is a no-op.
+                if let Err(msg) = Self::reject_duplicate_keys(&conn, &tmp, keys, "scd2") {
+                    let _ = std::fs::remove_file(&tmp_file);
+                    return Err(datafusion::error::DataFusionError::Execution(msg));
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_micros() as i64)
+                    .unwrap_or(0);
+                let q = |s: &String| s.replace('"', "\"\"");
+                let key_cond = keys
+                    .iter()
+                    .map(|k| format!("t.\"{}\" IS NOT DISTINCT FROM s.\"{}\"", q(k), q(k)))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                // `tracked` empty = every non-key column (the documented
+                // default, same as Starlake's SCD2). Resolved against the
+                // staging schema — NOT "close unconditionally": an empty
+                // predicate used to collapse the WHERE to key-only, so every
+                // run closed the current row even when nothing had changed
+                // (adversarial review F1; reproduced by
+                // `write_batches_scd2_default_tracked_means_all_non_key_columns`).
+                let key_set: std::collections::HashSet<&str> =
+                    keys.iter().map(|k| k.as_str()).collect();
+                let control = [valid_from.as_str(), valid_to.as_str(), is_current.as_str()];
+                let tracked_effective: Vec<String> = if tracked.is_empty() {
+                    schema
+                        .fields()
+                        .iter()
+                        .map(|f| f.name().to_string())
+                        .filter(|n| {
+                            !key_set.contains(n.as_str()) && !control.contains(&n.as_str())
+                        })
+                        .collect()
+                } else {
+                    tracked.clone()
+                };
+                // Close only rows whose tracked attributes actually differ. If
+                // no trackable column is left (key-only table), nothing can
+                // change, so there is nothing to close.
+                let close_stmt = if tracked_effective.is_empty() {
+                    String::new()
+                } else {
+                    let change_cond = tracked_effective
+                        .iter()
+                        .map(|a| {
+                            let a = q(a);
+                            format!("t.\"{a}\" IS DISTINCT FROM s.\"{a}\"")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" OR ");
+                    format!(
+                        "UPDATE \"{t}\" AS t\n\
+                           SET \"{vt}\" = make_timestamp({now}), \"{ic}\" = FALSE\n\
+                           WHERE t.\"{ic}\" IS NOT DISTINCT FROM TRUE\n\
+                             AND EXISTS (SELECT 1 FROM read_parquet('{p}') s\n\
+                                          WHERE {kc} AND ({chg}));\n",
+                        t = safe_table,
+                        vt = q(valid_to),
+                        ic = q(is_current),
+                        now = now,
+                        p = tmp,
+                        kc = key_cond,
+                        chg = change_cond
+                    )
+                };
+                let vf = q(valid_from);
+                let vt = q(valid_to);
+                let ic = q(is_current);
+                // Diagnose a table that predates scd2 (built by replace/append
+                // or by an external tool): `CREATE TABLE IF NOT EXISTS` would
+                // silently no-op and the close/insert would then die with a
+                // raw binder error (review F9).
+                let table_exists: bool = conn
+                    .query_row(
+                        &format!(
+                            "SELECT count(*) FROM duckdb_tables() WHERE table_name = '{}'",
+                            table.replace('\'', "''")
+                        ),
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .map(|n| n > 0)
+                    .unwrap_or(false);
+                if table_exists
+                    && conn
+                        .prepare(&format!(
+                            "SELECT \"{vf}\", \"{vt}\", \"{ic}\" FROM \"{t}\" LIMIT 0",
+                            vf = vf,
+                            vt = vt,
+                            ic = ic,
+                            t = safe_table
+                        ))
+                        .is_err()
+                {
+                    let _ = std::fs::remove_file(&tmp_file);
+                    return Err(datafusion::error::DataFusionError::Execution(format!(
+                        "duckdb_write mode 'scd2': target table \"{}\" already exists but has no \
+                         scd2 control columns ({} / {} / {}). Write it with mode: replace or use a \
+                         new table name before switching it to scd2.",
+                        table, valid_from, valid_to, is_current
+                    )));
+                }
+                let sql = format!(
+                    "BEGIN TRANSACTION;\n\
+                     CREATE TABLE IF NOT EXISTS \"{t}\" AS\n\
+                       SELECT *, CAST(NULL AS TIMESTAMP) AS \"{vf}\", CAST(NULL AS TIMESTAMP) AS \"{vt}\", CAST(NULL AS BOOLEAN) AS \"{ic}\"\n\
+                       FROM read_parquet('{p}') LIMIT 0;\n\
+                     {close}\
+                     INSERT INTO \"{t}\" BY NAME\n\
+                       SELECT s.*, make_timestamp({now}) AS \"{vf}\", CAST(NULL AS TIMESTAMP) AS \"{vt}\", TRUE AS \"{ic}\"\n\
+                       FROM read_parquet('{p}') s\n\
+                       WHERE NOT EXISTS (\n\
+                         SELECT 1 FROM \"{t}\" t\n\
+                         WHERE {kc} AND t.\"{ic}\" IS NOT DISTINCT FROM TRUE\n\
+                       );\n\
+                     COMMIT;",
+                    t = safe_table,
+                    p = tmp,
+                    kc = key_cond,
+                    close = close_stmt,
+                    vf = vf,
+                    vt = vt,
+                    ic = ic,
+                    now = now
+                );
+                conn.execute_batch(&sql)
                     .map_err(|e| {
                         let _ = std::fs::remove_file(&tmp_file);
                         let _ = conn.execute_batch("ROLLBACK;");
@@ -1530,6 +1779,375 @@ mod duckdb_write_sink_tests {
             .query_row("SELECT score FROM people WHERE name='alice' AND age=32", [], |r| r.get(0))
             .unwrap();
         assert!((s32 - 55.0).abs() < 1e-9, "sibling composite partition untouched");
+        std::fs::remove_file(&db).ok();
+    }
+
+    // ---- #2026111603 spike tests: Merge / Scd2 write modes ----
+
+    #[test]
+    fn write_batches_merge_upserts_by_key() {
+        let db = std::env::temp_dir().join(format!("swan_duckdb_merge_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        // Seed: alice(30) + bob via one batch each, keyed by name.
+        let mode = WriteMode::Merge { keys: vec!["name".to_string()] };
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "people", &sample_batches_with_age("alice", 30, 1.0), &mode,
+        )
+        .unwrap();
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "people", &sample_batches_with_age("bob", 40, 2.0), &mode,
+        )
+        .unwrap();
+        // Upsert: same key (alice) new attributes + a fresh key (carol).
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "people", &sample_batches_with_age("alice", 31, 9.9), &mode,
+        )
+        .unwrap();
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "people", &sample_batches_with_age("carol", 25, 3.0), &mode,
+        )
+        .unwrap();
+
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM people", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3, "merge must not duplicate keyed rows");
+        let (age, score): (i64, f64) = conn
+            .query_row(
+                "SELECT age, score FROM people WHERE name = 'alice'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(age, 31, "merge must update attributes of existing key");
+        assert!((score - 9.9).abs() < 1e-9);
+        // Idempotency: re-running the same batch changes nothing.
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "people", &sample_batches_with_age("alice", 31, 9.9), &mode,
+        )
+        .unwrap();
+        let n2: i64 = conn
+            .query_row("SELECT count(*) FROM people", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n2, 3, "merge re-run must be idempotent");
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn write_batches_scd2_tracks_changes() {
+        let db = std::env::temp_dir().join(format!("swan_duckdb_scd2_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let mode = WriteMode::Scd2 {
+            keys: vec!["name".to_string()],
+            tracked: vec!["age".to_string()],
+            valid_from: "_valid_from".to_string(),
+            valid_to: "_valid_to".to_string(),
+            is_current: "_is_current".to_string(),
+        };
+        // Run 1: alice age 30 — becomes the initial current version.
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "dim_people", &sample_batches_with_age("alice", 30, 1.0), &mode,
+        )
+        .unwrap();
+        // Run 2: alice age 31 — tracked attr changed -> new current
+        // version, old version closed.
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "dim_people", &sample_batches_with_age("alice", 31, 1.0), &mode,
+        )
+        .unwrap();
+        // Run 3: alice age 31 again — no tracked change -> still 2 rows.
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "dim_people", &sample_batches_with_age("alice", 31, 1.5), &mode,
+        )
+        .unwrap();
+
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM dim_people", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "scd2: one closed version + one current version");
+        let cur_age: i64 = conn
+            .query_row(
+                "SELECT age FROM dim_people WHERE _is_current",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cur_age, 31, "scd2 current version must carry new attribute");
+        let closed: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM dim_people WHERE NOT _is_current AND _valid_to IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(closed, 1, "scd2 old version must be closed with valid_to");
+        std::fs::remove_file(&db).ok();
+    }
+
+    // ---- review round (sigil@Mac 12345) regression tests ----
+    // Each of these was written against the FIRST implementation of the
+    // merge/scd2 spike and was RED before the follow-up fixes. They cover the
+    // gaps the original two tests left open (adversarial review findings
+    // F1/F2/F3/F4/F5/F12 from `.campaign/out/sigil-review-writemodes.md`).
+
+    /// Two rows for the SAME key in one batch, distinct (age, score).
+    fn sample_batches_dup_key(
+        name: &str,
+        ages: [i64; 2],
+        scores: [f64; 2],
+    ) -> Vec<RecordBatch> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("age", DataType::Int64, true),
+            Field::new("score", DataType::Float64, true),
+        ]));
+        vec![RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![name.to_string(), name.to_string()])),
+                Arc::new(Int64Array::from(ages.to_vec())),
+                Arc::new(Float64Array::from(scores.to_vec())),
+            ],
+        )
+        .unwrap()]
+    }
+
+    /// Same data as `sample_batches_with_age` but with columns REORDERED
+    /// (age, score, name) — a batch whose physical column order differs from
+    /// the target table's. `INSERT ... SELECT *` silently mis-maps this.
+    fn sample_batches_reordered(name: &str, age: i64, score: f64) -> Vec<RecordBatch> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("age", DataType::Int64, true),
+            Field::new("score", DataType::Float64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        vec![RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![age])),
+                Arc::new(Float64Array::from(vec![score])),
+                Arc::new(StringArray::from(vec![name.to_string()])),
+            ],
+        )
+        .unwrap()]
+    }
+
+    #[test]
+    fn write_batches_scd2_default_tracked_means_all_non_key_columns() {
+        // Documented default (config_schema `tracked_columns` + the WriteMode
+        // doc): "Empty = all non-key columns". So with `tracked: []`, a change
+        // in ANY non-key column must open a new version, and an UNCHANGED row
+        // must not. Pre-fix, an empty `tracked` produced an empty change
+        // predicate → every run closed the current row unconditionally:
+        // re-running the identical batch appended a bogus history version.
+        let db = std::env::temp_dir().join(format!("swan_duckdb_scd2def_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let mode = WriteMode::Scd2 {
+            keys: vec!["name".to_string()],
+            tracked: vec![],
+            valid_from: "_valid_from".to_string(),
+            valid_to: "_valid_to".to_string(),
+            is_current: "_is_current".to_string(),
+        };
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "dim_default", &sample_batches_with_age("alice", 30, 1.0), &mode,
+        )
+        .unwrap();
+        // Identical batch re-run: default tracked means "compare every non-key
+        // column" — nothing changed, so nothing may be closed or inserted.
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "dim_default", &sample_batches_with_age("alice", 30, 1.0), &mode,
+        )
+        .unwrap();
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM dim_default", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "identical re-run must be a no-op (idempotent), got {n} versions");
+
+        // A non-key column that is NOT `age` changed → new version.
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "dim_default", &sample_batches_with_age("alice", 30, 2.0), &mode,
+        )
+        .unwrap();
+        // Fresh connection: a connection opened before the write keeps its own
+        // view of the table (DuckDB pins the catalog snapshot per connection),
+        // so re-reading on the old handle would report stale counts.
+        drop(conn);
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let n2: i64 = conn
+            .query_row("SELECT count(*) FROM dim_default", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n2, 2, "score is a non-key column: its change must open a version");
+        let cur: (i64, f64) = conn
+            .query_row(
+                "SELECT age, score FROM dim_default WHERE _is_current",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cur.0, 30);
+        assert!((cur.1 - 2.0).abs() < 1e-9, "current version carries the new score");
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn write_batches_merge_rejects_duplicate_keys_within_one_batch() {
+        // A MERGE whose source carries two rows under the same key has an
+        // order-dependent result (last-wins, first-wins, or duplicated rows).
+        // Silent either-way is worse than a loud failure: the target state
+        // would depend on batch/file layout. Must be rejected with a
+        // diagnostic that names the mode and the key count.
+        let db = std::env::temp_dir().join(format!("swan_duckdb_mergedup_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let mode = WriteMode::Merge { keys: vec!["name".to_string()] };
+        let err = DuckDBWriteSinkExec::write_batches(
+            &db_str, "people", &sample_batches_dup_key("alice", [30, 31], [1.0, 2.0]), &mode,
+        )
+        .expect_err("duplicate keys in one merge batch must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("duplicate") && msg.contains("name"),
+            "error must name the duplicate-key condition and the key columns: {msg}"
+        );
+        // The table must not have been left behind in a half-written state.
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let exists: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'people'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 0, "rejected batch must not create the target table");
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn write_batches_merge_is_column_order_independent() {
+        // C7: `INSERT ... SELECT *` assumes the staging parquet column order
+        // matches the target table. Any upstream that reorders columns (very
+        // common: a SELECT list reordered, a union of differently-ordered
+        // batches, a parquet read from another writer) silently writes values
+        // into the WRONG columns. Merge must map BY NAME, like Append does.
+        let db = std::env::temp_dir().join(format!("swan_duckdb_mergeorder_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        // Target table established with (name, age, score).
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "people", &sample_batches_with_age("alice", 30, 1.0), &WriteMode::Replace,
+        )
+        .unwrap();
+        // Merge a batch whose physical order is (age, score, name).
+        let mode = WriteMode::Merge { keys: vec!["name".to_string()] };
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "people", &sample_batches_reordered("alice", 31, 9.5), &mode,
+        )
+        .unwrap();
+        let conn = duckdb::Connection::open(&db).unwrap();
+        let row: (String, i64, f64) = conn
+            .query_row("SELECT name, age, score FROM people", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(row.0, "alice", "name column must not receive a numeric value");
+        assert_eq!(row.1, 31, "age must land in age");
+        assert!((row.2 - 9.5).abs() < 1e-9, "score must land in score");
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn write_batches_scd2_closed_version_carries_a_real_timestamp() {
+        // `_valid_to` must be a wall-clock timestamp at (or just before) the
+        // closing run — not a mangled epoch (the spike divided microseconds by
+        // 1000 and fed the result to a millisecond formatter, so a unit slip
+        // would land the column decades off without failing any assertion).
+        let db = std::env::temp_dir().join(format!("swan_duckdb_scd2ts_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let mode = WriteMode::Scd2 {
+            keys: vec!["name".to_string()],
+            tracked: vec!["age".to_string()],
+            valid_from: "_valid_from".to_string(),
+            valid_to: "_valid_to".to_string(),
+            is_current: "_is_current".to_string(),
+        };
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "dim_ts", &sample_batches_with_age("alice", 30, 1.0), &mode,
+        )
+        .unwrap();
+        DuckDBWriteSinkExec::write_batches(
+            &db_str, "dim_ts", &sample_batches_with_age("alice", 31, 1.0), &mode,
+        )
+        .unwrap();
+        let conn = duckdb::Connection::open(&db).unwrap();
+        // Both control timestamps must be within an hour of now(). The control
+        // columns are written as `make_timestamp(micros)` — a UTC-based
+        // TIMESTAMP — so compare against now() AT TIME ZONE 'UTC' rather than
+        // the session's local-time TIMESTAMPTZ. `_valid_to` is NULL on the
+        // open (current) version by definition, so only closed rows are
+        // checked for it.
+        let vf_ok: bool = conn
+            .query_row(
+                "SELECT count(*) FILTER (
+                          WHERE abs(date_diff('second', _valid_from, (now() AT TIME ZONE 'UTC'))) < 3600
+                        ) = count(*)
+                 FROM dim_ts",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(vf_ok, "_valid_from must be a current wall-clock timestamp");
+
+        let (closed_n, closed_ok): (i64, bool) = conn
+            .query_row(
+                "SELECT count(*),
+                        count(*) FILTER (
+                          WHERE abs(date_diff('second', _valid_to, (now() AT TIME ZONE 'UTC'))) < 3600
+                        ) = count(*)
+                 FROM dim_ts WHERE NOT _is_current",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(closed_n > 0, "expected one closed version");
+        assert!(closed_ok, "_valid_to must be a current wall-clock timestamp");
+        // And the window must be coherent: closed version's valid_to equals the
+        // current version's valid_from (no gap, no overlap).
+        let coherent: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM dim_ts c
+                   JOIN dim_ts o ON o.name = c.name AND NOT o._is_current
+                  WHERE c._is_current AND c._valid_from = o._valid_to",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(coherent, 1, "closed.valid_to must equal current.valid_from");
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[test]
+    fn write_batches_scd2_rejects_duplicate_keys_within_one_batch() {
+        // Same ambiguity as merge: one key with two versions in one batch has
+        // no defensible ordering. Reject loudly.
+        let db = std::env::temp_dir().join(format!("swan_duckdb_scd2dup_{}.db", uuid::Uuid::new_v4()));
+        let db_str = db.to_str().unwrap().to_string();
+        let mode = WriteMode::Scd2 {
+            keys: vec!["name".to_string()],
+            tracked: vec!["age".to_string()],
+            valid_from: "_valid_from".to_string(),
+            valid_to: "_valid_to".to_string(),
+            is_current: "_is_current".to_string(),
+        };
+        let err = DuckDBWriteSinkExec::write_batches(
+            &db_str, "dim_dup", &sample_batches_dup_key("alice", [30, 31], [1.0, 2.0]), &mode,
+        )
+        .expect_err("duplicate keys in one scd2 batch must be rejected");
+        assert!(
+            format!("{err}").contains("duplicate"),
+            "error must name the duplicate-key condition: {err}"
+        );
         std::fs::remove_file(&db).ok();
     }
 
