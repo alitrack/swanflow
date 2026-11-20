@@ -16,8 +16,33 @@ SemVer. One entry per change, committed in the same PR as the change.
 - This changelog. History below is backfilled from git history; entries
   before 2026-10 were reconstructed and carry no PR numbers where the
   change predates the PR workflow.
+- `core.io.duckdb_write` gains two Starlake-style write strategies
+  (#2026111603 spike), both single-transaction and idempotent by
+  construction:
+  - `mode: merge` (+ `primary_keys`) — upsert by key: matching target rows
+    are replaced, other staging rows inserted.
+  - `mode: scd2` (+ `primary_keys`, optional `tracked_columns`,
+    `scd2_columns = valid_from,valid_to,is_current`) — type-2 slowly
+    changing dimension: a tracked attribute change closes the current row
+    (`valid_to` = run timestamp, `is_current = false`) and inserts the new
+    version; unchanged rows are left untouched. `tracked_columns` defaults
+    to **every non-key column**.
+  - Both modes map staging columns **by name** (`INSERT ... BY NAME`, same
+    as `append`), so an upstream column reorder no longer writes values
+    into the wrong columns.
+  - Both modes **reject a batch that carries two rows for the same key**
+    with an explicit error: the merge result would otherwise depend on
+    batch layout (silent last-wins / duplicated rows).
+  - `scd2` fails with a diagnostic (not a raw binder error) when the
+    target table exists but lacks the control columns.
 
 ### Fixed
+- `cargo check` under `RUSTFLAGS=-D warnings` (the CI gate) failed on seven
+  unused imports in `swanflow-core` since 2026-10-14, turning every `main`
+  push red: `kernel/ai.rs`, `kernel/core.rs`, `nodes.rs`, `registry.rs`.
+- Removed the dangling `zeroclaw` gitlink (mode 160000 with no
+  `.gitmodules` entry) that made every checkout print
+  `fatal: No url found for submodule path 'zeroclaw'`.
 - `DuckDBWriteSinkExec` now coalesces multi-partition inputs before
   writing (Bug-7 family) (#2).
 

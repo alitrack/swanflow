@@ -229,13 +229,19 @@ impl NodeBehavior for DuckDBWriteNode {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "default": "data.db",
-                               "description": "DuckDB database file (created if missing). Use ':memory:' to discard after the run." },
+                               "description": "DuckDB database file (created if missing). Use ':memory:' to discard after the run — note that merge/scd2 target state does NOT survive across runs on ':memory:', since every run opens a fresh in-memory database." },
                     "table": { "type": "string",
-                               "description": "Target table name; replaced on each run." },
-                    "mode": { "type": "string", "enum": ["replace", "append"], "default": "replace",
-                               "description": "replace = CREATE OR REPLACE whole table each run; append = INSERT, accumulating across runs (for partitioned backfills)." },
+                               "description": "Target table name. replace: recreated every run. append: rows accumulate (partition_by makes it idempotent). merge/scd2: updated in place, rows are never wholesale replaced." },
+                    "mode": { "type": "string", "enum": ["replace", "append", "merge", "scd2"], "default": "replace",
+                               "description": "replace = CREATE OR REPLACE whole table; append = INSERT (partition_by makes it idempotent); merge = upsert by primary_keys; scd2 = type-2 slowly changing dimension by primary_keys." },
                     "partition_by": { "type": "string",
-                               "description": "Partition key(s) for append-mode idempotency: comma-separated columns, each optionally 'col:unit' (unit = date_trunc granularity: day/hour/...). Incoming rows' partitions are deleted before insert — re-running an interval replaces exactly its own rows." }
+                               "description": "Partition key(s) for append-mode idempotency: comma-separated columns, each optionally 'col:unit' (unit = date_trunc granularity: day/hour/...). Incoming rows' partitions are deleted before insert — re-running an interval replaces exactly its own rows." },
+                    "primary_keys": { "type": "string",
+                               "description": "merge/scd2: comma-separated key column(s) for upsert / dimension identity." },
+                    "tracked_columns": { "type": "string",
+                               "description": "scd2 only: comma-separated attribute columns tracked for change detection. Default: all non-key columns." },
+                    "scd2_columns": { "type": "string",
+                               "description": "scd2 only: control column names as 'valid_from,valid_to,is_current' (defaults: _valid_from,_valid_to,_is_current)." }
                 },
                 "required": ["table"]
             }),
@@ -290,14 +296,105 @@ impl NodeBehavior for DuckDBWriteNode {
             }
             Ok(cols)
         };
+        // #2026111603 spike: merge / scd2 modes (Starlake writeStrategy port).
+        // primary_keys = comma-separated key columns; empty entries rejected.
+        let parse_key_list = |raw: Option<&str>| -> Result<Vec<String>> {
+            let Some(spec) = raw else { return Ok(Vec::new()) };
+            let keys: Vec<String> = spec
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            if keys.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "invalid primary_keys '{spec}': no non-empty key column"
+                ));
+            }
+            Ok(keys)
+        };
         let write_mode = match cfg::optional_string(config, "mode").as_deref() {
             None | Some("replace") => crate::core::datasource::WriteMode::Replace,
             Some("append") => crate::core::datasource::WriteMode::Append {
                 partition_by: parse_partition(cfg::optional_string(config, "partition_by").as_deref())?,
             },
+            Some("merge") => {
+                let keys = parse_key_list(cfg::optional_string(config, "primary_keys").as_deref())?;
+                if keys.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "mode 'merge' requires 'primary_keys' (comma-separated)"
+                    ));
+                }
+                crate::core::datasource::WriteMode::Merge { keys }
+            }
+            Some("scd2") => {
+                let keys = parse_key_list(cfg::optional_string(config, "primary_keys").as_deref())?;
+                if keys.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "mode 'scd2' requires 'primary_keys' (comma-separated)"
+                    ));
+                }
+                let tracked: Vec<String> = cfg::optional_string(config, "tracked_columns")
+                    .map(|spec| {
+                        spec.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Optional override of the control column triplet.
+                let (vf, vt, ic) = match cfg::optional_string(config, "scd2_columns").as_deref() {
+                    Some(spec) => {
+                        let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+                        if parts.len() != 3 || parts.iter().any(|s| s.is_empty()) {
+                            return Err(anyhow::anyhow!(
+                                "invalid scd2_columns '{spec}': expected 'valid_from,valid_to,is_current'"
+                            ));
+                        }
+                        (parts[0].to_string(), parts[1].to_string(), parts[2].to_string())
+                    }
+                    None => (
+                        "_valid_from".to_string(),
+                        "_valid_to".to_string(),
+                        "_is_current".to_string(),
+                    ),
+                };
+                // Control columns must be three DISTINCT names, and must not
+                // shadow a key or a tracked column: otherwise the first
+                // CREATE TABLE fails on a duplicate alias, or the control flag
+                // would overwrite a data column (review F12).
+                if vf == vt || vt == ic || vf == ic {
+                    return Err(anyhow::anyhow!(
+                        "invalid scd2_columns '{vf},{vt},{ic}': the three control column names must be distinct"
+                    ));
+                }
+                if keys.iter().any(|k| k == &vf || k == &vt || k == &ic) {
+                    return Err(anyhow::anyhow!(
+                        "invalid primary_keys/scd2_columns: a key column cannot also be a scd2 control column ({vf} / {vt} / {ic})"
+                    ));
+                }
+                if tracked.iter().any(|t| t == &vf || t == &vt || t == &ic) {
+                    return Err(anyhow::anyhow!(
+                        "invalid tracked_columns: a tracked column cannot be a scd2 control column ({vf} / {vt} / {ic})"
+                    ));
+                }
+                if tracked.iter().any(|t| keys.iter().any(|k| k == t)) {
+                    return Err(anyhow::anyhow!(
+                        "invalid tracked_columns: a tracked column cannot also be a primary key"
+                    ));
+                }
+                crate::core::datasource::WriteMode::Scd2 {
+                    keys,
+                    tracked,
+                    valid_from: vf,
+                    valid_to: vt,
+                    is_current: ic,
+                }
+            }
             Some(other) => {
                 return Err(anyhow::anyhow!(
-                    "invalid mode '{other}': expected \"replace\" or \"append\""
+                    "invalid mode '{other}': expected \"replace\", \"append\", \"merge\" or \"scd2\""
                 ))
             }
         };
