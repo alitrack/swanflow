@@ -137,6 +137,14 @@ enum Commands {
         #[command(subcommand)]
         command: AssetsCommands,
     },
+
+    /// swanbench provenance contract: emit the four-layer artifact header
+    /// (description / code / conversation ref / environment snapshot) for a
+    /// materialized table, so the result can be reproduced from the header alone.
+    Provenance {
+        #[command(subcommand)]
+        command: ProvenanceCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -165,6 +173,35 @@ enum AssetsCommands {
         /// Only show gaps + calendar; do not execute
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProvenanceCommands {
+    /// Build the four-layer artifact header for a table (and optionally write it)
+    Header {
+        /// DuckDB database file
+        #[arg(long)]
+        db: PathBuf,
+        /// Output table name, exactly as it exists in the database
+        #[arg(long)]
+        table: String,
+        /// Plain-language description of what was computed (humans read this in
+        /// support calls months later — an empty one is accepted but warned about)
+        #[arg(long, default_value = "")]
+        description: String,
+        /// The SQL (or DAG text) that produced the table
+        #[arg(long, default_value = "")]
+        code: String,
+        /// Input table the result depended on (repeatable)
+        #[arg(long = "input")]
+        inputs: Vec<String>,
+        /// Where to write the header JSON (default: <table>.sbheader.json)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Print only the artifact id (for scripting)
+        #[arg(long)]
+        print_id: bool,
     },
 }
 
@@ -901,6 +938,90 @@ async fn main() -> anyhow::Result<()> {
                 std::fs::write(&out_path, &yaml)?;
                 println!("\n💾 Workflow saved to: {}", out_path.display());
                 println!("   Next: swanflow inspect {}", out_path.display());
+            }
+        },
+        Commands::Provenance { command } => match command {
+            ProvenanceCommands::Header {
+                db,
+                table,
+                description,
+                code,
+                inputs,
+                out,
+                print_id,
+            } => {
+                use swanflow::core::engine::provenance::{
+                    build_header, write_header, ConversationRef,
+                };
+
+                if !db.exists() {
+                    anyhow::bail!("database not found: {}", db.display());
+                }
+                if description.trim().is_empty() {
+                    eprintln!(
+                        "⚠️  --description is empty: the result will be reproducible but not \
+                         understandable in six months."
+                    );
+                }
+                if code.trim().is_empty() {
+                    eprintln!("⚠️  --code is empty: nothing could be re-run from this header.");
+                }
+
+                let conn = duckdb::Connection::open(&db)
+                    .map_err(|e| anyhow::anyhow!("open {}: {e}", db.display()))?;
+                let conv = ConversationRef {
+                    session_id: format!("cli:{table}"),
+                    message_range: [0, 0],
+                    message_range_sha256: "0".repeat(64),
+                };
+                let input_refs: Vec<&str> = inputs.iter().map(String::as_str).collect();
+                let header = build_header(
+                    &conn,
+                    &table,
+                    description.trim(),
+                    code.trim(),
+                    "sql",
+                    &input_refs,
+                    conv,
+                    Vec::new(),
+                )?;
+
+                let out_path =
+                    out.unwrap_or_else(|| PathBuf::from(format!("{table}.sbheader.json")));
+                write_header(&out_path, &header)?;
+
+                if print_id {
+                    println!("{}", header.artifact_id);
+                } else {
+                    println!("📜 Artifact header: {}", out_path.display());
+                    println!("   id      {}", header.artifact_id);
+                    println!(
+                        "   engine  {} {}",
+                        header.env.engine.name, header.env.engine.version
+                    );
+                    println!("   schema  sha256:{}…", &header.env.schema_hash[..12]);
+                    println!(
+                        "   rows    {}",
+                        header.outputs.first().map(|o| o.rows).unwrap_or(0)
+                    );
+                    let inputs_summary = if header.inputs.is_empty() {
+                        "none declared".to_string()
+                    } else {
+                        header
+                            .inputs
+                            .iter()
+                            .map(|i| i.path.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    println!("   inputs  {inputs_summary}");
+                    if !header.code.nondeterministic.is_empty() {
+                        println!(
+                            "   ⚠️  non-deterministic: {}",
+                            header.code.nondeterministic.join(", ")
+                        );
+                    }
+                }
             }
         },
         Commands::Assets { command } => match command {
