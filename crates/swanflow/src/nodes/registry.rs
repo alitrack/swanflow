@@ -85,6 +85,7 @@ impl NodeRegistry {
             ParquetReadNode, SemanticExtractNode,
             SemanticFkInferNode, UniversalReadNode,
         };
+        use crate::nodes::io::{CsvWriteNode, ParquetWriteNode};
         use crate::nodes::luajit::LuaJitNode;
         use crate::nodes::mcp::McpToolNode;
         use crate::nodes::quality::{
@@ -163,6 +164,8 @@ impl NodeRegistry {
         self.register_node(Arc::new(ExcelSheetNamesNode));
         self.register_node(Arc::new(DuckDBReadNode));
         self.register_node(Arc::new(DuckDBWriteNode));
+        self.register_node(Arc::new(CsvWriteNode));
+        self.register_node(Arc::new(ParquetWriteNode));
         self.register_node(Arc::new(HttpFetchNode));
         self.register_node(Arc::new(GraphIndexWriterNode));
         self.register_node(Arc::new(InputNode));

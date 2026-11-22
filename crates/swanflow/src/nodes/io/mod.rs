@@ -2,6 +2,7 @@
 //! Subfiles: excel.rs (Excel nodes), nodes.rs (everything else).
 
 pub mod excel;
+pub mod file_sink;
 pub mod nodes;
 pub mod ossie;
 pub mod ossie_export;
@@ -15,6 +16,9 @@ pub mod semantic_fk;
 // to avoid E0252 (defined multiple times).
 pub use excel::{
     ExcelReadNode, ExcelReportNode, ExcelSheetNamesNode, ExcelTemplateNode, ExcelWriteNode,
+};
+pub use file_sink::{
+    CsvWriteNode, FileFormat, FileSinkExec, FileSinkLogical, ParquetCompression, ParquetWriteNode,
 };
 pub use nodes::{
     CsvReadNode, DbConnectorNode, DuckDBHelper, DuckDBReadNode, DuckDBWriteNode,

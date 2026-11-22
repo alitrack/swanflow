@@ -26,7 +26,6 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use crate::core::engine::duckdb_backend::quote_ident;
 use crate::nodes::config as cfg;
@@ -772,6 +771,7 @@ fn how_keyword(raw: Option<&str>) -> Result<&'static str> {
 mod tests {
     use super::*;
     use datafusion::arrow::array::{Int64Array, StringArray};
+    use std::sync::Arc;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
 

@@ -71,6 +71,19 @@ impl ExtensionPlanner for SwanFlowPlanner {
         if let Some(missing) = node.as_any().downcast_ref::<MissingNodeLogical>() {
             return Ok(Some(Arc::new(MissingNodeExec::new(missing))));
         }
+        if let Some(sink) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::io::FileSinkLogical>()
+        {
+            return Ok(Some(Arc::new(crate::nodes::io::FileSinkExec::new(
+                sink.path.clone(),
+                sink.format,
+                sink.header,
+                sink.delimiter,
+                sink.compression,
+                physical_inputs.to_vec(),
+            ))));
+        }
         if let Some(xform) = node
             .as_any()
             .downcast_ref::<crate::nodes::ai::retrieval::TextXformLogical>()
