@@ -91,6 +91,9 @@ impl NodeRegistry {
             NullCheckNode, RowCountAssertNode, SchemaAssertNode, SqlAssertNode,
             UniquenessCheckNode, ValueRangeCheckNode,
         };
+        use crate::nodes::relational::{
+            CastNode, DistinctNode, JoinNode, LimitNode, SortNode, UnionNode,
+        };
         use crate::nodes::script::boxed_python::BoxedPythonNode;
         #[cfg(feature = "python")]
         use crate::nodes::script::python::{PythonNode, PythonUdfNode};
@@ -167,6 +170,12 @@ impl NodeRegistry {
         self.register_node(Arc::new(DuckDBExtensionNode));
         self.register_node(Arc::new(FilterNode));
         self.register_node(Arc::new(ProjectNode));
+        self.register_node(Arc::new(SortNode));
+        self.register_node(Arc::new(LimitNode));
+        self.register_node(Arc::new(DistinctNode));
+        self.register_node(Arc::new(CastNode));
+        self.register_node(Arc::new(UnionNode));
+        self.register_node(Arc::new(JoinNode));
         self.register_node(Arc::new(AggregateNode));
         self.register_node(Arc::new(WindowNode));
         self.register_node(Arc::new(ConditionNode));

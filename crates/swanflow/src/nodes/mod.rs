@@ -23,6 +23,7 @@ pub mod mcp;
 pub mod missing;
 pub mod quality;
 pub mod registry;
+pub mod relational;
 pub mod middleware;
 pub mod motherduck;
 pub mod script;
