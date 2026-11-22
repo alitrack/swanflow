@@ -189,9 +189,20 @@ enum ProvenanceCommands {
         /// support calls months later — an empty one is accepted but warned about)
         #[arg(long, default_value = "")]
         description: String,
-        /// The SQL (or DAG text) that produced the table
-        #[arg(long, default_value = "")]
+        /// The SQL (or DAG text) that produced the table.
+        ///
+        /// `allow_hyphen_values` is not cosmetic: real analysis SQL opens with
+        /// `--` comments recording its 口径, and without this clap parses that
+        /// leading `--` as a flag and rejects the whole invocation. The CLI
+        /// could otherwise only accept comment-free one-liners — i.e. only
+        /// undocumented code, which is the opposite of what this tool is for.
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
         code: String,
+        /// Read the SQL (or DAG text) from a file instead of the command line.
+        /// Preferred for anything longer than a few lines: no shell quoting,
+        /// no argument-length ceiling, and the file can be hashed directly.
+        #[arg(long)]
+        code_file: Option<PathBuf>,
         /// Input table the result depended on (repeatable)
         #[arg(long = "input")]
         inputs: Vec<String>,
@@ -984,6 +995,7 @@ async fn main() -> anyhow::Result<()> {
                 table,
                 description,
                 code,
+                code_file,
                 inputs,
                 out,
                 print_id,
@@ -995,6 +1007,23 @@ async fn main() -> anyhow::Result<()> {
                 if !db.exists() {
                     anyhow::bail!("database not found: {}", db.display());
                 }
+
+                // Exactly one source of truth for the code text. Silently
+                // preferring one over the other would produce two different
+                // artifact_ids for the same analysis depending on how it was
+                // typed — the one thing this tool must never do.
+                let code = match (code.trim().is_empty(), &code_file) {
+                    (false, Some(_)) => anyhow::bail!(
+                        "--code and --code-file are mutually exclusive — pass exactly one"
+                    ),
+                    (true, Some(path)) => std::fs::read_to_string(path)
+                        .map_err(|e| anyhow::anyhow!("read --code-file {}: {e}", path.display()))?,
+                    (false, None) => code,
+                    (true, None) => code,
+                };
+                // Trim consistently for both sources, so the same SQL supplied
+                // either way yields byte-identical headers (and the same id).
+                let code = code.trim();
                 if description.trim().is_empty() {
                     eprintln!(
                         "⚠️  --description is empty: the result will be reproducible but not \
