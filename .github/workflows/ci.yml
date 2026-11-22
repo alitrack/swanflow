@@ -1,7 +1,7 @@
 # CI for SwanFlow — Rust-native Data Science DAG Engine
 #
 # Runs on push/PR to main. Two jobs:
-#   1. check — cargo check + clippy + fmt (fast, no DuckDB/network deps)
+#   1. check — cargo check + clippy (blocking) + fmt (advisory)
 #   2. test  — cargo test (needs DuckDB shared library available)
 #
 # WARNING: Cargo.lock is .gitignored (we're a library, not an application).
@@ -17,9 +17,15 @@ on:
   pull_request:
     branches: [main]
 
+# Toolchain is pinned, not `stable`. A lint gate that changes behaviour when
+# upstream releases a new Rust is a flaky gate: a fresh `stable` can introduce
+# lints that no one on the team has seen, turning a green branch red for reasons
+# unrelated to the change. The pin is the version the tree is verified clean
+# against; bump it deliberately, together with any fixes the bump requires.
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  RUST_VERSION: "1.100.0"
 
 jobs:
   check:
@@ -30,6 +36,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           components: clippy, rustfmt
 
       - name: Rust cache
@@ -47,11 +54,19 @@ jobs:
       - name: hygiene — unwrap/expect check
         run: bash scripts/ci/check-no-unwrap.sh
 
+      # Blocking. This used to end in `|| true` (and a `| head -50` that
+      # swallowed the exit code besides), so the step could not fail: 111 lints
+      # accumulated behind a green badge. Cleared in 7f8f4b9 and dffc0cf.
       - name: clippy
-        run: cargo clippy --lib -- -D warnings 2>&1 | head -50 || true
+        run: cargo clippy --lib -- -D warnings
 
-      - name: rustfmt
-        run: cargo fmt --check 2>&1 | head -50 || true
+      # NOT blocking yet, on purpose. `cargo fmt --check` currently reports
+      # diffs in 111 files across all five crates — the workspace has never been
+      # rustfmt-clean. Making this blocking today would turn every branch red,
+      # and running `cargo fmt` would bury real changes under a 111-file diff.
+      # Wants its own commit that touches formatting and nothing else.
+      - name: rustfmt (advisory only — see comment)
+        run: cargo fmt --check || true
 
       - name: cargo doc (no deps)
         run: cargo doc --lib --no-deps
@@ -64,6 +79,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -76,8 +93,14 @@ jobs:
           # libduckdb-sys auto-downloads official libduckdb.so via DUCKDB_DOWNLOAD_LIB=1
           # Configured in .cargo/config.toml — no manual download needed.
 
+      # `--test-threads=1` is required, not a preference: the suite opens real
+      # DuckDB files and shares env vars, and parallel execution produces a
+      # reproducible spurious failure in
+      # nodes::relational::tests::join_renames_only_the_colliding_column (that
+      # test passes alone and in a serial run). Without this the job can fail for
+      # a reason unrelated to the change under test.
       - name: cargo test (lib)
-        run: cargo test --lib
+        run: cargo test --lib -- --test-threads=1
         timeout-minutes: 10
 
       - name: cargo test (doc)
