@@ -1,7 +1,7 @@
 # CI for SwanFlow — Rust-native Data Science DAG Engine
 #
 # Runs on push/PR to main. Two jobs:
-#   1. check — cargo check + clippy (blocking) + fmt (advisory)
+#   1. check — cargo check + clippy + fmt (all three blocking)
 #   2. test  — cargo test (needs DuckDB shared library available)
 #
 # WARNING: Cargo.lock is .gitignored (we're a library, not an application).
@@ -60,13 +60,19 @@ jobs:
       - name: clippy
         run: cargo clippy --lib -- -D warnings
 
-      # NOT blocking yet, on purpose. `cargo fmt --check` currently reports
-      # diffs in 111 files across all five crates — the workspace has never been
-      # rustfmt-clean. Making this blocking today would turn every branch red,
-      # and running `cargo fmt` would bury real changes under a 111-file diff.
-      # Wants its own commit that touches formatting and nothing else.
-      - name: rustfmt (advisory only — see comment)
-        run: cargo fmt --check || true
+      # Blocking, as of the preceding rustfmt commit. The `|| true` this used to
+      # end with made the step report success on a tree with 115 unformatted
+      # files — falsified directly: on that tree the bare command exited 1 and
+      # `cargo fmt --check || true` exited 0. A verdict that cannot be non-zero
+      # is not a verdict.
+      #
+      # Note for whoever formats next: rustfmt 1.11.0 is NOT idempotent on this
+      # tree. `return Err(anyhow!(...))` inside a match arm needs a second pass,
+      # so ONE `cargo fmt` leaves a diff behind and this step stays red. Run
+      # `cargo fmt --all` until `cargo fmt --all -- --check` is clean (twice is
+      # enough here; verified stable across three consecutive runs).
+      - name: rustfmt
+        run: cargo fmt --all -- --check
 
       - name: cargo doc (no deps)
         run: cargo doc --lib --no-deps
