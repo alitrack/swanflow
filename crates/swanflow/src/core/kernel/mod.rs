@@ -17,6 +17,8 @@ pub mod ai;
 pub mod core;
 pub mod mock;
 pub mod plugin;
+#[cfg(feature = "wasm")]
+pub mod plugin_wasm;
 pub mod runtime;
 
 // Re-exports for backward compatibility — existing `use crate::core::kernel::*` still works.

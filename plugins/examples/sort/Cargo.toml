@@ -1,0 +1,26 @@
+[package]
+name = "swanflow-plugin-sort"
+version = "0.1.0"
+edition = "2021"
+description = "SwanFlow example plugin: sort a table by its first column"
+license = "Apache-2.0"
+
+[lib]
+# cdylib is what produces a .wasm module with the C-ABI exports the host calls.
+crate-type = ["cdylib"]
+
+# Its own workspace root: a plugin is built for wasm32-unknown-unknown, while the
+# engine workspace targets the host. Sharing one workspace would drag the plugin
+# into every host build.
+[workspace]
+
+[dependencies]
+# The plugin parses Arrow IPC itself, so it needs the same Arrow major version as
+# the host. `default-features = false` keeps the module small (~2.7 MB).
+arrow = { version = "57.0", default-features = false, features = ["ipc"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+codegen-units = 1

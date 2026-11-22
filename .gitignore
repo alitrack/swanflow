@@ -22,3 +22,8 @@ test_data.csv
 *.duckdb
 graphify-out/
 openspec/
+
+# Plugin build output. The module is 2.6 MB of compiled artefact; the source and
+# build.sh are the committed thing, and the test fails loudly (with the build
+# command in the message) rather than skipping when it is missing.
+*.wasm

@@ -100,3 +100,11 @@ ai = ["swanflow-ai"]
 # WASM UDF node (core.script.wasm) via wasmtime. Optional: wasmtime alone is a
 # large share of the binary. Enable with --features wasm.
 wasm = ["dep:wasmtime"]
+
+# `wat` turns WAT text into wasm bytes. The runtime deliberately does NOT carry
+# wasmtime's own `wat` feature (binary size), so tests translate the hand-written
+# modules themselves and exercise the same binary path production uses.
+[dev-dependencies]
+# Pinned to the version already in the local registry cache: the sandbox cannot
+# reach crates.io reliably, and `wat` is a test-only convenience.
+wat = "=1.253.0"
