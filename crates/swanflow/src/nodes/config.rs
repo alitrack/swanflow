@@ -83,9 +83,7 @@ pub fn required_string_array(config: &JsonValue, key: &str) -> Result<Vec<String
 /// execution time, the same as before this check existed).
 pub fn validate_local_file(path: &str, what: &str) -> Result<()> {
     let p = std::path::Path::new(path);
-    let contains_glob = path
-        .bytes()
-        .any(|b| matches!(b, b'*' | b'?' | b'[' | b']'));
+    let contains_glob = path.bytes().any(|b| matches!(b, b'*' | b'?' | b'[' | b']'));
     if contains_glob {
         let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
         if let Some(dir) = parent {

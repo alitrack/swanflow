@@ -8,7 +8,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::nodes::config as cfg;
-use crate::nodes::{NodeBehavior, TypedNodeBehavior, NodeSpec, PortSpec};
+use crate::nodes::{NodeBehavior, NodeSpec, PortSpec, TypedNodeBehavior};
 
 #[derive(Debug, Clone)]
 pub struct SqlProxyLogical {
@@ -90,9 +90,7 @@ impl SqlProxyLogical {
     /// Used by the DuckDB SQL backend to compile the carried query
     /// (P1-4: previously the backend treated SqlProxy as a no-op wrapper
     /// and silently dropped the user's SQL).
-    pub fn from_extension(
-        ext: &datafusion::logical_expr::Extension,
-    ) -> Option<&SqlProxyLogical> {
+    pub fn from_extension(ext: &datafusion::logical_expr::Extension) -> Option<&SqlProxyLogical> {
         ext.node.as_any().downcast_ref::<SqlProxyLogical>()
     }
 }
@@ -217,4 +215,3 @@ impl TypedNodeBehavior for SqlNode {
     const INPUT_COUNT: usize = 1;
     const OUTPUT_COUNT: usize = 1;
 }
-

@@ -1,11 +1,11 @@
 pub mod adapter;
 pub mod agent;
 pub mod core;
+pub mod deploy;
 pub mod docs_portal;
 pub mod hotl;
 pub mod mcp;
 pub mod nodes;
-pub mod deploy;
 
 /// Load a workflow from a YAML/JSON file (shared by the CLI and the
 /// daemon's automation sensor registration).
@@ -21,7 +21,6 @@ pub fn load_workflow_file(path: &std::path::Path) -> anyhow::Result<core::graph:
         Ok(serde_json::from_str(&content)?)
     }
 }
-
 
 // Python wheel bindings — only compiled with feature "python", keeping the
 // default build free of any libpython linkage.

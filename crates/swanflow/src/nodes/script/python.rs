@@ -184,10 +184,7 @@ impl ExecutionPlan for PythonExec {
                 children[0].clone(),
                 schema.clone(),
             )),
-            None => Arc::new(Self::new(
-                self.script.clone(),
-                children[0].clone(),
-            )),
+            None => Arc::new(Self::new(self.script.clone(), children[0].clone())),
         })
     }
 
@@ -199,13 +196,14 @@ impl ExecutionPlan for PythonExec {
         let input_stream = self.input.execute(partition, context)?;
 
         // Parse sandboxed flag from script prefix (format: "sandboxed:true/false\n...")
-        let (sandboxed, actual_script) = if let Some(rest) = self.script.strip_prefix("sandboxed:false\n") {
-            (false, rest.to_string())
-        } else if let Some(rest) = self.script.strip_prefix("sandboxed:true\n") {
-            (true, rest.to_string())
-        } else {
-            (true, self.script.clone()) // default: sandboxed
-        };
+        let (sandboxed, actual_script) =
+            if let Some(rest) = self.script.strip_prefix("sandboxed:false\n") {
+                (false, rest.to_string())
+            } else if let Some(rest) = self.script.strip_prefix("sandboxed:true\n") {
+                (true, rest.to_string())
+            } else {
+                (true, self.script.clone()) // default: sandboxed
+            };
 
         // Compile the script with optional security restrictions
         let compiled_fn = Python::attach(|py| -> Result<Py<PyAny>> {
@@ -213,9 +211,9 @@ impl ExecutionPlan for PythonExec {
 
             let restricted_mod = if sandboxed {
                 PyModule::from_code(
-                py,
-                c_str!(
-                    r#"
+                    py,
+                    c_str!(
+                        r#"
 import sys
 
 def make_restricted_import(original_import):
@@ -232,10 +230,10 @@ def make_restricted_import(original_import):
         return original_import(name, globals, locals, fromlist, level)
     return restricted_import
 "#
-                ),
-                c_str!("restricted_import.py"),
-                c_str!("restricted_import"),
-            )?
+                    ),
+                    c_str!("restricted_import.py"),
+                    c_str!("restricted_import"),
+                )?
             } else {
                 // Unrestricted mode: allow all imports (for KNIME bridge scripts using sklearn/tensorflow/paramiko)
                 PyModule::from_code(
@@ -342,7 +340,8 @@ struct PythonStream {
     /// Advertised output schema (mirrors PythonExec.schema_override).
     schema_override: Option<arrow::datatypes::SchemaRef>,
     /// Stores the oneshot receiver from an in-flight spawn_blocking Python call.
-    pending_result: Option<tokio::sync::oneshot::Receiver<std::result::Result<RecordBatch, anyhow::Error>>>,
+    pending_result:
+        Option<tokio::sync::oneshot::Receiver<std::result::Result<RecordBatch, anyhow::Error>>>,
 }
 
 impl RecordBatchStream for PythonStream {
@@ -382,11 +381,9 @@ impl Stream for PythonStream {
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                     self.pending_result = None;
-                    return Poll::Ready(Some(Err(
-                        datafusion::error::DataFusionError::Execution(
-                            "Python execution channel closed unexpectedly".to_string(),
-                        ),
-                    )));
+                    return Poll::Ready(Some(Err(datafusion::error::DataFusionError::Execution(
+                        "Python execution channel closed unexpectedly".to_string(),
+                    ))));
                 }
             }
         }
@@ -415,7 +412,9 @@ impl Stream for PythonStream {
                             // rebinds `batch` via pa.ipc.open_stream.
                             let mut ipc_buf: Vec<u8> = Vec::new();
                             {
-                                use datafusion::arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+                                use datafusion::arrow::ipc::writer::{
+                                    IpcWriteOptions, StreamWriter,
+                                };
                                 let options = IpcWriteOptions::default();
                                 let mut writer = StreamWriter::try_new_with_options(
                                     &mut ipc_buf,
@@ -499,7 +498,10 @@ impl NodeBehavior for PythonNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let script = cfg::required_string(config, "script")?;
-        let sandboxed = config.get("sandboxed").and_then(|v| v.as_bool()).unwrap_or(true);
+        let sandboxed = config
+            .get("sandboxed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         let full_script = format!("sandboxed:{}\n{}", sandboxed, script); // encode sandboxed flag in script prefix
 
         // Output schema resolution for downstream planning. A Python transform
@@ -545,10 +547,10 @@ fn declared_output_schema(config: &JsonValue) -> Option<DFSchemaRef> {
     if fields.is_empty() {
         return None;
     }
-    Some(Arc::new(datafusion::common::DFSchema::try_from(
-        datafusion::arrow::datatypes::Schema::new(fields),
-    )
-    .ok()?))
+    Some(Arc::new(
+        datafusion::common::DFSchema::try_from(datafusion::arrow::datatypes::Schema::new(fields))
+            .ok()?,
+    ))
 }
 
 /// Execute the input plan, feed the first batch through the compiled Python
@@ -562,22 +564,20 @@ async fn probe_python_schema(script: &str, input: LogicalPlan) -> Option<DFSchem
     let first = batches.into_iter().next()?;
 
     // 2. Wrap the sample batch in an in-memory physical plan via MemTable scan.
-    let mem_table = datafusion::datasource::MemTable::try_new(
-        first.schema(),
-        vec![vec![first.clone()]],
-    )
-    .ok()?;
+    let mem_table =
+        datafusion::datasource::MemTable::try_new(first.schema(), vec![vec![first.clone()]])
+            .ok()?;
     let probe_ctx = datafusion::prelude::SessionContext::new();
     probe_ctx
         .register_table("python_probe_input", Arc::new(mem_table))
         .ok()?;
-    let df = probe_ctx.sql("SELECT * FROM python_probe_input").await.ok()?;
-    let plan = df.into_unoptimized_plan();
-    let state = probe_ctx.state();
-    let physical_input = state
-        .create_physical_plan(&plan)
+    let df = probe_ctx
+        .sql("SELECT * FROM python_probe_input")
         .await
         .ok()?;
+    let plan = df.into_unoptimized_plan();
+    let state = probe_ctx.state();
+    let physical_input = state.create_physical_plan(&plan).await.ok()?;
 
     // 3. Run it through PythonExec and take the first output batch's schema.
     let exec = PythonExec::new(script.to_string(), physical_input);
@@ -589,7 +589,9 @@ async fn probe_python_schema(script: &str, input: LogicalPlan) -> Option<DFSchem
     if batch.num_rows() == 0 || batch.num_columns() == 0 {
         return None;
     }
-    Some(Arc::new(datafusion::common::DFSchema::try_from(batch.schema()).ok()?))
+    Some(Arc::new(
+        datafusion::common::DFSchema::try_from(batch.schema()).ok()?,
+    ))
 }
 
 /// A node that registers a Python-based UDF into DataFusion.
@@ -663,14 +665,14 @@ mod tests {
     fn test_propose_plan_encodes_sandboxed_prefix() {
         let node = PythonNode;
         let config = json!({"script": "x = 1", "sandboxed": false});
-        let empty_input = LogicalPlan::EmptyRelation(
-            datafusion::logical_expr::EmptyRelation {
-                produce_one_row: false,
-                schema: Arc::new(datafusion::common::DFSchema::empty()),
-            },
-        );
+        let empty_input = LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(datafusion::common::DFSchema::empty()),
+        });
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let plans = rt.block_on(node.propose_plan(vec![empty_input], &config)).unwrap();
+        let plans = rt
+            .block_on(node.propose_plan(vec![empty_input], &config))
+            .unwrap();
         let plan = &plans[0];
         if let LogicalPlan::Extension(ext) = plan {
             let logical = ext.node.as_any().downcast_ref::<PythonLogical>().unwrap();
@@ -685,14 +687,14 @@ mod tests {
     fn test_propose_plan_sandboxed_true_prefix() {
         let node = PythonNode;
         let config = json!({"script": "x = 1"});
-        let empty_input = LogicalPlan::EmptyRelation(
-            datafusion::logical_expr::EmptyRelation {
-                produce_one_row: false,
-                schema: Arc::new(datafusion::common::DFSchema::empty()),
-            },
-        );
+        let empty_input = LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(datafusion::common::DFSchema::empty()),
+        });
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let plans = rt.block_on(node.propose_plan(vec![empty_input], &config)).unwrap();
+        let plans = rt
+            .block_on(node.propose_plan(vec![empty_input], &config))
+            .unwrap();
         let plan = &plans[0];
         if let LogicalPlan::Extension(ext) = plan {
             let logical = ext.node.as_any().downcast_ref::<PythonLogical>().unwrap();

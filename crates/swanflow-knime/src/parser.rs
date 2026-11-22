@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
-use quick_xml::events::Event;
-use quick_xml::Reader;
 use crate::error::{KnimeError, KnimeResult};
 use crate::types::{KnimeEdge, KnimeNode, KnwfArchive, WorkflowMeta};
+use quick_xml::events::Event;
+use quick_xml::Reader;
 
 /// Collect XML element attributes into a Vec of (key, value) strings.
 fn collect_attrs(e: &quick_xml::events::BytesStart) -> Vec<(String, String)> {
@@ -22,7 +22,10 @@ fn collect_attrs(e: &quick_xml::events::BytesStart) -> Vec<(String, String)> {
 
 /// Get the value of a named attribute.
 fn get_attr(attrs: &[(String, String)], name: &str) -> Option<String> {
-    attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    attrs
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.clone())
 }
 
 /// Parser for `.knwf` workflow archives.
@@ -49,7 +52,9 @@ impl KnwfParser {
     ) -> KnimeResult<String> {
         let mut best: Option<(usize, String)> = None;
         for i in 0..archive.len() {
-            let Ok(file) = archive.by_index(i) else { continue };
+            let Ok(file) = archive.by_index(i) else {
+                continue;
+            };
             let fname = file.name().to_string();
             if fname.starts_with(prefix) && fname.ends_with(suffix) {
                 let depth = fname.matches('/').count();
@@ -71,7 +76,9 @@ impl KnwfParser {
             .by_name(&wf_entry)
             .map_err(|_| KnimeError::MissingWorkflow)?;
         let mut wf_xml = String::new();
-        wf_file.read_to_string(&mut wf_xml).map_err(KnimeError::Io)?;
+        wf_file
+            .read_to_string(&mut wf_xml)
+            .map_err(KnimeError::Io)?;
         drop(wf_file);
 
         // Derive the enclosing directory prefix for this workflow
@@ -153,9 +160,16 @@ impl KnwfParser {
             // The metanode directory is wf_prefix + node_name + "/"
             let meta_dir = format!("{}{}/", wf_prefix, node_name);
             match Self::parse_zip_at(archive, &meta_dir) {
-                Ok(sub) => { metanodes.insert(node.id.clone(), sub); }
+                Ok(sub) => {
+                    metanodes.insert(node.id.clone(), sub);
+                }
                 Err(e) => {
-                    tracing::warn!("Failed to parse metanode {} ({}): {}", node.id, node_name, e);
+                    tracing::warn!(
+                        "Failed to parse metanode {} ({}): {}",
+                        node.id,
+                        node_name,
+                        e
+                    );
                 }
             }
         }
@@ -178,7 +192,11 @@ impl KnwfParser {
         let mut buf = Vec::new();
 
         #[derive(Debug, PartialEq)]
-        enum Section { Root, Nodes, Connections }
+        enum Section {
+            Root,
+            Nodes,
+            Connections,
+        }
 
         let mut section = Section::Root;
         let mut current_node: Option<RawNodeBuilder> = None;
@@ -190,7 +208,9 @@ impl KnwfParser {
                 Ok(Event::Start(ref e)) => {
                     let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                     if tag == "config" {
-                        let key = e.attributes().flatten()
+                        let key = e
+                            .attributes()
+                            .flatten()
                             .find(|a| a.key.as_ref() == b"key")
                             .map(|a| String::from_utf8_lossy(&a.value).to_string());
 
@@ -206,7 +226,9 @@ impl KnwfParser {
                                     ..Default::default()
                                 });
                             }
-                            k if section == Section::Connections && k.starts_with("connection_") => {
+                            k if section == Section::Connections
+                                && k.starts_with("connection_") =>
+                            {
                                 current_edge = Some(EdgeBuilder::default());
                             }
                             _ => {}
@@ -216,10 +238,14 @@ impl KnwfParser {
                 Ok(Event::Empty(ref e)) => {
                     let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                     if tag == "entry" {
-                        let key = e.attributes().flatten()
+                        let key = e
+                            .attributes()
+                            .flatten()
                             .find(|a| a.key.as_ref() == b"key")
                             .map(|a| String::from_utf8_lossy(&a.value).to_string());
-                        let value = e.attributes().flatten()
+                        let value = e
+                            .attributes()
+                            .flatten()
                             .find(|a| a.key.as_ref() == b"value")
                             .map(|a| String::from_utf8_lossy(&a.value).to_string());
 

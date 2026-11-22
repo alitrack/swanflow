@@ -11,7 +11,9 @@ async fn union_all_batch_count_probe() {
     let state = ctx.state();
     let phys = state.create_physical_plan(&plan).await.unwrap();
     println!("PHYSICAL_PLAN: {}", displayable(phys.as_ref()).indent(true));
-    let batches = datafusion::physical_plan::collect(phys, state.task_ctx()).await.unwrap();
+    let batches = datafusion::physical_plan::collect(phys, state.task_ctx())
+        .await
+        .unwrap();
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     println!("BATCH_COUNT={} TOTAL_ROWS={}", batches.len(), total_rows);
     for (i, b) in batches.iter().enumerate() {

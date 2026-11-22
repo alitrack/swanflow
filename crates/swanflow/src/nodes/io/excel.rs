@@ -198,10 +198,7 @@ impl NodeBehavior for ExcelReadNode {
                 .ok_or_else(|| anyhow!("No sheets found"))?
                 .map_err(|e| anyhow!("Error reading first sheet: {}", e))?
         };
-        let header_row = range
-            .rows()
-            .next()
-            .ok_or_else(|| anyhow!("Empty sheet"))?;
+        let header_row = range.rows().next().ok_or_else(|| anyhow!("Empty sheet"))?;
         let fields: Vec<Field> = if has_header {
             header_row
                 .iter()
@@ -281,8 +278,10 @@ impl NodeBehavior for ExcelWriteNode {
         let sheet = cfg::optional_string(config, "sheet").unwrap_or_else(|| "Sheet1".to_string());
         let convert_to_table = cfg::optional_bool(config, "convert_to_table").unwrap_or(true);
         let styles = config.get("styles").cloned().unwrap_or_else(|| json!([]));
-        let conditional_formatting =
-            config.get("conditional_formatting").cloned().unwrap_or_else(|| json!([]));
+        let conditional_formatting = config
+            .get("conditional_formatting")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
 
         let sink_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(ExcelSinkLogical {

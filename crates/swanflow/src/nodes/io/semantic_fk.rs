@@ -51,7 +51,9 @@ fn quote_ident(s: &str) -> String {
 
 /// Deterministic name-match candidates: column ↔ single-column PK of
 /// another table, exact name or plausible FK naming (`x_id` → `x`).
-fn name_match_candidates(tables: &[crate::nodes::io::ossie_export::TableMeta]) -> Vec<(usize, String, usize, String)> {
+fn name_match_candidates(
+    tables: &[crate::nodes::io::ossie_export::TableMeta],
+) -> Vec<(usize, String, usize, String)> {
     // (from_table_idx, from_column, to_table_idx, to_column)
     let mut out = Vec::new();
     for (ai, a) in tables.iter().enumerate() {
@@ -66,7 +68,8 @@ fn name_match_candidates(tables: &[crate::nodes::io::ossie_export::TableMeta]) -
                 }
                 let pk = &b.primary_key[0];
                 if col.name == *pk
-                    || (col.name.ends_with("_id") && col.name.trim_end_matches("_id") == pk.as_str())
+                    || (col.name.ends_with("_id")
+                        && col.name.trim_end_matches("_id") == pk.as_str())
                     || (col.name == format!("{}_id", pk))
                 {
                     out.push((ai, col.name.clone(), bi, pk.clone()));
@@ -102,8 +105,19 @@ fn probe(
         bc = quote_ident(b_col),
     );
     let row: (u64, u64, u64, u64) = conn
-        .query_row(&sql, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-        .map_err(|e| anyhow!("FK probe failed for {}.{} → {}.{}: {}", a_tbl, a_col, b_tbl, b_col, e))?;
+        .query_row(&sql, [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map_err(|e| {
+            anyhow!(
+                "FK probe failed for {}.{} → {}.{}: {}",
+                a_tbl,
+                a_col,
+                b_tbl,
+                b_col,
+                e
+            )
+        })?;
     let (fk_rows, fk_nonnull, matched, pk_rows) = row;
     let ratio = if fk_nonnull == 0 {
         0.0
@@ -271,19 +285,34 @@ impl NodeBehavior for SemanticFkInferNode {
                 col(validated.iter().map(|c| c.to_column.clone()).collect()),
                 col(validated
                     .iter()
-                    .map(|c| format!("{}_to_{}", c.from_table.replace('.', "_"), c.to_table.replace('.', "_")))
+                    .map(|c| {
+                        format!(
+                            "{}_to_{}",
+                            c.from_table.replace('.', "_"),
+                            c.to_table.replace('.', "_")
+                        )
+                    })
                     .collect()),
                 Arc::new(Float64Array::from(
                     validated.iter().map(|c| c.match_ratio).collect::<Vec<_>>(),
                 )),
                 Arc::new(datafusion::arrow::array::Int64Array::from(
-                    validated.iter().map(|c| c.fk_nonnull as i64).collect::<Vec<_>>(),
+                    validated
+                        .iter()
+                        .map(|c| c.fk_nonnull as i64)
+                        .collect::<Vec<_>>(),
                 )),
                 Arc::new(datafusion::arrow::array::Int64Array::from(
-                    validated.iter().map(|c| c.matched_rows as i64).collect::<Vec<_>>(),
+                    validated
+                        .iter()
+                        .map(|c| c.matched_rows as i64)
+                        .collect::<Vec<_>>(),
                 )),
                 Arc::new(datafusion::arrow::array::Int64Array::from(
-                    validated.iter().map(|c| c.pk_rows as i64).collect::<Vec<_>>(),
+                    validated
+                        .iter()
+                        .map(|c| c.pk_rows as i64)
+                        .collect::<Vec<_>>(),
                 )),
                 Arc::new(BooleanArray::from(
                     validated.iter().map(|_| true).collect::<Vec<_>>(),
@@ -352,12 +381,19 @@ mod tests {
                     && tt.value(i) == "customers"
                     && tc.value(i) == "customer_id"
                 {
-                    assert!((ratio.value(i) - 1.0).abs() < 1e-9, "ratio {} != 1.0", ratio.value(i));
+                    assert!(
+                        (ratio.value(i) - 1.0).abs() < 1e-9,
+                        "ratio {} != 1.0",
+                        ratio.value(i)
+                    );
                     found = true;
                 }
             }
         }
-        assert!(found, "orders.customer_id → customers.customer_id not inferred");
+        assert!(
+            found,
+            "orders.customer_id → customers.customer_id not inferred"
+        );
     }
 
     #[test]
@@ -370,7 +406,10 @@ mod tests {
                 "table={} pk={:?} cols={:?}",
                 tm.table,
                 tm.primary_key,
-                tm.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()
+                tm.columns
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
             );
         }
         let cands = name_match_candidates(&tables);

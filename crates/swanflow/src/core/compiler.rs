@@ -128,8 +128,7 @@ impl WorkflowCompiler {
                                 }
                             }
                             if !outs.is_empty() {
-                                self.compiled_outputs
-                                    .insert(node.id, outs);
+                                self.compiled_outputs.insert(node.id, outs);
                             }
                         }
                     }
@@ -280,9 +279,7 @@ impl WorkflowCompiler {
                     node_type: node.type_id.clone(),
                     port,
                     plan,
-                    conditional_when: if node.mode
-                        == crate::core::graph::StepMode::Conditional
-                    {
+                    conditional_when: if node.mode == crate::core::graph::StepMode::Conditional {
                         node.when.clone()
                     } else {
                         None
@@ -295,7 +292,6 @@ impl WorkflowCompiler {
 
         Ok(stages)
     }
-
 
     /// Compile a sub_workflow's own graph into stages (used by loop mode).
     /// Recursion is boxed to satisfy the async recursion rule.

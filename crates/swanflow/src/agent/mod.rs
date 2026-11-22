@@ -307,11 +307,7 @@ OUTPUT FORMAT — respond with a JSON object:
                 _ => return None,
             }
         };
-        let close: char = if open == '{' {
-            '}'
-        } else {
-            ']'
-        };
+        let close: char = if open == '{' { '}' } else { ']' };
         let start = completion.find(open)?;
 
         let mut depth: i32 = 0;
@@ -404,8 +400,9 @@ OUTPUT FORMAT — respond with a JSON object:
                     println!("[Agent] InferMetadata requested by LLM");
                 }
                 "create_lua_lib" => {
-                    let args: CreateLuaLibArguments = serde_json::from_value(call.arguments.clone())
-                        .context("invalid create_lua_lib arguments")?;
+                    let args: CreateLuaLibArguments =
+                        serde_json::from_value(call.arguments.clone())
+                            .context("invalid create_lua_lib arguments")?;
                     self.create_lua_lib(&args.lib_name, &args.source, args.category.as_deref())?;
                 }
                 other => {
@@ -427,22 +424,11 @@ OUTPUT FORMAT — respond with a JSON object:
     /// 1. `SWANFLOW_LUAJIT_LIBS_DIR` — explicit libs repo root
     /// 2. local dev clone `/mnt/d/wsl2/duckdb-luajit-libs`
     /// 3. `~/.duckdb/luajit-libs` — extension offline cache (INDEX-less write)
-    fn create_lua_lib(
-        &self,
-        lib_name: &str,
-        source: &str,
-        category: Option<&str>,
-    ) -> Result<()> {
+    fn create_lua_lib(&self, lib_name: &str, source: &str, category: Option<&str>) -> Result<()> {
         // Sanitize lib name: ascii alnum + underscore (like sigil's tool names).
         let clean: String = lib_name
             .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c
-                } else {
-                    '_'
-                }
-            })
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
         let clean = clean.trim_matches('_');
         if clean.is_empty() {
@@ -456,13 +442,7 @@ OUTPUT FORMAT — respond with a JSON object:
         let clean_cat: String = category
             .unwrap_or("udf")
             .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c
-                } else {
-                    '_'
-                }
-            })
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
         let clean_cat = clean_cat.trim_matches('_');
         if clean_cat.is_empty() {
@@ -509,7 +489,10 @@ OUTPUT FORMAT — respond with a JSON object:
         if index_path.exists() {
             let index = std::fs::read_to_string(&index_path)?;
             let entry = format!("{clean}|libs/{clean_cat}/{clean}.lua");
-            if !index.lines().any(|l| l.trim().starts_with(&format!("{clean}|"))) {
+            if !index
+                .lines()
+                .any(|l| l.trim().starts_with(&format!("{clean}|")))
+            {
                 let mut updated = index.trim_end().to_string();
                 updated.push('\n');
                 updated.push_str(&entry);
@@ -603,8 +586,7 @@ Description: {}
             let first_nl = cleaned.find('\n').unwrap_or(cleaned.len());
             let first_line = cleaned[..first_nl].trim().to_lowercase();
             if first_line == "yaml" || first_line == "yml" {
-                cleaned[first_nl..]
-                    .trim_start_matches(['\n', '\r'])
+                cleaned[first_nl..].trim_start_matches(['\n', '\r'])
             } else {
                 cleaned
             }
@@ -619,14 +601,11 @@ Description: {}
         } else {
             let yaml_val: serde_yaml::Value = serde_yaml::from_str(cleaned)
                 .with_context(|| format!("failed to parse workflow YAML:\n{}", cleaned))?;
-            serde_json::to_value(&yaml_val)
-                .with_context(|| "failed to convert YAML→JSON")?
+            serde_json::to_value(&yaml_val).with_context(|| "failed to convert YAML→JSON")?
         };
 
         // Build a real Workflow from the flat structure.
-        let mut wf = Workflow::new(
-            flat["name"].as_str().unwrap_or("agent-workflow"),
-        );
+        let mut wf = Workflow::new(flat["name"].as_str().unwrap_or("agent-workflow"));
 
         // Phase 1: collect flat node descriptors.
         let flat_nodes: Vec<FlatNode> = flat["nodes"]
@@ -663,7 +642,9 @@ Description: {}
 
         // Phase 3: add edges. Resolve source/target by UUID first, then type_id.
         fn find_node_pos(flat_nodes: &[FlatNode], key: &str) -> Option<usize> {
-            flat_nodes.iter().position(|d| d.uuid == key || d.type_id == key)
+            flat_nodes
+                .iter()
+                .position(|d| d.uuid == key || d.type_id == key)
         }
 
         if let Some(edges_arr) = flat["edges"].as_array() {
@@ -673,10 +654,12 @@ Description: {}
                 if src.is_empty() || dst.is_empty() {
                     continue;
                 }
-                let from_pos = find_node_pos(&flat_nodes, src)
-                    .ok_or_else(|| anyhow::anyhow!("edge source '{}' not found in nodes list", src))?;
-                let to_pos = find_node_pos(&flat_nodes, dst)
-                    .ok_or_else(|| anyhow::anyhow!("edge target '{}' not found in nodes list", dst))?;
+                let from_pos = find_node_pos(&flat_nodes, src).ok_or_else(|| {
+                    anyhow::anyhow!("edge source '{}' not found in nodes list", src)
+                })?;
+                let to_pos = find_node_pos(&flat_nodes, dst).ok_or_else(|| {
+                    anyhow::anyhow!("edge target '{}' not found in nodes list", dst)
+                })?;
                 let sp = e["source_port"].as_u64().unwrap_or(0) as u32;
                 let tp = e["target_port"].as_u64().unwrap_or(0) as u32;
                 wf.graph.add_edge(
@@ -879,9 +862,18 @@ mod tests {
         let prompt = agent.build_agent_system_prompt();
 
         // Interpolation syntax must survive format! verbatim (braces not eaten).
-        assert!(prompt.contains("${context.key}"), "context.key syntax missing");
-        assert!(prompt.contains("{{var:default}}"), "flow-var default syntax missing");
-        assert!(prompt.contains("%%var:default%%"), "knime var syntax missing");
+        assert!(
+            prompt.contains("${context.key}"),
+            "context.key syntax missing"
+        );
+        assert!(
+            prompt.contains("{{var:default}}"),
+            "flow-var default syntax missing"
+        );
+        assert!(
+            prompt.contains("%%var:default%%"),
+            "knime var syntax missing"
+        );
 
         // Performance / reporting guidance must be present.
         assert!(prompt.contains("PERFORMANCE & REPORTING GUIDANCE"));
@@ -908,7 +900,8 @@ mod tests {
 
     #[test]
     fn test_extract_top_level_json_handles_array_of_tool_calls() {
-        let input = "Here is the plan:\n[{\"name\":\"add_node\",\"arguments\":{\"type_id\":\"a\"}}]";
+        let input =
+            "Here is the plan:\n[{\"name\":\"add_node\",\"arguments\":{\"type_id\":\"a\"}}]";
         let s = AnalystAgent::extract_top_level_json(input).unwrap();
         assert!(s.starts_with('['));
         let arr: Vec<AgentToolCall> = serde_json::from_str(s).unwrap();
@@ -964,9 +957,20 @@ mod tests {
         assert_eq!(wf.graph.node_count(), 3);
         assert_eq!(wf.graph.edge_count(), 2);
         // The graph must be a real chain: csv_read -> filter -> excel_write.
-        let mut types: Vec<&str> = wf.graph.node_weights().map(|n| n.type_id.as_str()).collect();
+        let mut types: Vec<&str> = wf
+            .graph
+            .node_weights()
+            .map(|n| n.type_id.as_str())
+            .collect();
         types.sort();
-        assert_eq!(types, ["core.io.csv_read", "core.io.excel_write", "core.transform.filter"]);
+        assert_eq!(
+            types,
+            [
+                "core.io.csv_read",
+                "core.io.excel_write",
+                "core.transform.filter"
+            ]
+        );
     }
 
     #[test]
@@ -990,14 +994,20 @@ mod tests {
             engine: Arc::new(SwanFlowEngine::new(Arc::new(NodeRegistry::new()))),
         };
         agent
-            .create_lua_lib("my cool-lib", "return function(x) return x end", Some("udf"))
+            .create_lua_lib(
+                "my cool-lib",
+                "return function(x) return x end",
+                Some("udf"),
+            )
             .unwrap();
 
         // File written at libs/udf/my_cool_lib.lua
         let file = tmp.join("libs/udf/my_cool_lib.lua");
         assert!(file.exists(), "lib file should exist");
         assert!(
-            std::fs::read_to_string(&file).unwrap().contains("return function"),
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("return function"),
             "source content should be preserved"
         );
         // INDEX updated

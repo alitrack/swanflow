@@ -174,7 +174,11 @@ impl NodeBehavior for SortNode {
                     ))
                 }
             };
-            let mut term = format!("{} {}", quote_ident(&column), if desc { "DESC" } else { "ASC" });
+            let mut term = format!(
+                "{} {}",
+                quote_ident(&column),
+                if desc { "DESC" } else { "ASC" }
+            );
             if let Some(n) = nulls {
                 term.push_str(" NULLS ");
                 term.push_str(&n.to_uppercase());
@@ -182,10 +186,7 @@ impl NodeBehavior for SortNode {
             terms.push(term);
         }
 
-        let sql = format!(
-            "SELECT * FROM sort_input ORDER BY {}",
-            terms.join(", ")
-        );
+        let sql = format!("SELECT * FROM sort_input ORDER BY {}", terms.join(", "));
         Ok(vec![sql_plan("sort_input", input, &sql).await?])
     }
 }
@@ -268,7 +269,9 @@ fn count(config: &JsonValue, key: &str, required: bool) -> Result<Option<u64>> {
     };
     let Some(v) = raw else { return Ok(None) };
     if !v.is_finite() || v < 0.0 || v.fract() != 0.0 {
-        return Err(anyhow!("'{key}' must be a non-negative whole number, got {v}"));
+        return Err(anyhow!(
+            "'{key}' must be a non-negative whole number, got {v}"
+        ));
     }
     Ok(Some(v as u64))
 }
@@ -668,7 +671,9 @@ impl NodeBehavior for JoinNode {
     fn validate(&self, config: &JsonValue) -> Result<()> {
         let on = cfg::required_string(config, "on")?;
         if on.trim().is_empty() {
-            return Err(anyhow!("Join 'on' must be a SQL condition, e.g. l.id = r.id"));
+            return Err(anyhow!(
+                "Join 'on' must be a SQL condition, e.g. l.id = r.id"
+            ));
         }
         how_keyword(cfg::optional_string(config, "how").as_deref())?;
         // An empty suffix would make the collision loop below spin forever.
@@ -771,9 +776,9 @@ fn how_keyword(raw: Option<&str>) -> Result<&'static str> {
 mod tests {
     use super::*;
     use datafusion::arrow::array::{Int64Array, StringArray};
-    use std::sync::Arc;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
 
     fn orders_ctx() -> SessionContext {
         let ctx = SessionContext::new();
@@ -786,7 +791,9 @@ mod tests {
             schema,
             vec![
                 Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])),
-                Arc::new(StringArray::from(vec!["east", "west", "east", "north", "west"])),
+                Arc::new(StringArray::from(vec![
+                    "east", "west", "east", "north", "west",
+                ])),
                 Arc::new(Int64Array::from(vec![30, 5, 100, 5, 2])),
             ],
         )
@@ -815,7 +822,11 @@ mod tests {
     }
 
     async fn input(ctx: &SessionContext) -> LogicalPlan {
-        ctx.table("orders").await.unwrap().into_optimized_plan().unwrap()
+        ctx.table("orders")
+            .await
+            .unwrap()
+            .into_optimized_plan()
+            .unwrap()
     }
 
     #[tokio::test]
@@ -832,13 +843,11 @@ mod tests {
 
         let want = rows(
             &ctx,
-            ctx.sql(
-                "SELECT id, region, amount FROM orders ORDER BY amount DESC, id ASC",
-            )
-            .await
-            .unwrap()
-            .into_optimized_plan()
-            .unwrap(),
+            ctx.sql("SELECT id, region, amount FROM orders ORDER BY amount DESC, id ASC")
+                .await
+                .unwrap()
+                .into_optimized_plan()
+                .unwrap(),
         )
         .await;
 
@@ -857,11 +866,8 @@ mod tests {
             DataType::Int64,
             false,
         )]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(Int64Array::from(vec![2, 1]))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![2, 1]))]).unwrap();
         ctx.register_batch("orders", batch).unwrap();
 
         let cfg = serde_json::json!({ "by": ["x\" ; DROP TABLE orders; --"] });
@@ -943,7 +949,11 @@ mod tests {
 
         let schema = plan[0].schema();
         let names: Vec<&String> = schema.fields().iter().map(|f| f.name()).collect();
-        assert_eq!(names, vec!["id", "region", "amount"], "column order preserved");
+        assert_eq!(
+            names,
+            vec!["id", "region", "amount"],
+            "column order preserved"
+        );
         assert_eq!(
             schema.field_with_name(None, "amount").unwrap().data_type(),
             &DataType::Float64,
@@ -980,7 +990,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("amout"), "must name the offending column: {err}");
+        assert!(
+            err.contains("amout"),
+            "must name the offending column: {err}"
+        );
         assert!(err.contains("amount"), "must list what does exist: {err}");
     }
 
@@ -990,10 +1003,17 @@ mod tests {
         let plan_in = input(&ctx).await;
 
         let all = UnionNode
-            .propose_plan(vec![plan_in.clone(), plan_in.clone()], &serde_json::json!({}))
+            .propose_plan(
+                vec![plan_in.clone(), plan_in.clone()],
+                &serde_json::json!({}),
+            )
             .await
             .unwrap();
-        assert_eq!(rows(&ctx, all[0].clone()).await.len(), 10, "UNION ALL keeps both copies");
+        assert_eq!(
+            rows(&ctx, all[0].clone()).await.len(),
+            10,
+            "UNION ALL keeps both copies"
+        );
 
         let deduped = UnionNode
             .propose_plan(
@@ -1002,7 +1022,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(rows(&ctx, deduped[0].clone()).await.len(), 5, "UNION drops the copy");
+        assert_eq!(
+            rows(&ctx, deduped[0].clone()).await.len(),
+            5,
+            "UNION drops the copy"
+        );
     }
 
     #[tokio::test]
@@ -1031,7 +1055,12 @@ mod tests {
         )
         .unwrap();
         ctx.register_batch("regions", batch).unwrap();
-        let plan = ctx.table("regions").await.unwrap().into_optimized_plan().unwrap();
+        let plan = ctx
+            .table("regions")
+            .await
+            .unwrap()
+            .into_optimized_plan()
+            .unwrap();
         (ctx, plan)
     }
 
@@ -1062,8 +1091,7 @@ mod tests {
         // outer-join behaviour; here the subject is the renaming.
         assert_eq!(got.len(), 4, "inner join drops the unmatched 'north' order");
         assert!(
-            got.iter()
-                .all(|r| r.contains("east") || r.contains("west")),
+            got.iter().all(|r| r.contains("east") || r.contains("west")),
             "the surviving rows carry their region through the join: {got:?}"
         );
     }
@@ -1080,7 +1108,11 @@ mod tests {
             .await
             .unwrap();
         let left_rows = rows(&ctx, left_join[0].clone()).await;
-        assert_eq!(left_rows.len(), 5, "LEFT JOIN keeps the unmatched 'north' row");
+        assert_eq!(
+            left_rows.len(),
+            5,
+            "LEFT JOIN keeps the unmatched 'north' row"
+        );
 
         let inner_join = JoinNode
             .propose_plan(
@@ -1122,5 +1154,4 @@ mod tests {
             assert!(id.starts_with("core.transform."), "unexpected id {id}");
         }
     }
-
 }

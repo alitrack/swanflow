@@ -28,13 +28,13 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::RecordBatchStream;
-use futures::StreamExt;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::RecordBatchStream;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datafusion::physical_plan::{ExecutionPlan, PlanProperties};
-use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use futures::stream::Stream;
+use futures::StreamExt;
 use serde_json::Value as JsonValue;
 
 use crate::nodes::config as cfg;
@@ -225,7 +225,18 @@ impl ExecutionPlan for DuckSqlExec {
 
 enum DuckSqlState {
     Polling,
-    Running(std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<RecordBatch, datafusion::error::DataFusionError>> + Send>>),
+    Running(
+        std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<
+                            RecordBatch,
+                            datafusion::error::DataFusionError,
+                        >,
+                    > + Send,
+            >,
+        >,
+    ),
     Done,
 }
 
@@ -247,10 +258,7 @@ impl RecordBatchStream for DuckSqlStream {
 impl Stream for DuckSqlStream {
     type Item = std::result::Result<RecordBatch, datafusion::error::DataFusionError>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             // Discriminant-only match (E0499 borrow guard, vector.rs pattern).
             match self.state {
@@ -382,7 +390,11 @@ async fn run_duckdb_query(
             // unaffected.
             continue;
         }
-        let f = tmp_dir.join(format!("swan_ducksql_in_{}_{}.parquet", i, uuid::Uuid::new_v4()));
+        let f = tmp_dir.join(format!(
+            "swan_ducksql_in_{}_{}.parquet",
+            i,
+            uuid::Uuid::new_v4()
+        ));
         {
             let file = std::fs::File::create(&f).map_err(ext_err)?;
             let mut w = ArrowWriter::try_new(file, batches[0].schema(), None).map_err(ext_err)?;
@@ -407,7 +419,9 @@ async fn run_duckdb_query(
             // binaries (ml/turbovec/luajit/...) can be loaded by path.
             let config = duckdb::Config::default()
                 .allow_unsigned_extensions()
-                .map_err(|e| duckdb::Error::InvalidParameterName(format!("DuckDB config failed: {e}")))?;
+                .map_err(|e| {
+                    duckdb::Error::InvalidParameterName(format!("DuckDB config failed: {e}"))
+                })?;
             let conn = duckdb::Connection::open_in_memory_with_flags(config)?;
             load_extensions(&conn, &ext_owned)?;
             for (i, f) in input_files.iter().enumerate() {
@@ -424,7 +438,10 @@ async fn run_duckdb_query(
             // a string literal — do not single-quote-escape it (doubling '
             // here produced ''.city'' parser errors in the first E2E).
             conn.execute(
-                &format!("COPY ({}) TO '{}' (FORMAT PARQUET)", query_owned, out_path_owned),
+                &format!(
+                    "COPY ({}) TO '{}' (FORMAT PARQUET)",
+                    query_owned, out_path_owned
+                ),
                 [],
             )?;
             for f in input_files.iter() {
@@ -440,7 +457,10 @@ async fn run_duckdb_query(
     // Read back with DataFusion and cast to declared schema
     let ctx = datafusion::prelude::SessionContext::new();
     let df = ctx
-        .read_parquet(&out_path_str, datafusion::prelude::ParquetReadOptions::default())
+        .read_parquet(
+            &out_path_str,
+            datafusion::prelude::ParquetReadOptions::default(),
+        )
         .await
         .map_err(ext_err)?;
     let batches = df.collect().await.map_err(ext_err)?;
@@ -464,7 +484,12 @@ async fn run_duckdb_query(
         for (i, field) in target.fields().iter().enumerate() {
             let actual_name = b.schema().field(i).name().clone();
             if actual_name != *field.name() {
-                name_mismatches.push(format!("col {}: declared '{}' but produced '{}'", i, field.name(), actual_name));
+                name_mismatches.push(format!(
+                    "col {}: declared '{}' but produced '{}'",
+                    i,
+                    field.name(),
+                    actual_name
+                ));
             }
         }
         if !name_mismatches.is_empty() {
@@ -479,13 +504,10 @@ async fn run_duckdb_query(
             .zip(b.columns())
             .map(|(field, col)| cast(col, field.data_type()))
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| {
-                datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
-            })?;
+            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
         cast_batches.push(
-            RecordBatch::try_new(Arc::new(target.clone()), columns).map_err(|e| {
-                datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
-            })?,
+            RecordBatch::try_new(Arc::new(target.clone()), columns)
+                .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?,
         );
     }
     if cast_batches.is_empty() {
@@ -511,12 +533,13 @@ fn concat_batches_safe(
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
         columns.push(combined);
     }
-    RecordBatch::try_new(schema, columns).map_err(|e| {
-        datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
-    })
+    RecordBatch::try_new(schema, columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
 
-fn ext_err(e: impl std::error::Error + Send + Sync + 'static) -> datafusion::error::DataFusionError {
+fn ext_err(
+    e: impl std::error::Error + Send + Sync + 'static,
+) -> datafusion::error::DataFusionError {
     datafusion::error::DataFusionError::External(Box::new(e))
 }
 
@@ -641,7 +664,10 @@ impl NodeBehavior for DuckSqlNode {
                     continue;
                 }
             }
-            return Err(anyhow!("DuckDB statement '{}' is not allowed in this node", banned.trim()));
+            return Err(anyhow!(
+                "DuckDB statement '{}' is not allowed in this node",
+                banned.trim()
+            ));
         }
         Ok(())
     }
@@ -713,7 +739,11 @@ async fn discover_duck_schema(
     let tmp_dir = std::env::temp_dir();
     let mut files = Vec::new();
     for (i, b) in sample_batches.iter().enumerate() {
-        let f = tmp_dir.join(format!("swan_ducksql_disc_{}_{}.parquet", i, uuid::Uuid::new_v4()));
+        let f = tmp_dir.join(format!(
+            "swan_ducksql_disc_{}_{}.parquet",
+            i,
+            uuid::Uuid::new_v4()
+        ));
         write_sample_parquet(&f, b).ok()?;
         files.push(f);
     }
@@ -724,7 +754,9 @@ async fn discover_duck_schema(
         // functions (ml_train_model etc.) bind during schema discovery too.
         let config = duckdb::Config::default()
             .allow_unsigned_extensions()
-            .map_err(|e| duckdb::Error::InvalidParameterName(format!("DuckDB config failed: {e}")))?;
+            .map_err(|e| {
+                duckdb::Error::InvalidParameterName(format!("DuckDB config failed: {e}"))
+            })?;
         let conn = duckdb::Connection::open_in_memory_with_flags(config)?;
         load_extensions(&conn, &ext_owned)?;
         for (i, f) in files.iter().enumerate() {
@@ -770,9 +802,9 @@ async fn discover_duck_schema(
     if fields.is_empty() {
         return None;
     }
-    Some(Arc::new(DFSchema::try_from(
-        datafusion::arrow::datatypes::Schema::new(fields),
-    ).ok()?))
+    Some(Arc::new(
+        DFSchema::try_from(datafusion::arrow::datatypes::Schema::new(fields)).ok()?,
+    ))
 }
 
 fn write_sample_parquet(path: &std::path::Path, batch: &RecordBatch) -> Result<()> {

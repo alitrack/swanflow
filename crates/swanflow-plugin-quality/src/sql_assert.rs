@@ -119,10 +119,7 @@ impl NodeBehavior for SqlAssertNode {
             .get("sql")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("SqlAssertNode: missing 'sql'"))?;
-        let op = config
-            .get("op")
-            .and_then(|v| v.as_str())
-            .unwrap_or("==");
+        let op = config.get("op").and_then(|v| v.as_str()).unwrap_or("==");
         let sql_op = OPS
             .iter()
             .find(|(o, _)| *o == op)
@@ -184,10 +181,8 @@ mod tests {
             Field::new("score", DataType::Float64, true),
         ]));
         let id_arr = Int64Array::from(vec![Some(1), Some(2), Some(3)]);
-        let name_arr =
-            StringArray::from(vec![Some("alice"), Some("bob"), Some("carol")]);
-        let score_arr =
-            Float64Array::from(vec![Some(10.0), Some(20.0), Some(30.0)]);
+        let name_arr = StringArray::from(vec![Some("alice"), Some("bob"), Some("carol")]);
+        let score_arr = Float64Array::from(vec![Some(10.0), Some(20.0), Some(30.0)]);
         RecordBatch::try_new(
             schema,
             vec![
@@ -217,7 +212,13 @@ mod tests {
         assert_eq!(outputs.len(), 2, "pass-through + report");
         let ctx2 = SessionContext::new();
         let report_df = DataFrame::new(ctx2.state(), outputs[1].clone());
-        report_df.collect().await.unwrap().into_iter().next().unwrap()
+        report_df
+            .collect()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     fn get_bool(batch: &RecordBatch, col: &str) -> bool {
@@ -240,9 +241,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_sql_assert_eq_pass() {
-        let report =
-            run_report("SELECT COUNT(*) AS actual FROM input_0", serde_json::json!(3), None)
-                .await;
+        let report = run_report(
+            "SELECT COUNT(*) AS actual FROM input_0",
+            serde_json::json!(3),
+            None,
+        )
+        .await;
         assert!(get_bool(&report, "pass"), "count=3 expect 3 should pass");
         assert_eq!(get_i64(&report, "actual"), 3);
     }
@@ -287,7 +291,9 @@ mod tests {
         // missing sql
         assert!(node.validate(&serde_json::json!({ "expect": 1 })).is_err());
         // missing expect
-        assert!(node.validate(&serde_json::json!({ "sql": "SELECT 1" })).is_err());
+        assert!(node
+            .validate(&serde_json::json!({ "sql": "SELECT 1" }))
+            .is_err());
         // bad op
         assert!(node
             .validate(&serde_json::json!({ "sql": "SELECT 1", "expect": 1, "op": "~" }))
@@ -308,6 +314,9 @@ mod tests {
         assert_eq!(spec.type_id, "core.quality.sql_assert");
         assert_eq!(spec.input_ports.len(), 1);
         assert_eq!(spec.output_ports.len(), 2);
-        assert!(matches!(SqlAssertNode.capability(), NodeCapability::ReadOnly));
+        assert!(matches!(
+            SqlAssertNode.capability(),
+            NodeCapability::ReadOnly
+        ));
     }
 }

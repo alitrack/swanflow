@@ -152,7 +152,10 @@ mod tests {
         // truncated at "EOF while parsing a string". ASCII tests all passed.
         let response = r#"{"nodes": [{"name": "患者0001", "label": "心内科"}], "edges": [{"source": "患者0001", "target": "心内科", "type": "就诊于"}]}"#;
         let result = ConfigWizard::extract_json_from_response(response).unwrap();
-        assert_eq!(result, response, "multi-byte JSON must extract complete, not truncated");
+        assert_eq!(
+            result, response,
+            "multi-byte JSON must extract complete, not truncated"
+        );
     }
 
     #[test]

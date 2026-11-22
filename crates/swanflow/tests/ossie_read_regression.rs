@@ -74,6 +74,12 @@ async fn all_31_real_ossie_models_load_and_join() {
     println!("loaded {ok}/{files} models, {rows} rows, {metrics} metrics");
     assert_eq!(ok, files);
     assert_eq!(files, 31, "fixture drift — expected the 31 spike models");
-    assert!(rows > 100, "expected a substantive catalog, got {rows} rows");
-    assert!(metrics >= 31 * 3, "each model exports >=3 metrics, got {metrics}");
+    assert!(
+        rows > 100,
+        "expected a substantive catalog, got {rows} rows"
+    );
+    assert!(
+        metrics >= 31 * 3,
+        "each model exports >=3 metrics, got {metrics}"
+    );
 }

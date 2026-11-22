@@ -124,7 +124,10 @@ async fn a_plugin_transform_is_scheduled_by_the_engine_and_matches_sql() {
         "plugin": "sort",
         "function": "sort_table",
     });
-    let planned = node.propose_plan(vec![input], &cfg).await.expect("propose_plan");
+    let planned = node
+        .propose_plan(vec![input], &cfg)
+        .await
+        .expect("propose_plan");
 
     let batches = execute_with_engine(&ctx, planned[0].clone())
         .await
@@ -170,7 +173,11 @@ async fn a_missing_plugin_fails_at_plan_time_by_name() {
         .get_node("core.plugin.wasm_transform")
         .expect("node");
     let ctx = ctx_with_table().await;
-    let input = ctx.table("t").await.unwrap().into_optimized_plan()
+    let input = ctx
+        .table("t")
+        .await
+        .unwrap()
+        .into_optimized_plan()
         .expect("logical plan");
     let cfg = json!({
         "plugin_dir": plugin_dir().to_str().unwrap(),
@@ -191,7 +198,11 @@ async fn a_missing_plugin_fails_at_plan_time_by_name() {
 async fn a_schema_that_does_not_match_the_plugin_output_is_reported() {
     let dir = require_plugin();
     let ctx = ctx_with_table().await;
-    let input = ctx.table("t").await.unwrap().into_optimized_plan()
+    let input = ctx
+        .table("t")
+        .await
+        .unwrap()
+        .into_optimized_plan()
         .expect("logical plan");
 
     let node = registry()
@@ -205,7 +216,10 @@ async fn a_schema_that_does_not_match_the_plugin_output_is_reported() {
         "function": "sort_table",
         "output_schema": [{"name": "only_column", "type": "int64"}],
     });
-    let planned = node.propose_plan(vec![input], &cfg).await.expect("propose_plan");
+    let planned = node
+        .propose_plan(vec![input], &cfg)
+        .await
+        .expect("propose_plan");
 
     let err = execute_with_engine(&ctx, planned[0].clone())
         .await
@@ -226,10 +240,17 @@ async fn core_script_wasm_now_lowers_to_a_physical_plan() {
     // fixture.
     let node = registry().get_node("core.script.wasm").expect("node");
     let ctx = ctx_with_table().await;
-    let input = ctx.table("t").await.unwrap().into_optimized_plan()
+    let input = ctx
+        .table("t")
+        .await
+        .unwrap()
+        .into_optimized_plan()
         .expect("logical plan");
     let cfg = json!({ "module": "/nonexistent/does-not-matter-at-plan-time.wasm" });
-    let planned = node.propose_plan(vec![input], &cfg).await.expect("propose_plan");
+    let planned = node
+        .propose_plan(vec![input], &cfg)
+        .await
+        .expect("propose_plan");
 
     let planner = SwanFlowPlanner {
         event_tx: tokio::sync::mpsc::unbounded_channel().0,

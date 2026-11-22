@@ -26,10 +26,10 @@ pub mod shaper;
 pub mod types;
 
 pub use error::{KnimeError, KnimeResult};
-pub use parser::KnwfParser;
 pub use mapper::KnimeNodeMapper;
 pub use mapper::KnimeNodeMapper as Mapper;
 pub use mapper::MappingEntry;
+pub use parser::KnwfParser;
 pub use types::KnwfArchive;
 
 use swanflow_core::graph::Workflow;

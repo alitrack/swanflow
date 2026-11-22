@@ -42,8 +42,12 @@ pub struct RouterConfig {
     pub complex_threshold: u32,
 }
 
-fn default_simple_threshold() -> u32 { 1 }
-fn default_complex_threshold() -> u32 { 4 }
+fn default_simple_threshold() -> u32 {
+    1
+}
+fn default_complex_threshold() -> u32 {
+    4
+}
 
 impl Default for RouterConfig {
     fn default() -> Self {
@@ -242,10 +246,7 @@ mod tests {
     fn long_message_adds_score() {
         let router = ModelRouter::new(RouterConfig::default());
         // Config=1, long message=+1 → 2 → Medium
-        let s = signal_with_extra(
-            ErrorKind::Config, 1, false, 500,
-            ConfigComplexity::Simple,
-        );
+        let s = signal_with_extra(ErrorKind::Config, 1, false, 500, ConfigComplexity::Simple);
         assert_eq!(router.score(&s), FixComplexity::Medium);
     }
 
@@ -253,10 +254,7 @@ mod tests {
     fn complex_config_adds_score() {
         let router = ModelRouter::new(RouterConfig::default());
         // Config=1, complex_config=+2 → 3 → Medium (between 1 and 4)
-        let s = signal_with_extra(
-            ErrorKind::Config, 1, false, 0,
-            ConfigComplexity::Complex,
-        );
+        let s = signal_with_extra(ErrorKind::Config, 1, false, 0, ConfigComplexity::Complex);
         assert_eq!(router.score(&s), FixComplexity::Medium);
     }
 
@@ -264,10 +262,7 @@ mod tests {
     fn all_dimensions_stack_to_complex() {
         let router = ModelRouter::new(RouterConfig::default());
         // Topology=3 + multi=+1 + schema=+1 + long_msg=+1 + complex_config=+2 → 8 → Complex
-        let s = signal_with_extra(
-            ErrorKind::Topology, 2, true, 500,
-            ConfigComplexity::Complex,
-        );
+        let s = signal_with_extra(ErrorKind::Topology, 2, true, 500, ConfigComplexity::Complex);
         assert_eq!(router.score(&s), FixComplexity::Complex);
     }
 
@@ -280,10 +275,7 @@ mod tests {
         };
         let router = ModelRouter::new(config);
         // Config=1 + complex_config=+2 → 3, with simple≤2 → Medium
-        let s = signal_with_extra(
-            ErrorKind::Config, 1, false, 0,
-            ConfigComplexity::Complex,
-        );
+        let s = signal_with_extra(ErrorKind::Config, 1, false, 0, ConfigComplexity::Complex);
         assert_eq!(router.score(&s), FixComplexity::Medium);
 
         // Data=2 + multi=+1 + schema=+1 = 4, simple≤2, complex≥6 → Medium
@@ -319,10 +311,7 @@ mod tests {
             "mid-model"
         );
         // Topology=3 + complex_config=+2 = 5 (with complex_config: Complex), ≥4 → Complex → best
-        let s = signal_with_extra(
-            ErrorKind::Topology, 1, false, 0,
-            ConfigComplexity::Complex,
-        );
+        let s = signal_with_extra(ErrorKind::Topology, 1, false, 0, ConfigComplexity::Complex);
         assert_eq!(router.route(&s).model, "best-model");
     }
 

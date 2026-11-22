@@ -82,7 +82,10 @@ async fn run_stream(exec: &PythonExec) -> (Vec<RecordBatch>, SendableRecordBatch
     while let Some(b) = stream.next().await {
         batches.push(b.unwrap());
     }
-    (batches, exec.execute(0, Arc::new(TaskContext::default())).unwrap())
+    (
+        batches,
+        exec.execute(0, Arc::new(TaskContext::default())).unwrap(),
+    )
 }
 
 /// Bug 18: builtins (len/sum/range/round...) must be available inside the
@@ -96,8 +99,15 @@ async fn sandbox_keeps_builtins() {
     );
     let (batches, _) = run_stream(&exec).await;
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total, 5, "script using len/sum/round must run under sandbox");
-    assert_eq!(batches[0].num_columns(), 4, "transform adds zscore+flag columns");
+    assert_eq!(
+        total, 5,
+        "script using len/sum/round must run under sandbox"
+    );
+    assert_eq!(
+        batches[0].num_columns(),
+        4,
+        "transform adds zscore+flag columns"
+    );
 }
 
 /// Bug 18 (negative): the sandbox must still block dangerous imports.
@@ -126,7 +136,12 @@ async fn advertised_schema_surfaces_in_exec_schema() {
         physical_input().await,
         out_schema,
     );
-    let names: Vec<String> = exec.schema().fields().iter().map(|f| f.name().to_string()).collect();
+    let names: Vec<String> = exec
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
     assert_eq!(
         names,
         vec!["id", "value", "zscore", "flag"],
@@ -153,7 +168,12 @@ async fn advertised_schema_survives_with_new_children() {
     let exec_arc: Arc<dyn ExecutionPlan> = Arc::new(exec);
     let child = exec_arc.children()[0].clone();
     let rebuilt = exec_arc.with_new_children(vec![child]).unwrap();
-    let names: Vec<String> = rebuilt.schema().fields().iter().map(|f| f.name().to_string()).collect();
+    let names: Vec<String> = rebuilt
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
     assert_eq!(
         names,
         vec!["id", "value", "zscore", "flag"],
@@ -178,8 +198,12 @@ async fn transform_end_to_end_math_and_stream_schema() {
     );
     let mut stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
     // stream schema = advertised schema
-    let stream_fields: Vec<String> =
-        stream.schema().fields().iter().map(|f| f.name().to_string()).collect();
+    let stream_fields: Vec<String> = stream
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
     assert_eq!(stream_fields, vec!["id", "value", "zscore", "flag"]);
 
     let batches = collect(
@@ -210,7 +234,11 @@ async fn transform_end_to_end_math_and_stream_schema() {
     // id=5 has value 15.0 — the planted outlier. With n=5 the single-outlier
     // z-score is bounded by sqrt(n-1)=2, hence the 1.5 threshold in the script.
     let outlier_idx = flags.iter().position(|f| f == "high").expect("one outlier");
-    assert!(z[outlier_idx] > 1.5, "planted outlier must have z>1.5, got {}", z[outlier_idx]);
+    assert!(
+        z[outlier_idx] > 1.5,
+        "planted outlier must have z>1.5, got {}",
+        z[outlier_idx]
+    );
     assert_eq!(flags.iter().filter(|f| **f == "high").count(), 1);
 }
 

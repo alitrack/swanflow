@@ -84,21 +84,27 @@ fn compile_node(
 
     match node.type_id.as_str() {
         "core.io.csv_read" => {
-            let path = cfg["path"].as_str().ok_or("{label}: csv_read requires 'path'")?;
+            let path = cfg["path"]
+                .as_str()
+                .ok_or("{label}: csv_read requires 'path'")?;
             lines.push(format!(
                 "_con.execute(\"CREATE TABLE {table} AS SELECT * FROM read_csv_auto('{}')\")",
                 sql_quote(path)
             ));
         }
         "core.io.parquet_read" => {
-            let path = cfg["path"].as_str().ok_or("{label}: parquet_read requires 'path'")?;
+            let path = cfg["path"]
+                .as_str()
+                .ok_or("{label}: parquet_read requires 'path'")?;
             lines.push(format!(
                 "_con.execute(\"CREATE TABLE {table} AS SELECT * FROM read_parquet('{}')\")",
                 sql_quote(path)
             ));
         }
         "core.io.http_fetch" => {
-            let url = cfg["url"].as_str().ok_or("{label}: http_fetch requires 'url'")?;
+            let url = cfg["url"]
+                .as_str()
+                .ok_or("{label}: http_fetch requires 'url'")?;
             let default_query = format!("SELECT * FROM read_json_auto('{}')", sql_quote(url));
             let query = cfg["query"].as_str().unwrap_or(&default_query);
             let rendered = render_template(query, &label, input_tables, vars)?;
@@ -108,7 +114,9 @@ fn compile_node(
             ));
         }
         "core.sql" => {
-            let query = cfg["query"].as_str().ok_or("{label}: sql requires 'query'")?;
+            let query = cfg["query"]
+                .as_str()
+                .ok_or("{label}: sql requires 'query'")?;
             let rendered = render_template(query, &label, input_tables, vars)?;
             lines.push(format!(
                 "_con.execute(\"CREATE TABLE {table} AS {}\")",
@@ -119,7 +127,9 @@ fn compile_node(
             // Sink: upstream table → md:<table>. The engine's local behavior
             // (file DuckDB) is intentionally re-targeted to the MotherDuck
             // attachment — deploying a local file makes no sense in a Flight.
-            let target = cfg["table"].as_str().ok_or("{label}: duckdb_write requires 'table'")?;
+            let target = cfg["table"]
+                .as_str()
+                .ok_or("{label}: duckdb_write requires 'table'")?;
             let mode = cfg["mode"].as_str().unwrap_or("replace");
             let src = input_tables
                 .get(&0)
@@ -142,7 +152,10 @@ fn compile_node(
                 .as_object()
                 .map(|o| {
                     o.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| format!("'{}': '{}'", sql_quote(k), sql_quote(s))))
+                        .filter_map(|(k, v)| {
+                            v.as_str()
+                                .map(|s| format!("'{}': '{}'", sql_quote(k), sql_quote(s)))
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -327,15 +340,21 @@ fn build_scheduler(workflow: &Workflow, order: &[uuid::Uuid]) -> FlightProgram {
         "    _con.execute(\"INSERT INTO md.{state_table} VALUES ('\" + run_key + \"', '\" + node_id + \"', '\" + status + \"', now())\")\n"
     ));
     source.push_str("def _run(flight, node_id, run_key):\n");
-    source.push_str("    if _skip(node_id, run_key):\n        print('SKIP', node_id)\n        return\n");
+    source.push_str(
+        "    if _skip(node_id, run_key):\n        print('SKIP', node_id)\n        return\n",
+    );
     source.push_str("    r = _con.execute(f\"SELECT * FROM MD_RUN_FLIGHT(flight_id := '{flight}', config := MAP {{'RUN_KEY': '{run_key}'}})\").fetchone()\n");
     source.push_str("    run_id = r[0]\n");
     source.push_str("    while True:\n");
     source.push_str("        s = _con.execute(f\"SELECT status FROM MD_LIST_FLIGHT_RUNS() WHERE run_id = '{run_id}'\").fetchone()\n");
-    source.push_str("        if s and s[0] in ('SUCCEEDED', 'FAILED', 'CANCELLED'):\n            break\n");
+    source.push_str(
+        "        if s and s[0] in ('SUCCEEDED', 'FAILED', 'CANCELLED'):\n            break\n",
+    );
     source.push_str("        time.sleep(5)\n");
     source.push_str("    _mark(node_id, run_key, s[0])\n");
-    source.push_str("    if s[0] != 'SUCCEEDED':\n        raise SystemExit(f'node {node_id} failed')\n");
+    source.push_str(
+        "    if s[0] != 'SUCCEEDED':\n        raise SystemExit(f'node {node_id} failed')\n",
+    );
     source.push_str("import os\nRUN_KEY = os.environ.get('SWANFLOW_RUN_KEY', 'manual')\n");
     // Node chain in topological order
     for id in order {
@@ -344,10 +363,7 @@ fn build_scheduler(workflow: &Workflow, order: &[uuid::Uuid]) -> FlightProgram {
             "_run('flight:swanflow_node_{dag8}_{n8}', '{n8}', RUN_KEY)\n"
         ));
     }
-    source.push_str(&format!(
-        "print(\"SWANFLOW_DEPLOY_OK {}\")\n",
-        workflow.id
-    ));
+    source.push_str(&format!("print(\"SWANFLOW_DEPLOY_OK {}\")\n", workflow.id));
 
     FlightProgram {
         flight_name: flight_name("sched", workflow.id, None),
@@ -362,11 +378,14 @@ fn build_scheduler(workflow: &Workflow, order: &[uuid::Uuid]) -> FlightProgram {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::graph::EdgeInstance;
     use super::*;
+    use crate::core::graph::EdgeInstance;
     use petgraph::stable_graph::StableGraph;
 
-    fn mk_workflow(nodes: Vec<(uuid::Uuid, &str, serde_json::Value)>, edges: Vec<(usize, usize)>) -> Workflow {
+    fn mk_workflow(
+        nodes: Vec<(uuid::Uuid, &str, serde_json::Value)>,
+        edges: Vec<(usize, usize)>,
+    ) -> Workflow {
         let mut wf = Workflow::default();
         wf.id = uuid::uuid!("aaaaaaaa-0000-0000-0000-000000000001");
         let mut g = StableGraph::new();
@@ -380,7 +399,14 @@ mod tests {
             }));
         }
         for (s, t) in edges {
-            g.add_edge(idxs[s], idxs[t], EdgeInstance { source_port: 0, target_port: 0 });
+            g.add_edge(
+                idxs[s],
+                idxs[t],
+                EdgeInstance {
+                    source_port: 0,
+                    target_port: 0,
+                },
+            );
         }
         wf.graph = g;
         wf
@@ -395,8 +421,16 @@ mod tests {
         let wf = mk_workflow(
             vec![
                 (A, "core.io.csv_read", serde_json::json!({"path": "in.csv"})),
-                (B, "core.sql", serde_json::json!({"query": "SELECT count(*) AS n FROM {{input_0}}"})),
-                (C, "core.io.duckdb_write", serde_json::json!({"table": "out", "mode": "replace"})),
+                (
+                    B,
+                    "core.sql",
+                    serde_json::json!({"query": "SELECT count(*) AS n FROM {{input_0}}"}),
+                ),
+                (
+                    C,
+                    "core.io.duckdb_write",
+                    serde_json::json!({"table": "out", "mode": "replace"}),
+                ),
             ],
             vec![(0, 1), (1, 2)],
         );
@@ -432,7 +466,11 @@ mod tests {
     #[test]
     fn unresolved_template_var_fails() {
         let wf = mk_workflow(
-            vec![(A, "core.sql", serde_json::json!({"query": "SELECT {{missing_var}}"}))],
+            vec![(
+                A,
+                "core.sql",
+                serde_json::json!({"query": "SELECT {{missing_var}}"}),
+            )],
             vec![],
         );
         let err = compile_inline(&wf).unwrap_err();
@@ -442,7 +480,11 @@ mod tests {
     #[test]
     fn context_var_resolves() {
         let mut wf = mk_workflow(
-            vec![(A, "core.sql", serde_json::json!({"query": "SELECT {{threshold}} AS t"}))],
+            vec![(
+                A,
+                "core.sql",
+                serde_json::json!({"query": "SELECT {{threshold}} AS t"}),
+            )],
             vec![],
         );
         wf.context.insert("threshold".into(), serde_json::json!(42));
@@ -454,8 +496,16 @@ mod tests {
     fn per_node_produces_one_flight_per_node_plus_scheduler() {
         let wf = mk_workflow(
             vec![
-                (A, "core.io.parquet_read", serde_json::json!({"path": "in.parquet"})),
-                (B, "core.io.duckdb_write", serde_json::json!({"table": "sink"})),
+                (
+                    A,
+                    "core.io.parquet_read",
+                    serde_json::json!({"path": "in.parquet"}),
+                ),
+                (
+                    B,
+                    "core.io.duckdb_write",
+                    serde_json::json!({"table": "sink"}),
+                ),
             ],
             vec![(0, 1)],
         );
@@ -470,7 +520,11 @@ mod tests {
     #[test]
     fn transform_without_static_sql_rejected() {
         let wf = mk_workflow(
-            vec![(A, "core.transform.aggregate", serde_json::json!({"op": "sum"}))],
+            vec![(
+                A,
+                "core.transform.aggregate",
+                serde_json::json!({"op": "sum"}),
+            )],
             vec![],
         );
         let err = compile_inline(&wf).unwrap_err();
@@ -496,7 +550,11 @@ mod tests {
     #[test]
     fn flight_name_shape() {
         let dag = uuid::uuid!("abcdef01-0000-0000-0000-000000000000");
-        let n = flight_name("node", dag, Some(uuid::uuid!("12345678-0000-0000-0000-000000000000")));
+        let n = flight_name(
+            "node",
+            dag,
+            Some(uuid::uuid!("12345678-0000-0000-0000-000000000000")),
+        );
         assert!(n.starts_with("swanflow_node_"));
         assert!(n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
         assert!(n.len() <= 200);

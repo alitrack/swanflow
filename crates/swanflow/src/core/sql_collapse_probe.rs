@@ -35,9 +35,8 @@ async fn run_groupby(group_col: &str) -> Vec<(String, i32)> {
     let region = Arc::new(Int32Array::from(vec![1, 1, 2, 2, 3]));
     let batch = RecordBatch::try_new(schema.clone(), vec![cat, region]).unwrap();
 
-    let mem = Arc::new(
-        datafusion::datasource::MemTable::try_new(schema, vec![vec![batch]]).unwrap(),
-    );
+    let mem =
+        Arc::new(datafusion::datasource::MemTable::try_new(schema, vec![vec![batch]]).unwrap());
 
     // Mirror the planner's late-binding shape (planner.rs:341-358): the input
     // logical plan is registered as a VIEW under `input_0`. We build that
@@ -45,7 +44,12 @@ async fn run_groupby(group_col: &str) -> Vec<(String, i32)> {
     // DataFrame -> into_view(), exactly as the planner does for a real node.
     let ctx = SessionContext::new();
     ctx.register_table("base", mem.clone()).unwrap();
-    let base_plan = ctx.table("base").await.unwrap().into_optimized_plan().unwrap();
+    let base_plan = ctx
+        .table("base")
+        .await
+        .unwrap()
+        .into_optimized_plan()
+        .unwrap();
     let df = DataFrame::new(ctx.state(), base_plan);
     ctx.register_table("input_0", df.into_view()).unwrap();
 
@@ -78,8 +82,16 @@ async fn run_groupby(group_col: &str) -> Vec<(String, i32)> {
 async fn probe_string_vs_int_groupby() {
     let s = run_groupby("category").await;
     let i = run_groupby("region").await;
-    eprintln!("\n[PROBE] GROUP BY string(category) -> {} group(s): {:?}", s.len(), s);
-    eprintln!("[PROBE] GROUP BY int(region)     -> {} group(s): {:?}", i.len(), i);
+    eprintln!(
+        "\n[PROBE] GROUP BY string(category) -> {} group(s): {:?}",
+        s.len(),
+        s
+    );
+    eprintln!(
+        "[PROBE] GROUP BY int(region)     -> {} group(s): {:?}",
+        i.len(),
+        i
+    );
 
     // Guardrail: BOTH the string (Utf8View) and integer columns must partition
     // into the EXACT ordered key/count tuples (a=2,b=2,c=1 and 1=2,2=2,3=1)
@@ -116,10 +128,22 @@ async fn probe_string_vs_int_groupby() {
         "int GROUP BY produced a NULL/empty key: {i:?}"
     );
     // Row counts are non-null and the total is preserved (5 input rows).
-    assert!(s.iter().all(|(_, n)| *n > 0), "string GROUP BY has a zero/null count: {s:?}");
-    assert!(i.iter().all(|(_, n)| *n > 0), "int GROUP BY has a zero/null count: {i:?}");
+    assert!(
+        s.iter().all(|(_, n)| *n > 0),
+        "string GROUP BY has a zero/null count: {s:?}"
+    );
+    assert!(
+        i.iter().all(|(_, n)| *n > 0),
+        "int GROUP BY has a zero/null count: {i:?}"
+    );
     let s_total: i32 = s.iter().map(|(_, n)| *n).sum();
     let i_total: i32 = i.iter().map(|(_, n)| *n).sum();
-    assert_eq!(s_total, 5, "string GROUP BY lost rows (want 5 total), got {s_total}");
-    assert_eq!(i_total, 5, "int GROUP BY lost rows (want 5 total), got {i_total}");
+    assert_eq!(
+        s_total, 5,
+        "string GROUP BY lost rows (want 5 total), got {s_total}"
+    );
+    assert_eq!(
+        i_total, 5,
+        "int GROUP BY lost rows (want 5 total), got {i_total}"
+    );
 }

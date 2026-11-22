@@ -314,7 +314,13 @@ mod tests {
         let node = TypedDummy;
         // no validate() override → trait default runs schema validation
         assert!(node.validate(&json!({"query": "SELECT 1"})).is_ok());
-        assert!(node.validate(&json!({"query": 42})).is_err(), "wrong type must fail");
-        assert!(node.validate(&json!({})).is_err(), "missing required must fail");
+        assert!(
+            node.validate(&json!({"query": 42})).is_err(),
+            "wrong type must fail"
+        );
+        assert!(
+            node.validate(&json!({})).is_err(),
+            "missing required must fail"
+        );
     }
 }

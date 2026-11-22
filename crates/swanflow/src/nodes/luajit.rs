@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use datafusion::common::{DFSchema, DFSchemaRef};
-use datafusion::logical_expr::{LogicalPlan, Extension};
+use datafusion::logical_expr::{Extension, LogicalPlan};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
-use crate::nodes::{NodeBehavior, TypedNodeBehavior, NodeSpec, PortSpec};
 use crate::core::datasource::DuckDBScanLogical;
+use crate::nodes::{NodeBehavior, NodeSpec, PortSpec, TypedNodeBehavior};
 
 /// LuaJIT shell node — runs a Lua function through the duckdb-luajit
 /// extension. This is the "self-evolution" escape hatch: a model writes a
@@ -81,7 +81,9 @@ impl NodeBehavior for LuaJitNode {
         }
         let mode = config["mode"].as_str().unwrap_or("table");
         if mode != "table" && mode != "scalar" && mode != "action" {
-            return Err(anyhow!("mode must be 'table', 'scalar' or 'action', got '{mode}'"));
+            return Err(anyhow!(
+                "mode must be 'table', 'scalar' or 'action', got '{mode}'"
+            ));
         }
         if mode == "action" && config.get("args").is_none() {
             return Err(anyhow!("action mode requires an 'args' object"));
@@ -104,7 +106,9 @@ impl NodeBehavior for LuaJitNode {
         // Column list for scalar fallback schema (transformed -> Utf8).
         let cols_for_fallback: Vec<String> = if mode == "scalar" {
             if let Some(c) = config["columns"].as_array() {
-                c.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+                c.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
             } else if !inputs.is_empty() {
                 inputs[0]
                     .schema()
@@ -236,9 +240,7 @@ impl NodeBehavior for LuaJitNode {
                         esc
                     ));
                 }
-                format!(
-                    "SELECT * FROM (SELECT {select_all} FROM input_0) AS _luajit_transform"
-                )
+                format!("SELECT * FROM (SELECT {select_all} FROM input_0) AS _luajit_transform")
             }
             "action" => {
                 // Module-table libs: install registers the lib (cached
@@ -271,41 +273,45 @@ impl NodeBehavior for LuaJitNode {
         } else {
             query.clone()
         };
-        let schema: DFSchemaRef = discover_schema(&discovery_query, &luajit_extension_paths()).unwrap_or_else(|_| {
-            if !inputs.is_empty() {
-                // Fallback: input schema, but scalar-transformed columns are
-                // overwritten as Utf8 — luajit_s ALWAYS returns VARCHAR, and
-                // the exec's schema cast turns BIGINT phone + VARCHAR result
-                // into NULL (found by wf81 probe: name survived, phone NULL).
-                if mode == "scalar" {
-                    let base = inputs[0].schema();
-                    let fields: Vec<datafusion::arrow::datatypes::Field> = base
-                        .fields()
-                        .iter()
-                        .map(|f| {
-                            let name = f.name();
-                            if cols_for_fallback.iter().any(|c| c == name) {
-                                datafusion::arrow::datatypes::Field::new(
-                                    name.clone(),
-                                    datafusion::arrow::datatypes::DataType::Utf8,
-                                    true,
-                                )
-                            } else {
-                                f.as_ref().clone()
-                            }
-                        })
-                        .collect();
-                    match DFSchema::from_unqualified_fields(fields.into(), base.metadata().clone()) {
-                        Ok(s) => Arc::new(s),
-                        Err(_) => inputs[0].schema().clone(),
+        let schema: DFSchemaRef = discover_schema(&discovery_query, &luajit_extension_paths())
+            .unwrap_or_else(|_| {
+                if !inputs.is_empty() {
+                    // Fallback: input schema, but scalar-transformed columns are
+                    // overwritten as Utf8 — luajit_s ALWAYS returns VARCHAR, and
+                    // the exec's schema cast turns BIGINT phone + VARCHAR result
+                    // into NULL (found by wf81 probe: name survived, phone NULL).
+                    if mode == "scalar" {
+                        let base = inputs[0].schema();
+                        let fields: Vec<datafusion::arrow::datatypes::Field> = base
+                            .fields()
+                            .iter()
+                            .map(|f| {
+                                let name = f.name();
+                                if cols_for_fallback.iter().any(|c| c == name) {
+                                    datafusion::arrow::datatypes::Field::new(
+                                        name.clone(),
+                                        datafusion::arrow::datatypes::DataType::Utf8,
+                                        true,
+                                    )
+                                } else {
+                                    f.as_ref().clone()
+                                }
+                            })
+                            .collect();
+                        match DFSchema::from_unqualified_fields(
+                            fields.into(),
+                            base.metadata().clone(),
+                        ) {
+                            Ok(s) => Arc::new(s),
+                            Err(_) => inputs[0].schema().clone(),
+                        }
+                    } else {
+                        inputs[0].schema().clone()
                     }
                 } else {
-                    inputs[0].schema().clone()
+                    Arc::new(DFSchema::empty())
                 }
-            } else {
-                Arc::new(DFSchema::empty())
-            }
-        });
+            });
 
         let node = DuckDBScanLogical {
             connection_path: ":memory:".to_string(),
@@ -343,7 +349,11 @@ pub(crate) fn struct_literal(v: &JsonValue) -> Result<String> {
                 // Keys are quoted like string values: a `'` in a key would
                 // otherwise shift the literal (sigil review sev-3).
                 .map(|(k, val)| {
-                    Ok(format!("'{}':{}", k.replace('\'', "''"), struct_literal(val)?))
+                    Ok(format!(
+                        "'{}':{}",
+                        k.replace('\'', "''"),
+                        struct_literal(val)?
+                    ))
                 })
                 .collect();
             Ok(format!("{{{}}}", parts?.join(", ")))
@@ -354,7 +364,11 @@ pub(crate) fn struct_literal(v: &JsonValue) -> Result<String> {
         }
         JsonValue::String(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
         JsonValue::Number(n) => Ok(n.to_string()),
-        JsonValue::Bool(b) => Ok(if *b { "true".to_string() } else { "false".to_string() }),
+        JsonValue::Bool(b) => Ok(if *b {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }),
         JsonValue::Null => Ok("NULL".to_string()),
     }
 }
@@ -609,7 +623,9 @@ pub(crate) fn discover_schema(query: &str, extensions: &[String]) -> Result<DFSc
             datafusion::arrow::datatypes::Field::new(f.name().clone(), dt, true)
         })
         .collect();
-    Ok(Arc::new(DFSchema::try_from(datafusion::arrow::datatypes::Schema::new(fields))?))
+    Ok(Arc::new(DFSchema::try_from(
+        datafusion::arrow::datatypes::Schema::new(fields),
+    )?))
 }
 
 fn map_duckdb_type(col_type: &str) -> datafusion::arrow::datatypes::DataType {
@@ -646,10 +662,10 @@ fn map_duckdb_type(col_type: &str) -> datafusion::arrow::datatypes::DataType {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::core::datasource::DuckDBScanExec;
     use datafusion::arrow::datatypes::SchemaRef;
     use datafusion::arrow::record_batch::RecordBatch;
-    use crate::core::datasource::DuckDBScanExec;
-    use super::*;
 
     #[test]
     fn test_libs_index_parsing() {
@@ -711,12 +727,14 @@ mod tests {
     #[test]
     fn test_struct_literal() {
         assert_eq!(
-            struct_literal(&serde_json::json!({"op": "run", "n": 1, "b": true, "x": null})).unwrap(),
+            struct_literal(&serde_json::json!({"op": "run", "n": 1, "b": true, "x": null}))
+                .unwrap(),
             "{'op':'run', 'n':1, 'b':true, 'x':NULL}"
         );
         // single-quote escaping + nested list
         assert_eq!(
-            struct_literal(&serde_json::json!({"attr_cols": ["city", "tier"], "q": "it's"})).unwrap(),
+            struct_literal(&serde_json::json!({"attr_cols": ["city", "tier"], "q": "it's"}))
+                .unwrap(),
             "{'attr_cols':['city', 'tier'], 'q':'it''s'}"
         );
     }
@@ -773,17 +791,24 @@ mod tests {
         assert_eq!(spec.type_id, "core.luajit");
 
         // valid table mode
-        node.validate(&serde_json::json!({"source": "return {\"a\"}"})).unwrap();
+        node.validate(&serde_json::json!({"source": "return {\"a\"}"}))
+            .unwrap();
         // valid scalar mode
-        node.validate(&serde_json::json!({"mode": "scalar", "source": "return x"})).unwrap();
+        node.validate(&serde_json::json!({"mode": "scalar", "source": "return x"}))
+            .unwrap();
         // valid action mode (with args)
-        node.validate(&serde_json::json!({"mode": "action", "source": "x", "args": {"op": "run"}})).unwrap();
+        node.validate(&serde_json::json!({"mode": "action", "source": "x", "args": {"op": "run"}}))
+            .unwrap();
         // action mode without args → error
-        assert!(node.validate(&serde_json::json!({"mode": "action", "source": "x"})).is_err());
+        assert!(node
+            .validate(&serde_json::json!({"mode": "action", "source": "x"}))
+            .is_err());
         // missing source
         assert!(node.validate(&serde_json::json!({})).is_err());
         // bad mode
-        assert!(node.validate(&serde_json::json!({"mode": "nope", "source": "x"})).is_err());
+        assert!(node
+            .validate(&serde_json::json!({"mode": "nope", "source": "x"}))
+            .is_err());
     }
 
     #[test]
@@ -926,7 +951,11 @@ mod tests {
                     "backend=gpu should merge into args: {}",
                     scan.query
                 );
-                assert!(scan.query.contains("luajit_s('linalg'"), "linalg action SQL: {}", scan.query);
+                assert!(
+                    scan.query.contains("luajit_s('linalg'"),
+                    "linalg action SQL: {}",
+                    scan.query
+                );
             } else {
                 panic!("expected Extension plan");
             }
@@ -986,7 +1015,10 @@ mod tests {
         rt.block_on(async {
             // Build the logical plan from the shell node.
             let plans = node
-                .propose_plan(vec![], &serde_json::json!({"source": "return {\"a\", \"b\"}"}))
+                .propose_plan(
+                    vec![],
+                    &serde_json::json!({"source": "return {\"a\", \"b\"}"}),
+                )
                 .await
                 .unwrap();
             let LogicalPlan::Extension(ext_plan) = &plans[0] else {
@@ -1000,21 +1032,19 @@ mod tests {
 
             // Convert to the physical exec the way SwanFlowPlanner does:
             // project_schema = logical schema fields.
-            let schema: SchemaRef = Arc::new(
-                datafusion::arrow::datatypes::Schema::new(
-                    scan.schema
-                        .fields()
-                        .iter()
-                        .map(|f| {
-                            datafusion::arrow::datatypes::Field::new(
-                                f.name().clone(),
-                                f.data_type().clone(),
-                                true,
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-            );
+            let schema: SchemaRef = Arc::new(datafusion::arrow::datatypes::Schema::new(
+                scan.schema
+                    .fields()
+                    .iter()
+                    .map(|f| {
+                        datafusion::arrow::datatypes::Field::new(
+                            f.name().clone(),
+                            f.data_type().clone(),
+                            true,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ));
             let exec = DuckDBScanExec::new(
                 scan.connection_path.clone(),
                 scan.extensions.clone(),
@@ -1028,12 +1058,11 @@ mod tests {
             let state = ctx.state();
             use datafusion::physical_plan::ExecutionPlan as _;
             let stream = exec.execute(0, state.task_ctx()).unwrap();
-            let batches: Vec<RecordBatch> = futures::executor::block_on(
-                futures::StreamExt::collect::<Vec<_>>(stream),
-            )
-            .into_iter()
-            .collect::<std::result::Result<_, _>>()
-            .unwrap();
+            let batches: Vec<RecordBatch> =
+                futures::executor::block_on(futures::StreamExt::collect::<Vec<_>>(stream))
+                    .into_iter()
+                    .collect::<std::result::Result<_, _>>()
+                    .unwrap();
             assert!(!batches.is_empty());
             let total = batches.iter().map(|b| b.num_rows()).sum::<usize>();
             assert_eq!(total, 2, "luajit_table should yield 2 rows");

@@ -96,11 +96,7 @@ impl QueryEngine for DataFusionEngine {
             }
             TableSource::Csv { path, has_header } => {
                 self.ctx
-                    .register_csv(
-                        &name,
-                        path,
-                        CsvReadOptions::new().has_header(*has_header),
-                    )
+                    .register_csv(&name, path, CsvReadOptions::new().has_header(*has_header))
                     .await?;
             }
             TableSource::Native { identifier: _ } => {
@@ -112,10 +108,7 @@ impl QueryEngine for DataFusionEngine {
             }
         }
 
-        self.table_registry
-            .lock()
-            .await
-            .insert(name, schema);
+        self.table_registry.lock().await.insert(name, schema);
         Ok(())
     }
 

@@ -8,11 +8,11 @@ use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::{
     coalesce_partitions::CoalescePartitionsExec, DisplayAs, DisplayFormatType, ExecutionPlan,
     PlanProperties, RecordBatchStream,
 };
-use datafusion::physical_expr::EquivalenceProperties;
 use futures::stream::Stream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -84,7 +84,9 @@ impl NodeBehavior for QueryPlanningNode {
         NodeSpec {
             type_id: "core.ai.query_planning".to_string(),
             display_name: "Query Planning".to_string(),
-            description: "[SHELL NODE — no runtime behavior] Split a research goal into ranked sub-queries.".to_string(),
+            description:
+                "[SHELL NODE — no runtime behavior] Split a research goal into ranked sub-queries."
+                    .to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".to_string(),
@@ -1293,14 +1295,16 @@ fn xform_plan(
         .unwrap_or("text")
         .to_string();
     let cfg = config.clone();
-    Ok(LogicalPlan::Extension(datafusion::logical_expr::Extension {
-        node: Arc::new(TextXformLogical {
-            input: inputs[0].clone(),
-            column,
-            mode,
-            config: cfg,
-        }),
-    }))
+    Ok(LogicalPlan::Extension(
+        datafusion::logical_expr::Extension {
+            node: Arc::new(TextXformLogical {
+                input: inputs[0].clone(),
+                column,
+                mode,
+                config: cfg,
+            }),
+        },
+    ))
 }
 
 #[derive(Clone)]
@@ -1376,7 +1380,12 @@ impl UserDefinedLogicalNodeCore for TextXformLogical {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "TextXformLogical(column={}, mode={})", self.column, self.mode.tag())
+        write!(
+            f,
+            "TextXformLogical(column={}, mode={})",
+            self.column,
+            self.mode.tag()
+        )
     }
     fn with_exprs_and_inputs(
         &self,
@@ -1402,7 +1411,12 @@ pub struct TextXformExec {
 }
 
 impl TextXformExec {
-    pub fn new(input: Arc<dyn ExecutionPlan>, column: String, mode: XformMode, config: JsonValue) -> Self {
+    pub fn new(
+        input: Arc<dyn ExecutionPlan>,
+        column: String,
+        mode: XformMode,
+        config: JsonValue,
+    ) -> Self {
         let input: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(input));
         let schema = Arc::new(Schema::new(mode.out_fields()));
         let cache = PlanProperties::new(
@@ -1411,13 +1425,22 @@ impl TextXformExec {
             datafusion::physical_plan::execution_plan::EmissionType::Incremental,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
         );
-        Self { input, column, mode, config, schema, cache }
+        Self {
+            input,
+            column,
+            mode,
+            config,
+            schema,
+            cache,
+        }
     }
 }
 
 impl fmt::Debug for TextXformExec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TextXformExec").field("mode", &self.mode.tag()).finish()
+        f.debug_struct("TextXformExec")
+            .field("mode", &self.mode.tag())
+            .finish()
     }
 }
 
@@ -1548,7 +1571,11 @@ fn build_xform_batch(
             }
             Ok(RecordBatch::try_new(
                 schema,
-                vec![Arc::new(rid.finish()), Arc::new(cid.finish()), Arc::new(txt.finish())],
+                vec![
+                    Arc::new(rid.finish()),
+                    Arc::new(cid.finish()),
+                    Arc::new(txt.finish()),
+                ],
             )
             .map_err(|e| anyhow!("chunk batch: {}", e))?)
         }
@@ -1586,7 +1613,11 @@ fn build_xform_batch(
             }
             Ok(RecordBatch::try_new(
                 schema,
-                vec![Arc::new(rid.finish()), Arc::new(norm.finish()), Arc::new(js.finish())],
+                vec![
+                    Arc::new(rid.finish()),
+                    Arc::new(norm.finish()),
+                    Arc::new(js.finish()),
+                ],
             )
             .map_err(|e| anyhow!("embed batch: {}", e))?)
         }
@@ -1650,8 +1681,16 @@ fn build_xform_batch(
 }
 
 fn hash_similarity(a: &str, b: &str) -> f32 {
-    let ta: HashSet<String> = a.to_lowercase().split_whitespace().map(str::to_string).collect();
-    let tb: HashSet<String> = b.to_lowercase().split_whitespace().map(str::to_string).collect();
+    let ta: HashSet<String> = a
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let tb: HashSet<String> = b
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
     if ta.is_empty() || tb.is_empty() {
         return 0.0;
     }
@@ -1673,12 +1712,17 @@ impl RerankerNode {
 
 #[cfg(test)]
 mod xform_tests {
-    use datafusion::arrow::array::StringArray;
     use super::*;
+    use datafusion::arrow::array::StringArray;
 
     #[test]
     fn test_xform_mode_schemas() {
-        for mode in [XformMode::Chunk, XformMode::Embed, XformMode::Rerank, XformMode::Hybrid] {
+        for mode in [
+            XformMode::Chunk,
+            XformMode::Embed,
+            XformMode::Rerank,
+            XformMode::Hybrid,
+        ] {
             let logical = TextXformLogical {
                 input: LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
                     produce_one_row: false,
@@ -1702,7 +1746,11 @@ mod xform_tests {
             Arc::new(Schema::new(XformMode::Chunk.out_fields())),
         )
         .unwrap();
-        let col = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        let col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         let chunks: Vec<&str> = col.iter().map(|s| s.unwrap_or("")).collect();
         assert_eq!(chunks, vec!["a b c d", "d e f"]);
     }
@@ -1717,7 +1765,11 @@ mod xform_tests {
             Arc::new(Schema::new(XformMode::Embed.out_fields())),
         )
         .unwrap();
-        let col = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        let col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         for v in col.iter() {
             let vec: Vec<f32> = serde_json::from_str(v.unwrap()).unwrap();
             let n: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();

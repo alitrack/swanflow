@@ -31,15 +31,21 @@ pub enum AutomationCondition {
     /// Ready when a cron fire time falls in (last_eval, now].
     OnCron(CronExpr),
     /// Ready when now - last fire (run or eval) >= the interval.
-    OnInterval { secs: u64 },
+    OnInterval {
+        secs: u64,
+    },
     /// Ready when the asset's last materialization is older than max_lag
     /// (or it never materialized).
-    FreshnessViolated { max_lag_secs: u64 },
+    FreshnessViolated {
+        max_lag_secs: u64,
+    },
     /// Ready when a webhook arrived for `path` since the last ready
     /// evaluation (ADR-014 Stage 4 — true push triggering). The webhook
     /// server records the arrival; the sensor consumes it only after
     /// the run is claimed, so a crashed run never loses its event.
-    OnWebhook { path: String },
+    OnWebhook {
+        path: String,
+    },
     And(Box<AutomationCondition>, Box<AutomationCondition>),
     Or(Box<AutomationCondition>, Box<AutomationCondition>),
     Not(Box<AutomationCondition>),
@@ -69,7 +75,10 @@ pub fn parse_duration(s: &str) -> Result<u64, String> {
                 _ => return Err(format!("unknown unit '{ch}' in duration '{s}'")),
             };
             total = total
-                .checked_add(n.checked_mul(mult).ok_or_else(|| format!("overflow in '{s}'"))?)
+                .checked_add(
+                    n.checked_mul(mult)
+                        .ok_or_else(|| format!("overflow in '{s}'"))?,
+                )
                 .ok_or_else(|| format!("overflow in '{s}'"))?;
             matched = true;
         }
@@ -78,7 +87,9 @@ pub fn parse_duration(s: &str) -> Result<u64, String> {
         return Err(format!("duration '{s}' must end in a unit (s/m/h/d)"));
     }
     if total == 0 {
-        return Err(format!("duration '{s}' must be > 0 (0 would fire every tick)"));
+        return Err(format!(
+            "duration '{s}' must be > 0 (0 would fire every tick)"
+        ));
     }
     // Consumers cast secs to i64 for chrono Duration — reject anything that
     // would wrap (chrono's practical bound is i64::MAX milliseconds).
@@ -109,7 +120,11 @@ fn parse_field(field: &str, lo: u32, hi: u32, name: &str) -> Result<Vec<u32>, St
     let mut out = Vec::new();
     for part in field.split(',') {
         let (range, step) = match part.split_once('/') {
-            Some((r, s)) => (r, s.parse::<u32>().map_err(|_| format!("bad step in '{part}'"))?),
+            Some((r, s)) => (
+                r,
+                s.parse::<u32>()
+                    .map_err(|_| format!("bad step in '{part}'"))?,
+            ),
             None => (part, 1),
         };
         if step == 0 {
@@ -119,8 +134,10 @@ fn parse_field(field: &str, lo: u32, hi: u32, name: &str) -> Result<Vec<u32>, St
             (lo, hi)
         } else if let Some((a, b)) = range.split_once('-') {
             (
-                a.parse::<u32>().map_err(|_| format!("bad range '{range}'"))?,
-                b.parse::<u32>().map_err(|_| format!("bad range '{range}'"))?,
+                a.parse::<u32>()
+                    .map_err(|_| format!("bad range '{range}'"))?,
+                b.parse::<u32>()
+                    .map_err(|_| format!("bad range '{range}'"))?,
             )
         } else {
             let v = range
@@ -150,7 +167,9 @@ impl CronExpr {
     pub fn parse(s: &str) -> Result<Self, String> {
         let fields: Vec<&str> = s.split_whitespace().collect();
         if fields.len() != 5 {
-            return Err(format!("cron '{s}' must have 5 fields (min hour dom mon dow)"));
+            return Err(format!(
+                "cron '{s}' must have 5 fields (min hour dom mon dow)"
+            ));
         }
         let dom_star = fields[2] == "*";
         let dow_star = fields[4] == "*";
@@ -250,7 +269,10 @@ struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     fn tokens(src: &'a str) -> Result<Vec<String>, String> {
-        let mut lx = Lexer { src: src.as_bytes(), pos: 0 };
+        let mut lx = Lexer {
+            src: src.as_bytes(),
+            pos: 0,
+        };
         let mut out = Vec::new();
         while lx.pos < lx.src.len() {
             let c = lx.src[lx.pos] as char;
@@ -399,7 +421,9 @@ impl CondParser {
                     return Err(format!("unknown atom '{tok}'"));
                 };
                 match tok.as_str() {
-                    "on_cron" => Ok(AutomationCondition::OnCron(CronExpr::parse(&unquote(&arg))?)),
+                    "on_cron" => Ok(AutomationCondition::OnCron(CronExpr::parse(&unquote(
+                        &arg,
+                    ))?)),
                     "on_interval" => Ok(AutomationCondition::OnInterval {
                         secs: parse_duration(&unquote(&arg))?,
                     }),
@@ -454,7 +478,9 @@ pub fn parse_webhook_path(s: &str) -> Result<String, String> {
         ));
     }
     if t.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(format!("webhook path '{t}' must not contain whitespace/control chars"));
+        return Err(format!(
+            "webhook path '{t}' must not contain whitespace/control chars"
+        ));
     }
     if t.len() > 512 {
         return Err("webhook path exceeds 512 chars".to_string());
@@ -531,11 +557,15 @@ pub fn evaluate(cond: &AutomationCondition, ctx: &EvalContext) -> Option<bool> {
     match cond {
         AutomationCondition::Eager => Some(true),
         AutomationCondition::OnCron(expr) => {
-            let gate = ctx.last_eval_ready_at.unwrap_or(ctx.now - Duration::days(366));
+            let gate = ctx
+                .last_eval_ready_at
+                .unwrap_or(ctx.now - Duration::days(366));
             Some(expr.fires_between(gate, ctx.now))
         }
         AutomationCondition::OnInterval { secs } => {
-            let gate = ctx.last_eval_ready_at.unwrap_or(ctx.now - Duration::days(366));
+            let gate = ctx
+                .last_eval_ready_at
+                .unwrap_or(ctx.now - Duration::days(366));
             Some(ctx.now - gate >= Duration::seconds(*secs as i64))
         }
         AutomationCondition::FreshnessViolated { max_lag_secs } => {
@@ -551,9 +581,7 @@ pub fn evaluate(cond: &AutomationCondition, ctx: &EvalContext) -> Option<bool> {
                 Some(t) => Some(ctx.now - t >= Duration::seconds(*max_lag_secs as i64)),
             }
         }
-        AutomationCondition::OnWebhook { path } => {
-            Some(ctx.webhook_fired.contains(path))
-        }
+        AutomationCondition::OnWebhook { path } => Some(ctx.webhook_fired.contains(path)),
         AutomationCondition::And(a, b) => kleene_and(evaluate(a, ctx), evaluate(b, ctx)),
         AutomationCondition::Or(a, b) => kleene_or(evaluate(a, ctx), evaluate(b, ctx)),
         AutomationCondition::Not(a) => kleene_not(evaluate(a, ctx)),
@@ -627,9 +655,18 @@ mod tests {
             AutomationCondition::OnWebhook { path } if path == "/hooks/x"
         ));
         // Path validation errors.
-        assert!(parse_automation("on_webhook(hooks/x)").is_err(), "no leading /");
-        assert!(parse_automation(r#"on_webhook("/a/../b")"#).is_err(), "traversal");
-        assert!(parse_automation(r#"on_webhook("/a?x=1")"#).is_err(), "query string");
+        assert!(
+            parse_automation("on_webhook(hooks/x)").is_err(),
+            "no leading /"
+        );
+        assert!(
+            parse_automation(r#"on_webhook("/a/../b")"#).is_err(),
+            "traversal"
+        );
+        assert!(
+            parse_automation(r#"on_webhook("/a?x=1")"#).is_err(),
+            "query string"
+        );
         assert!(parse_automation(r#"on_webhook("")"#).is_err(), "empty");
         assert!(parse_automation("on_webhook()").is_err(), "empty unquoted");
     }
@@ -638,15 +675,24 @@ mod tests {
     fn webhook_evaluation_semantics() {
         let cond = parse_automation(r#"on_webhook("/hooks/refresh")"#).unwrap();
         // No arrival -> hold.
-        assert_eq!(evaluate(&cond, &ctx_webhook("2026-10-16 12:00:00", &[])), Some(false));
+        assert_eq!(
+            evaluate(&cond, &ctx_webhook("2026-10-16 12:00:00", &[])),
+            Some(false)
+        );
         // Arrival for this path -> ready.
         assert_eq!(
-            evaluate(&cond, &ctx_webhook("2026-10-16 12:00:00", &["/hooks/refresh"])),
+            evaluate(
+                &cond,
+                &ctx_webhook("2026-10-16 12:00:00", &["/hooks/refresh"])
+            ),
             Some(true)
         );
         // Arrival for a DIFFERENT path -> hold (routing is per-path).
         assert_eq!(
-            evaluate(&cond, &ctx_webhook("2026-10-16 12:00:00", &["/hooks/other"])),
+            evaluate(
+                &cond,
+                &ctx_webhook("2026-10-16 12:00:00", &["/hooks/other"])
+            ),
             Some(false)
         );
         // Not(on_webhook) = "no event pending" — meaningful for suppressors.
@@ -656,7 +702,10 @@ mod tests {
             Some(true)
         );
         assert_eq!(
-            evaluate(&cond, &ctx_webhook("2026-10-16 12:00:00", &["/hooks/pause"])),
+            evaluate(
+                &cond,
+                &ctx_webhook("2026-10-16 12:00:00", &["/hooks/pause"])
+            ),
             Some(false)
         );
     }
@@ -670,10 +719,13 @@ mod tests {
         c.last_materialized_at = Some(at("2026-10-16 11:30:00"));
         assert_eq!(evaluate(&cond, &c), Some(true));
         c.last_materialized_at = Some(at("2026-10-16 10:00:00"));
-        assert_eq!(evaluate(&cond, &c), Some(false), "stale upstream suppresses");
+        assert_eq!(
+            evaluate(&cond, &c),
+            Some(false),
+            "stale upstream suppresses"
+        );
         // cron | webhook: either arm fires.
-        let cond =
-            parse_automation(r#"on_cron("0 * * * *") | on_webhook("/hooks/now")"#).unwrap();
+        let cond = parse_automation(r#"on_cron("0 * * * *") | on_webhook("/hooks/now")"#).unwrap();
         let mut c = ctx_webhook("2026-10-16 12:30:00", &["/hooks/now"]);
         c.last_eval_ready_at = Some(at("2026-10-16 12:00:00"));
         assert_eq!(evaluate(&cond, &c), Some(true), "off-cron but pushed");
@@ -685,16 +737,14 @@ mod tests {
 
     #[test]
     fn webhook_paths_extractor() {
-        let cond = parse_automation(
-            r#"on_cron("0 * * * *") | (on_webhook("/a") & !on_webhook("/b"))"#,
-        )
-        .unwrap();
+        let cond =
+            parse_automation(r#"on_cron("0 * * * *") | (on_webhook("/a") & !on_webhook("/b"))"#)
+                .unwrap();
         let mut paths = webhook_paths(&cond);
         paths.sort();
         assert_eq!(paths, vec!["/a".to_string(), "/b".to_string()]);
         // Dedupe: same path twice.
-        let cond =
-            parse_automation(r#"on_webhook("/a") | on_webhook("/a")"#).unwrap();
+        let cond = parse_automation(r#"on_webhook("/a") | on_webhook("/a")"#).unwrap();
         assert_eq!(webhook_paths(&cond), vec!["/a".to_string()]);
         // No webhook -> empty.
         let cond = parse_automation("eager").unwrap();
@@ -707,13 +757,19 @@ mod tests {
         // not — a lock hiccup or corrupt file is not evidence of staleness.
         let mut c = ctx("2026-10-06 12:00:00", None, None);
         assert_eq!(
-            evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c),
+            evaluate(
+                &AutomationCondition::FreshnessViolated { max_lag_secs: 300 },
+                &c
+            ),
             Some(true),
             "never materialized (ledger readable) = maximally stale, fires"
         );
         c.ledger_unavailable = true;
         assert_eq!(
-            evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c),
+            evaluate(
+                &AutomationCondition::FreshnessViolated { max_lag_secs: 300 },
+                &c
+            ),
             None,
             "ledger unavailable must be Unknown — skip this tick, retry next"
         );
@@ -722,7 +778,10 @@ mod tests {
         let mut c2 = ctx("2026-10-06 12:00:00", Some("2026-10-06 11:00:00"), None);
         c2.ledger_unavailable = true;
         assert_eq!(
-            evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c2),
+            evaluate(
+                &AutomationCondition::FreshnessViolated { max_lag_secs: 300 },
+                &c2
+            ),
             None,
             "unavailable suppresses firing even if a stale copy leaked through"
         );
@@ -771,7 +830,7 @@ mod tests {
     #[test]
     fn cron_fires_between() {
         let c = CronExpr::parse("0 * * * *").unwrap(); // hourly
-        // A fire (11:00) inside (10:05, 11:03].
+                                                       // A fire (11:00) inside (10:05, 11:03].
         assert!(c.fires_between(at("2026-10-05 10:05:00"), at("2026-10-05 11:03:00")));
         // No fire inside (11:00, 11:59].
         assert!(!c.fires_between(at("2026-10-05 11:00:00"), at("2026-10-05 11:59:00")));
@@ -790,7 +849,10 @@ mod tests {
         assert!(c.fires_between(at("2026-10-05 11:30:00"), tick1));
         // The daemon stamps last_ready = tick time (12:00:05):
         let tick2 = at("2026-10-05 12:00:35");
-        assert!(!c.fires_between(tick1, tick2), "same-minute re-tick must not refire");
+        assert!(
+            !c.fires_between(tick1, tick2),
+            "same-minute re-tick must not refire"
+        );
         // ...and the next hour still fires normally.
         assert!(c.fires_between(tick1, at("2026-10-05 13:00:10")));
     }
@@ -852,7 +914,13 @@ mod tests {
         let cases: Vec<(&str, Option<&str>, Option<&str>, &str, bool)> = vec![
             // eager is always true.
             ("eager", None, None, "eager", true),
-            ("eager", Some("2026-10-05 11:59:00"), None, "eager-fresh", true),
+            (
+                "eager",
+                Some("2026-10-05 11:59:00"),
+                None,
+                "eager-fresh",
+                true,
+            ),
             // freshness_violated: never-run => violated.
             ("fv", None, None, "never-run", true),
             // materialized 10 min ago, max_lag 5m => violated.
@@ -862,13 +930,31 @@ mod tests {
             // exactly at the lag boundary counts as violated (>=).
             ("fv", Some("2026-10-05 11:55:00"), None, "exactly5m", true),
             // on_interval: last ready 10m ago, interval 5m => due.
-            ("iv", Some("2026-10-05 11:00:00"), Some("2026-10-05 11:50:00"), "10m>5m", true),
+            (
+                "iv",
+                Some("2026-10-05 11:00:00"),
+                Some("2026-10-05 11:50:00"),
+                "10m>5m",
+                true,
+            ),
             // last ready 2m ago, interval 5m => not due.
-            ("iv", Some("2026-10-05 11:00:00"), Some("2026-10-05 11:58:00"), "2m<5m", false),
+            (
+                "iv",
+                Some("2026-10-05 11:00:00"),
+                Some("2026-10-05 11:58:00"),
+                "2m<5m",
+                false,
+            ),
             // never evaluated => treat as long overdue => due.
             ("iv", None, None, "never-eval", true),
             // on_cron hourly: eval gate at 11:30 => 12:00 fire within => due.
-            ("cron", None, Some("2026-10-05 11:30:00"), "fire-in-window", true),
+            (
+                "cron",
+                None,
+                Some("2026-10-05 11:30:00"),
+                "fire-in-window",
+                true,
+            ),
             // eval gate at 12:00 (just ran) => next fire 13:00 > now => not due.
             ("cron", None, Some("2026-10-05 12:00:00"), "just-ran", false),
         ];
@@ -893,7 +979,11 @@ mod tests {
         assert_eq!(
             evaluate(
                 &cond,
-                &ctx("2026-10-05 12:30:00", Some("2026-10-05 12:25:00"), Some("2026-10-05 12:00:00"))
+                &ctx(
+                    "2026-10-05 12:30:00",
+                    Some("2026-10-05 12:25:00"),
+                    Some("2026-10-05 12:00:00")
+                )
             ),
             Some(false)
         );
@@ -901,7 +991,11 @@ mod tests {
         assert_eq!(
             evaluate(
                 &cond,
-                &ctx("2026-10-05 12:30:00", Some("2026-10-05 12:10:00"), Some("2026-10-05 12:00:00"))
+                &ctx(
+                    "2026-10-05 12:30:00",
+                    Some("2026-10-05 12:10:00"),
+                    Some("2026-10-05 12:00:00")
+                )
             ),
             Some(true)
         );
@@ -910,11 +1004,17 @@ mod tests {
         // (e.g. upstream broken — avoid hammering).
         let cond = parse_automation("eager & !freshness_violated(1h)").unwrap();
         assert_eq!(
-            evaluate(&cond, &ctx("2026-10-05 12:00:00", Some("2026-10-05 11:30:00"), None)),
+            evaluate(
+                &cond,
+                &ctx("2026-10-05 12:00:00", Some("2026-10-05 11:30:00"), None)
+            ),
             Some(true)
         );
         assert_eq!(
-            evaluate(&cond, &ctx("2026-10-05 12:00:00", Some("2026-10-05 10:00:00"), None)),
+            evaluate(
+                &cond,
+                &ctx("2026-10-05 12:00:00", Some("2026-10-05 10:00:00"), None)
+            ),
             Some(false)
         );
         // The headline anti-hammering case with Unknown: ledger unreadable
@@ -925,7 +1025,10 @@ mod tests {
         assert_eq!(evaluate(&cond, &c_unknown), None);
         // And the plain condition itself is Unknown, not "stale".
         assert_eq!(
-            evaluate(&AutomationCondition::FreshnessViolated { max_lag_secs: 300 }, &c_unknown),
+            evaluate(
+                &AutomationCondition::FreshnessViolated { max_lag_secs: 300 },
+                &c_unknown
+            ),
             None
         );
     }

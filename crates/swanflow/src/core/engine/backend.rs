@@ -89,9 +89,10 @@ pub trait QueryEngine: Send + Sync + Debug {
     /// Only engines with `sql_compilation` capability support this.
     /// Returns the generated SQL string.
     fn compile_to_sql(&self, _plan: &LogicalPlan) -> Result<String> {
-        Err(datafusion::error::DataFusionError::NotImplemented(
-            format!("{} does not support SQL compilation", self.name()),
-        ))
+        Err(datafusion::error::DataFusionError::NotImplemented(format!(
+            "{} does not support SQL compilation",
+            self.name()
+        )))
     }
 
     /// Get the list of currently registered table names.

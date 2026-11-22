@@ -148,7 +148,10 @@ mod tests {
         )
         .await;
         assert_eq!(result, Err("permanent"));
-        assert_eq!(retries_seen, 2, "on_retry fires once per retry, not per attempt");
+        assert_eq!(
+            retries_seen, 2,
+            "on_retry fires once per retry, not per attempt"
+        );
     }
 
     #[test]
@@ -159,7 +162,11 @@ mod tests {
             1,
             || {
                 calls += 1;
-                if calls < 2 { Err("transient") } else { Ok(calls) }
+                if calls < 2 {
+                    Err("transient")
+                } else {
+                    Ok(calls)
+                }
             },
             |_, _, _| {},
         );

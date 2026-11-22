@@ -92,11 +92,18 @@ async fn insert_prereq_repair_closed_loop() {
     let outcome = apply_repair(&mut workflow, &failed_id, op).expect("apply INSERT_PREREQ");
 
     // Graph grew by exactly one node + one edge, still acyclic.
-    assert_eq!(workflow.graph.node_count(), 2, "failed node + new prereq node");
+    assert_eq!(
+        workflow.graph.node_count(),
+        2,
+        "failed node + new prereq node"
+    );
     assert_eq!(workflow.graph.edge_count(), 1, "prereq → failed edge");
     assert!(!petgraph::algo::is_cyclic_directed(&workflow.graph));
     assert_eq!(outcome.affected_nodes.len(), 2);
-    assert!(outcome.affected_nodes.iter().any(|id| *id == failed_id.to_string()));
+    assert!(outcome
+        .affected_nodes
+        .iter()
+        .any(|id| *id == failed_id.to_string()));
 
     // ── 4. Re-run succeeds: the prereq source now feeds the SQL node.
     let rx = engine.execute_workflow(&workflow).await.expect("run 2");
@@ -147,7 +154,10 @@ async fn rebind_repair_closed_loop() {
     // Same topology, config updated, node marked for re-run.
     assert_eq!(workflow.graph.node_count(), 1);
     let node = workflow.find_node_by_id(&failed_id).unwrap();
-    assert_eq!(workflow.get_node(node).unwrap().config["query"], "SELECT 1 AS x");
+    assert_eq!(
+        workflow.get_node(node).unwrap().config["query"],
+        "SELECT 1 AS x"
+    );
 
     // ── 4. Re-run succeeds.
     let rx = engine.execute_workflow(&workflow).await.expect("run 2");
@@ -216,7 +226,9 @@ async fn rewire_repair_closed_loop() {
     let outcome = apply_repair(&mut workflow, &bad_id, op).expect("apply REWIRE");
     assert_eq!(workflow.graph.edge_count(), 0);
     assert!(!petgraph::algo::is_cyclic_directed(&workflow.graph));
-    assert!(outcome.message.contains("removed 1 edge(s), added 0 edge(s)"));
+    assert!(outcome
+        .message
+        .contains("removed 1 edge(s), added 0 edge(s)"));
 
     // ── 4. Re-run: the bad node is now an isolated node — it still fails on
     //    its own query, so the event stream carries an error again. The key

@@ -1117,9 +1117,11 @@ async fn pivot_execute_plan(plan: &LogicalPlan) -> Result<Vec<RecordBatch>> {
         ctx: ctx.clone(),
         cache_dir: "target/swanflow_cache".to_string(),
     };
-    let physical_planner = Arc::new(datafusion::physical_planner::DefaultPhysicalPlanner::with_extension_planners(
-        vec![Arc::new(planner)],
-    ));
+    let physical_planner = Arc::new(
+        datafusion::physical_planner::DefaultPhysicalPlanner::with_extension_planners(vec![
+            Arc::new(planner),
+        ]),
+    );
     let state = datafusion::execution::SessionStateBuilder::new_from_existing(ctx.state())
         .with_query_planner(Arc::new(crate::core::engine::SwanFlowQueryPlanner {
             physical_planner,
@@ -1206,13 +1208,8 @@ impl NodeBehavior for PivotNode {
     fn validate(&self, config: &JsonValue) -> Result<()> {
         cfg::required_string(config, "row")?;
         let agg = cfg::optional_string(config, "aggregator").unwrap_or_else(|| "sum".to_string());
-        if !matches!(
-            agg.as_str(),
-            "sum" | "avg" | "min" | "max" | "count"
-        ) {
-            anyhow::bail!(
-                "PivotNode aggregator must be one of sum/avg/min/max/count, got '{agg}'"
-            );
+        if !matches!(agg.as_str(), "sum" | "avg" | "min" | "max" | "count") {
+            anyhow::bail!("PivotNode aggregator must be one of sum/avg/min/max/count, got '{agg}'");
         }
         if let Some(value) = cfg::optional_string(config, "value") {
             if value.trim().is_empty() {
@@ -1237,8 +1234,8 @@ impl NodeBehavior for PivotNode {
         let row = cfg::required_string(config, "row")?;
         let column = cfg::optional_string(config, "column");
         let value = cfg::optional_string(config, "value");
-        let aggregator = cfg::optional_string(config, "aggregator")
-            .unwrap_or_else(|| "sum".to_string());
+        let aggregator =
+            cfg::optional_string(config, "aggregator").unwrap_or_else(|| "sum".to_string());
 
         let q = |s: &str| format!("\"{}\"", s);
 
@@ -1303,10 +1300,8 @@ impl NodeBehavior for PivotNode {
         // dependency on the shared mutable `input_0` table state at run time.
         let probe_ctx = SessionContext::new();
         let snapshot_schema = data[0].schema();
-        let memtable = datafusion::datasource::MemTable::try_new(
-            snapshot_schema,
-            vec![data.clone()],
-        )?;
+        let memtable =
+            datafusion::datasource::MemTable::try_new(snapshot_schema, vec![data.clone()])?;
         probe_ctx.register_table("input_0", Arc::new(memtable))?;
         let out_df = probe_ctx.sql(&sql).await?;
         let schema: DFSchemaRef = Arc::new(out_df.schema().clone());
@@ -1350,15 +1345,13 @@ mod pivot_tests {
                 Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
                 Arc::new(Int64Array::from(vec![10, 20, 30, 40])),
             ],
-        )?
-    )}
+        )?)
+    }
 
     async fn plan_from_batch(batch: &RecordBatch) -> Result<LogicalPlan> {
         let ctx = SessionContext::new();
-        let provider = datafusion::datasource::MemTable::try_new(
-            batch.schema(),
-            vec![vec![batch.clone()]],
-        )?;
+        let provider =
+            datafusion::datasource::MemTable::try_new(batch.schema(), vec![vec![batch.clone()]])?;
         ctx.register_table("t", Arc::new(provider))?;
         Ok(ctx.table("t").await?.into_optimized_plan()?)
     }
@@ -1423,11 +1416,7 @@ mod pivot_tests {
                 .downcast_ref::<Int64Array>()
                 .unwrap();
             for i in 0..b.num_rows() {
-                rows.push((
-                    region.value(i).to_string(),
-                    pa.value(i),
-                    pb.value(i),
-                ));
+                rows.push((region.value(i).to_string(), pa.value(i), pb.value(i)));
             }
         }
         rows.sort();

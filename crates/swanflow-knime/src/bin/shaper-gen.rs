@@ -15,7 +15,10 @@ fn main() {
     }
 
     let input = &args[1];
-    let output = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1));
+    let output = args
+        .iter()
+        .position(|a| a == "-o")
+        .and_then(|i| args.get(i + 1));
 
     let archive = match KnwfParser::parse_file(input) {
         Ok(a) => a,

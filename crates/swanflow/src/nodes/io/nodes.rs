@@ -74,8 +74,7 @@ impl DuckDBHelper {
                 let name = ext.trim();
                 let safe = !name.is_empty()
                     && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    && crate::nodes::sql_duckdb::ALLOWED_INSTALLABLE_EXTENSIONS
-                        .contains(&name);
+                    && crate::nodes::sql_duckdb::ALLOWED_INSTALLABLE_EXTENSIONS.contains(&name);
                 if !safe {
                     return Err(anyhow!(
                         "extension '{}' is not in the installable allowlist",
@@ -186,7 +185,12 @@ impl NodeBehavior for DuckDBReadNode {
         }
         let schema = batches[0].schema();
         let df_schema = datafusion::common::DFSchema::try_from(schema.clone())?;
-        eprintln!("[duckdb_read] {} -> {} rows x {} cols", query, batches.iter().map(|b| b.num_rows()).sum::<usize>(), schema.fields().len());
+        eprintln!(
+            "[duckdb_read] {} -> {} rows x {} cols",
+            query,
+            batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+            schema.fields().len()
+        );
 
         Ok(vec![LogicalPlan::Extension(Extension {
             node: Arc::new(crate::core::datasource::DuckDBScanLogical {
@@ -204,7 +208,6 @@ impl TypedNodeBehavior for DuckDBReadNode {
     const INPUT_COUNT: usize = 0;
     const OUTPUT_COUNT: usize = 1;
 }
-
 
 pub struct DuckDBWriteNode;
 
@@ -256,47 +259,52 @@ impl NodeBehavior for DuckDBWriteNode {
         config: &JsonValue,
     ) -> Result<Vec<LogicalPlan>> {
         let table = cfg::required_string(config, "table")?;
-        let path =
-            cfg::optional_string(config, "path").unwrap_or_else(|| "data.db".to_string());
+        let path = cfg::optional_string(config, "path").unwrap_or_else(|| "data.db".to_string());
         // mode: "replace" (default, historical) | "append" — with optional
         // partition_by for idempotent per-interval backfills.
         // partition_by: single column string, or array of columns; each
         // entry may carry a date_trunc unit as "col:unit" (e.g. "ts:hour").
-        let parse_partition = |v: Option<&str>| -> Result<Vec<crate::core::datasource::PartitionCol>> {
-            let Some(spec) = v else { return Ok(Vec::new()) };
-            let mut cols = Vec::new();
-            for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                match part.split_once(':') {
-                    Some((col, trunc)) => {
-                        const UNITS: &[&str] = &[
-                            "year", "quarter", "month", "week", "day", "hour", "minute", "second",
-                        ];
-                        let u = trunc.trim();
-                        if !UNITS.contains(&u) {
-                            return Err(anyhow::anyhow!(
+        let parse_partition =
+            |v: Option<&str>| -> Result<Vec<crate::core::datasource::PartitionCol>> {
+                let Some(spec) = v else { return Ok(Vec::new()) };
+                let mut cols = Vec::new();
+                for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    match part.split_once(':') {
+                        Some((col, trunc)) => {
+                            const UNITS: &[&str] = &[
+                                "year", "quarter", "month", "week", "day", "hour", "minute",
+                                "second",
+                            ];
+                            let u = trunc.trim();
+                            if !UNITS.contains(&u) {
+                                return Err(anyhow::anyhow!(
                                 "invalid partition_by unit '{u}' on '{col}': expected one of {UNITS:?}"
                             ));
+                            }
+                            cols.push(crate::core::datasource::PartitionCol {
+                                column: col.trim().to_string(),
+                                trunc: Some(u.to_string()),
+                            })
                         }
-                        cols.push(crate::core::datasource::PartitionCol {
-                            column: col.trim().to_string(),
-                            trunc: Some(u.to_string()),
-                        })
+                        None => cols.push(crate::core::datasource::PartitionCol {
+                            column: part.to_string(),
+                            trunc: None,
+                        }),
                     }
-                    None => cols.push(crate::core::datasource::PartitionCol {
-                        column: part.to_string(),
-                        trunc: None,
-                    }),
                 }
-            }
-            if cols.iter().any(|c| c.column.is_empty()) {
-                return Err(anyhow::anyhow!("invalid partition_by '{spec}': empty column name"));
-            }
-            Ok(cols)
-        };
+                if cols.iter().any(|c| c.column.is_empty()) {
+                    return Err(anyhow::anyhow!(
+                        "invalid partition_by '{spec}': empty column name"
+                    ));
+                }
+                Ok(cols)
+            };
         // #2026111603 spike: merge / scd2 modes (Starlake writeStrategy port).
         // primary_keys = comma-separated key columns; empty entries rejected.
         let parse_key_list = |raw: Option<&str>| -> Result<Vec<String>> {
-            let Some(spec) = raw else { return Ok(Vec::new()) };
+            let Some(spec) = raw else {
+                return Ok(Vec::new());
+            };
             let keys: Vec<String> = spec
                 .split(',')
                 .map(str::trim)
@@ -313,7 +321,9 @@ impl NodeBehavior for DuckDBWriteNode {
         let write_mode = match cfg::optional_string(config, "mode").as_deref() {
             None | Some("replace") => crate::core::datasource::WriteMode::Replace,
             Some("append") => crate::core::datasource::WriteMode::Append {
-                partition_by: parse_partition(cfg::optional_string(config, "partition_by").as_deref())?,
+                partition_by: parse_partition(
+                    cfg::optional_string(config, "partition_by").as_deref(),
+                )?,
             },
             Some("merge") => {
                 let keys = parse_key_list(cfg::optional_string(config, "primary_keys").as_deref())?;
@@ -349,7 +359,11 @@ impl NodeBehavior for DuckDBWriteNode {
                                 "invalid scd2_columns '{spec}': expected 'valid_from,valid_to,is_current'"
                             ));
                         }
-                        (parts[0].to_string(), parts[1].to_string(), parts[2].to_string())
+                        (
+                            parts[0].to_string(),
+                            parts[1].to_string(),
+                            parts[2].to_string(),
+                        )
                     }
                     None => (
                         "_valid_from".to_string(),
@@ -391,8 +405,8 @@ impl NodeBehavior for DuckDBWriteNode {
             }
             Some(other) => {
                 return Err(anyhow::anyhow!(
-                    "invalid mode '{other}': expected \"replace\", \"append\", \"merge\" or \"scd2\""
-                ))
+                "invalid mode '{other}': expected \"replace\", \"append\", \"merge\" or \"scd2\""
+            ))
             }
         };
         let sink = LogicalPlan::Extension(Extension {
@@ -410,7 +424,6 @@ impl TypedNodeBehavior for DuckDBWriteNode {
     const INPUT_COUNT: usize = 1;
     const OUTPUT_COUNT: usize = 0;
 }
-
 
 pub struct HttpFetchNode;
 
@@ -504,7 +517,9 @@ impl NodeBehavior for HttpFetchNode {
         let cols = batches.first().map(|b| b.num_columns()).unwrap_or(0);
         eprintln!("[http_fetch] {url} -> {rows} rows x {cols} cols (schema inferred)");
         if batches.is_empty() || cols == 0 {
-            return Err(anyhow!("http_fetch: query returned no rows/columns for {url}"));
+            return Err(anyhow!(
+                "http_fetch: query returned no rows/columns for {url}"
+            ));
         }
         let arrow_schema = batches[0].schema();
         let df_schema = DFSchema::try_from(arrow_schema)?;
@@ -525,7 +540,6 @@ impl TypedNodeBehavior for HttpFetchNode {
     const INPUT_COUNT: usize = 0;
     const OUTPUT_COUNT: usize = 1;
 }
-
 
 pub struct ParquetReadNode;
 
@@ -579,7 +593,6 @@ impl TypedNodeBehavior for ParquetReadNode {
     const OUTPUT_COUNT: usize = 1;
 }
 
-
 pub struct CsvReadNode;
 
 #[async_trait]
@@ -629,7 +642,6 @@ impl TypedNodeBehavior for CsvReadNode {
     const INPUT_COUNT: usize = 0;
     const OUTPUT_COUNT: usize = 1;
 }
-
 
 pub struct UniversalReadNode;
 
@@ -1082,7 +1094,6 @@ impl TypedNodeBehavior for UniversalReadNode {
     const OUTPUT_COUNT: usize = 1;
 }
 
-
 pub struct DbConnectorNode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1095,7 +1106,9 @@ enum DbDriver {
 
 /// Extract the host portion of a http(s) URL (P2-12 SSRF guard).
 fn extract_url_host(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
     let authority = rest.split(['/', '?', '#']).next()?;
     // strip userinfo
     let hostport = authority.rsplit('@').next()?;
@@ -1126,11 +1139,7 @@ fn redact_url_credentials(url: &str) -> String {
         if let Some(at) = rest.find('@') {
             let userinfo = &rest[..at];
             if !userinfo.is_empty() && !userinfo.contains('/') {
-                return format!(
-                    "{}://***@{}",
-                    &url[..scheme_end],
-                    &rest[at + 1..]
-                );
+                return format!("{}://***@{}", &url[..scheme_end], &rest[at + 1..]);
             }
         }
     }
@@ -1172,10 +1181,9 @@ impl DbConnectorNode {
                 "ATTACH '{}' AS ext_db (TYPE postgres);",
                 attach_lit
             )),
-            DbDriver::DuckDBMysql => Some(format!(
-                "ATTACH '{}' AS ext_db (TYPE mysql);",
-                attach_lit
-            )),
+            DbDriver::DuckDBMysql => {
+                Some(format!("ATTACH '{}' AS ext_db (TYPE mysql);", attach_lit))
+            }
             _ => {
                 let db_path = attach_lit.trim_start_matches("sqlite://");
                 Some(format!("ATTACH '{}' AS ext_db (TYPE sqlite);", db_path))
@@ -1305,8 +1313,7 @@ impl NodeBehavior for DbConnectorNode {
                 // P2-1b: bare table interpolation = SQL injection channel;
                 // accept only dotted identifier chains (schema.table, db.schema.table).
                 let ok = t.split('.').all(|part| {
-                    !part.is_empty()
-                        && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                 });
                 if !ok {
                     return Err(anyhow!(

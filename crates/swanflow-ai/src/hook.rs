@@ -22,9 +22,15 @@ type FixResponse = RepairResponse;
 /// Maps a generic error message to an ErrorKind for routing.
 fn classify_error(error: &str) -> ErrorKind {
     let lower = error.to_lowercase();
-    if lower.contains("not found") || lower.contains("missing") || lower.contains("invalid parameter") {
+    if lower.contains("not found")
+        || lower.contains("missing")
+        || lower.contains("invalid parameter")
+    {
         ErrorKind::Config
-    } else if lower.contains("schema") || lower.contains("column") || lower.contains("type mismatch") {
+    } else if lower.contains("schema")
+        || lower.contains("column")
+        || lower.contains("type mismatch")
+    {
         ErrorKind::Schema
     } else if lower.contains("null") || lower.contains("overflow") || lower.contains("cast") {
         ErrorKind::Data
@@ -258,10 +264,7 @@ mod tests {
     #[test]
     fn measure_simple_config() {
         let config = json!({"path": "/data/file.csv", "format": "csv"});
-        assert_eq!(
-            measure_config_complexity(&config),
-            ConfigComplexity::Medium
-        );
+        assert_eq!(measure_config_complexity(&config), ConfigComplexity::Medium);
     }
 
     #[test]

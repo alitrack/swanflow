@@ -1,6 +1,9 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use datafusion::arrow::array::{Array, Float32Array, RecordBatch, StringBuilder, StringArray, UInt64Array, UInt64Builder, Float32Builder};
+use datafusion::arrow::array::{
+    Array, Float32Array, Float32Builder, RecordBatch, StringArray, StringBuilder, UInt64Array,
+    UInt64Builder,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DFSchema, DataFusionError};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
@@ -8,7 +11,9 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -208,8 +213,7 @@ impl CompiledContract {
             ));
         };
         // Fail fast at load time if the schema does not even compile.
-        InstanceValidator::compile(&schema)
-            .map_err(|e| anyhow!("structured_io_contract: {e}"))?;
+        InstanceValidator::compile(&schema).map_err(|e| anyhow!("structured_io_contract: {e}"))?;
 
         let alias_map = match config.get("alias_map") {
             None => Vec::new(),
@@ -250,7 +254,12 @@ impl CompiledContract {
         }
         let input_column = config["input_column"].as_str().map(|s| s.to_string());
 
-        Ok(Self { schema, alias_map, strict, input_column })
+        Ok(Self {
+            schema,
+            alias_map,
+            strict,
+            input_column,
+        })
     }
 }
 
@@ -290,8 +299,8 @@ pub fn process_batch(
     };
     // Sources may hand us the string family in different physical flavors
     // (Utf8View/LargeUtf8/Dictionary) — cast to plain Utf8 before reading.
-    let text_arr = datafusion::arrow::compute::cast(batch.column(idx), &DataType::Utf8)
-        .map_err(|e| {
+    let text_arr =
+        datafusion::arrow::compute::cast(batch.column(idx), &DataType::Utf8).map_err(|e| {
             DataFusionError::Execution(format!(
                 "structured_io_contract: cannot cast input column {idx} to Utf8: {e}"
             ))
@@ -512,14 +521,9 @@ impl UserDefinedLogicalNodeCore for StructuredIoContractLogical {
         _exprs: Vec<datafusion::logical_expr::Expr>,
         inputs: Vec<LogicalPlan>,
     ) -> Result<Self, DataFusionError> {
-        let input = inputs
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                DataFusionError::Internal(
-                    "StructuredIoContract requires its input".into(),
-                )
-            })?;
+        let input = inputs.into_iter().next().ok_or_else(|| {
+            DataFusionError::Internal("StructuredIoContract requires its input".into())
+        })?;
         Ok(Self {
             input: Arc::new(input),
             ..self.clone()
@@ -612,10 +616,8 @@ impl ExecutionPlan for StructuredIoContractExec {
         // The schema was already compile-checked at plan time
         // (CompiledContract::from_config); a failure here can only come from
         // a hand-built plan — fail loudly instead of panicking.
-        let validator =
-            InstanceValidator::compile(&self.contract.schema).map_err(|e| {
-                DataFusionError::Execution(format!("structured_io_contract: {e}"))
-            })?;
+        let validator = InstanceValidator::compile(&self.contract.schema)
+            .map_err(|e| DataFusionError::Execution(format!("structured_io_contract: {e}")))?;
         Ok(Box::pin(StructuredIoContractStream {
             schema: self.schema.clone(),
             contract: self.contract.clone(),
@@ -827,18 +829,19 @@ pub struct CitationRankExec {
 }
 
 impl CitationRankExec {
-    pub fn new(
-        max_citations: usize,
-        schema: SchemaRef,
-        input: Arc<dyn ExecutionPlan>,
-    ) -> Self {
+    pub fn new(max_citations: usize, schema: SchemaRef, input: Arc<dyn ExecutionPlan>) -> Self {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
-        Self { max_citations, schema, cache, input }
+        Self {
+            max_citations,
+            schema,
+            cache,
+            input,
+        }
     }
 }
 
@@ -935,9 +938,7 @@ fn rank_batch(
 ) -> Result<RecordBatch, DataFusionError> {
     let col = |name: &str| {
         batch.column_by_name(name).ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "CitationRank: input missing column '{name}'"
-            ))
+            DataFusionError::Execution(format!("CitationRank: input missing column '{name}'"))
         })
     };
     let source_id = col("source_id")?
@@ -951,16 +952,16 @@ fn rank_batch(
     // Accept Float32 (native) or Float64 (CSV sources infer f64) for score.
     let score_f64;
     let score_f32;
-    let score_vals: &dyn Fn(usize) -> f64 = if let Some(a) =
-        batch.column_by_name("score").and_then(|c| {
-            c.as_any().downcast_ref::<Float32Array>()
-        }) {
+    let score_vals: &dyn Fn(usize) -> f64 = if let Some(a) = batch
+        .column_by_name("score")
+        .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+    {
         score_f32 = a;
         &|i: usize| score_f32.value(i) as f64
-    } else if let Some(a) = batch
-        .column_by_name("score")
-        .and_then(|c| c.as_any().downcast_ref::<datafusion::arrow::array::Float64Array>())
-    {
+    } else if let Some(a) = batch.column_by_name("score").and_then(|c| {
+        c.as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+    }) {
         score_f64 = a;
         &|i: usize| score_f64.value(i)
     } else {
@@ -977,13 +978,10 @@ fn rank_batch(
     {
         start_u64 = a;
         &|i: usize| start_u64.value(i)
-    } else if let Some(a) = batch
-        .column_by_name("start")
-        .and_then(|c| {
-            c.as_any()
-                .downcast_ref::<datafusion::arrow::array::Int64Array>()
-        })
-    {
+    } else if let Some(a) = batch.column_by_name("start").and_then(|c| {
+        c.as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+    }) {
         start_i64 = a;
         &|i: usize| start_i64.value(i) as u64
     } else {
@@ -999,13 +997,10 @@ fn rank_batch(
     {
         end_u64 = a;
         &|i: usize| end_u64.value(i)
-    } else if let Some(a) = batch
-        .column_by_name("end")
-        .and_then(|c| {
-            c.as_any()
-                .downcast_ref::<datafusion::arrow::array::Int64Array>()
-        })
-    {
+    } else if let Some(a) = batch.column_by_name("end").and_then(|c| {
+        c.as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+    }) {
         end_i64 = a;
         &|i: usize| end_i64.value(i) as u64
     } else {
@@ -1065,7 +1060,7 @@ mod citation_rank_tests {
         ]))
     }
 
-    fn build_batch(rows: &[( &str, &str, f32, u64, u64 )]) -> RecordBatch {
+    fn build_batch(rows: &[(&str, &str, f32, u64, u64)]) -> RecordBatch {
         let mut sid = StringBuilder::new();
         let mut snip = StringBuilder::new();
         let mut sc = Float32Builder::new();
@@ -1100,10 +1095,18 @@ mod citation_rank_tests {
         ]);
         let out = rank_batch(&batch, 2, five_col_schema()).unwrap();
         assert_eq!(out.num_rows(), 2);
-        let sid = out.column_by_name("source_id").unwrap()
-            .as_any().downcast_ref::<StringArray>().unwrap();
-        let score = out.column_by_name("score").unwrap()
-            .as_any().downcast_ref::<Float32Array>().unwrap();
+        let sid = out
+            .column_by_name("source_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let score = out
+            .column_by_name("score")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .unwrap();
         assert_eq!(sid.value(0), "srcB");
         assert_eq!(sid.value(1), "srcC");
         assert!((score.value(0) - 0.90).abs() < 1e-6);
@@ -1117,10 +1120,18 @@ mod citation_rank_tests {
             ("srcA", "same score earlier", 0.5, 1, 11),
         ]);
         let out = rank_batch(&batch, 3, five_col_schema()).unwrap();
-        let sid = out.column_by_name("source_id").unwrap()
-            .as_any().downcast_ref::<StringArray>().unwrap();
-        let start = out.column_by_name("start").unwrap()
-            .as_any().downcast_ref::<UInt64Array>().unwrap();
+        let sid = out
+            .column_by_name("source_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let start = out
+            .column_by_name("start")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
         assert_eq!(sid.value(0), "srcA");
         assert_eq!(start.value(0), 1);
         assert_eq!(sid.value(1), "srcA");
@@ -1138,11 +1149,7 @@ mod structured_io_tests {
         for r in rows {
             b.append_value(*r);
         }
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "text",
-            DataType::Utf8,
-            false,
-        )]));
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
         RecordBatch::try_new(schema, vec![Arc::new(b.finish())]).unwrap()
     }
 
@@ -1215,15 +1222,31 @@ mod structured_io_tests {
         let (out, stats) = run_pipeline(&rows, &cfg).unwrap();
         assert_eq!(stats.passed, 2);
         assert_eq!(stats.dropped, 1);
-        assert_eq!(out.num_rows(), 2, "the bad element must not reach downstream");
+        assert_eq!(
+            out.num_rows(),
+            2,
+            "the bad element must not reach downstream"
+        );
         let item = col(&out, "item");
-        assert!(item.value(0).contains("\"a\""), "first pass: {}", item.value(0));
-        assert!(item.value(1).contains("\"c\""), "second pass: {}", item.value(1));
+        assert!(
+            item.value(0).contains("\"a\""),
+            "first pass: {}",
+            item.value(0)
+        );
+        assert!(
+            item.value(1).contains("\"c\""),
+            "second pass: {}",
+            item.value(1)
+        );
         assert!(!item.value(0).contains("123"));
         assert!(!item.value(1).contains("123"));
         // The rejection record rides along in `rejected` on sibling rows.
         let rejected = col(&out, "rejected");
-        assert!(rejected.value(0).contains("123"), "reason must name the bad element: {}", rejected.value(0));
+        assert!(
+            rejected.value(0).contains("123"),
+            "reason must name the bad element: {}",
+            rejected.value(0)
+        );
         assert!(rejected.value(0).contains("string"));
     }
 
@@ -1242,7 +1265,10 @@ mod structured_io_tests {
         let (out, stats) = run_pipeline(&rows, &cfg).unwrap();
         assert_eq!(stats.passed, 1, "alias fix must make the enum check pass");
         assert_eq!(stats.dropped, 0);
-        assert_eq!(stats.alias_fixes, 1, "the 组织→organization fix must be counted");
+        assert_eq!(
+            stats.alias_fixes, 1,
+            "the 组织→organization fix must be counted"
+        );
         let item = col(&out, "item");
         assert_eq!(item.value(0), "{\"kind\":\"organization\"}");
         assert_eq!(col(&out, "rejected").value(0), "");
@@ -1261,10 +1287,16 @@ mod structured_io_tests {
         });
         let rows = ["[{\"name\": \"a\"}, {\"name\": 123}]"];
         let err = run_pipeline(&rows, &cfg).unwrap_err();
-        assert!(err.contains("strict"), "fail-fast error must name strict mode: {err}");
+        assert!(
+            err.contains("strict"),
+            "fail-fast error must name strict mode: {err}"
+        );
         let rows2 = ["definitely not json"];
         let err2 = run_pipeline(&rows2, &cfg).unwrap_err();
-        assert!(err2.contains("strict"), "parse-stage failure is fatal too: {err2}");
+        assert!(
+            err2.contains("strict"),
+            "parse-stage failure is fatal too: {err2}"
+        );
     }
 
     /// ⑤ 空输入批次 → 输出 0 行不算错（sink 空输入 bail 的对偶：校验门要能过空）。

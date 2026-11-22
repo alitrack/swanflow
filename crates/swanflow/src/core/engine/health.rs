@@ -2,7 +2,6 @@
 //!
 //! Provides a snapshot of engine state for observability and health checks.
 
-
 /// A snapshot of the engine's current health and metrics.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EngineHealth {

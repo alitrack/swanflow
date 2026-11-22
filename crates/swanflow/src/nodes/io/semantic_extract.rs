@@ -181,7 +181,10 @@ mod tests {
         }
         assert_eq!(
             pk_cols,
-            vec!["customers.customer_id".to_string(), "orders.order_id".to_string()],
+            vec![
+                "customers.customer_id".to_string(),
+                "orders.order_id".to_string()
+            ],
             "PK flags must land on the right columns"
         );
     }

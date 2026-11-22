@@ -183,7 +183,11 @@ impl HttpMcpClient {
             params: None,
         };
         let body = serde_json::to_string(&notification)?;
-        let resp = self.build_request(body)?.send().await.context("sending notifications/initialized")?;
+        let resp = self
+            .build_request(body)?
+            .send()
+            .await
+            .context("sending notifications/initialized")?;
         // 202 Accepted is the expected status for notifications.
         if !resp.status().is_success() {
             return Err(anyhow!(
@@ -287,10 +291,17 @@ impl HttpMcpClient {
     pub async fn call_internal(&mut self, method: &str, params: JsonValue) -> Result<JsonValue> {
         let (status, _headers, body) = self.post_jsonrpc(method, params).await?;
         if !status.is_success() {
-            return Err(anyhow!("MCP HTTP error: HTTP {status} — {}", truncate(&body, 300)));
+            return Err(anyhow!(
+                "MCP HTTP error: HTTP {status} — {}",
+                truncate(&body, 300)
+            ));
         }
-        let response: JsonRpcResponse = serde_json::from_str(&body)
-            .with_context(|| format!("parsing JSON-RPC response for '{method}': {}", truncate(&body, 300)))?;
+        let response: JsonRpcResponse = serde_json::from_str(&body).with_context(|| {
+            format!(
+                "parsing JSON-RPC response for '{method}': {}",
+                truncate(&body, 300)
+            )
+        })?;
         if let Some(err) = response.error {
             return Err(anyhow!("MCP error: {err}"));
         }

@@ -16,7 +16,13 @@ async fn union_all_rows_survive_state_probe_and_materializer_partition_pull() {
     let phys = ctx.state().create_physical_plan(&plan).await.unwrap();
     // Simulate what swanflow engine does: wrap with coalesce before single-partition pull.
     let coalesced: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(phys));
-    assert_eq!(coalesced.properties().output_partitioning().partition_count(), 1);
+    assert_eq!(
+        coalesced
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        1
+    );
     let batches = collect(coalesced, ctx.task_ctx()).await.unwrap();
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total, 3, "UNION ALL must not lose rows across partitions");

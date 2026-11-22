@@ -46,7 +46,9 @@ async fn order_by_survives_materializer_wrapping() {
     ctx.register_table("shipments", Arc::new(provider)).unwrap();
 
     let df = ctx
-        .sql("SELECT waybill_id, violations FROM shipments ORDER BY violations DESC, waybill_id ASC")
+        .sql(
+            "SELECT waybill_id, violations FROM shipments ORDER BY violations DESC, waybill_id ASC",
+        )
         .await
         .unwrap();
     let logical: LogicalPlan = df.into_optimized_plan().unwrap();
@@ -81,9 +83,7 @@ async fn order_by_survives_materializer_wrapping() {
         ids.extend(col.iter().map(|v| v.unwrap().to_string()));
     }
 
-    let expected = vec![
-        "WB-001", "WB-004", "WB-002", "WB-005", "WB-003", "WB-006",
-    ];
+    let expected = vec!["WB-001", "WB-004", "WB-002", "WB-005", "WB-003", "WB-006"];
     assert_eq!(
         ids, expected,
         "Bug 17 regression: ORDER BY lost through MaterializerExec"
@@ -91,7 +91,11 @@ async fn order_by_survives_materializer_wrapping() {
 
     // The plan must also advertise the ordering (soft requirement declared).
     assert!(
-        materializer.properties().equivalence_properties().output_ordering().is_some(),
+        materializer
+            .properties()
+            .equivalence_properties()
+            .output_ordering()
+            .is_some(),
         "MaterializerExec must propagate output ordering in its equivalence properties"
     );
     assert_eq!(materializer.maintains_input_order(), vec![true]);

@@ -232,8 +232,12 @@ pub trait NodeBehavior: Send + Sync {
     /// hand-written logic. New nodes get schema validation for free.
     fn validate(&self, config: &JsonValue) -> Result<()> {
         let spec = self.spec();
-        crate::validation::SchemaValidator::validate_single(&spec.type_id, &spec.config_schema, config)
-            .map_err(|e| anyhow::anyhow!("{e}"))
+        crate::validation::SchemaValidator::validate_single(
+            &spec.type_id,
+            &spec.config_schema,
+            config,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Current implementation version for this node.
@@ -546,6 +550,10 @@ mod serde_datatype {
 pub trait Plugin: Send + Sync {
     fn name(&self) -> &str;
     fn version(&self) -> &str;
-    fn description(&self) -> &str { "" }
-    fn node_types(&self) -> Vec<Box<dyn NodeBehavior>> { vec![] }
+    fn description(&self) -> &str {
+        ""
+    }
+    fn node_types(&self) -> Vec<Box<dyn NodeBehavior>> {
+        vec![]
+    }
 }

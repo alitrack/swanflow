@@ -40,7 +40,13 @@ fn persist_sources(flights_dir: &Path, programs: &[FlightProgram]) -> Result<()>
 
 fn sanitize_file_stem(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -69,7 +75,9 @@ pub async fn deploy(
     // Chain: previous manifest (if any) becomes our rollback pointer.
     let manifest_path = manifest_dir.join(manifest_file_name(dag_id));
     let previous: Option<DeployManifest> = if manifest_path.is_file() {
-        Some(serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?)
+        Some(serde_json::from_str(&std::fs::read_to_string(
+            &manifest_path,
+        )?)?)
     } else {
         None
     };
@@ -109,10 +117,7 @@ pub async fn deploy(
         rollback: previous.map(|_m| manifest_file_name(dag_id)),
     };
     std::fs::create_dir_all(manifest_dir)?;
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(&manifest)?,
-    )?;
+    std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
     Ok(manifest)
 }
 
@@ -132,8 +137,7 @@ pub async fn rollback(
             manifest_path.display()
         ));
     }
-    let current: DeployManifest =
-        serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+    let current: DeployManifest = serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?;
     let Some(prev_name) = &current.rollback else {
         return Err(anyhow!(
             "dag {dag_id} has no previous deployment (rollback=null) — first deployment cannot be rolled back"
@@ -200,9 +204,6 @@ pub async fn rollback(
     // Restore the previous manifest as current.
     let mut restored = prev.clone();
     restored.rollback = prev.rollback.clone();
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(&restored)?,
-    )?;
+    std::fs::write(&manifest_path, serde_json::to_string_pretty(&restored)?)?;
     Ok(restored)
 }

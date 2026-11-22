@@ -69,9 +69,21 @@ impl DocModel {
 
 /// Group by graph degree: pure sources (in=0), pure sinks (out=0),
 /// everything else is a step. Isolated nodes count as sources.
-fn group_of(graph: &petgraph::stable_graph::StableGraph<crate::core::graph::NodeInstance, crate::core::graph::EdgeInstance>, idx: NodeIndex) -> NodeGroup {
-    let has_in = graph.neighbors_directed(idx, petgraph::Direction::Incoming).next().is_some();
-    let has_out = graph.neighbors_directed(idx, petgraph::Direction::Outgoing).next().is_some();
+fn group_of(
+    graph: &petgraph::stable_graph::StableGraph<
+        crate::core::graph::NodeInstance,
+        crate::core::graph::EdgeInstance,
+    >,
+    idx: NodeIndex,
+) -> NodeGroup {
+    let has_in = graph
+        .neighbors_directed(idx, petgraph::Direction::Incoming)
+        .next()
+        .is_some();
+    let has_out = graph
+        .neighbors_directed(idx, petgraph::Direction::Outgoing)
+        .next()
+        .is_some();
     match (has_in, has_out) {
         (false, _) => NodeGroup::Source,
         (true, false) => NodeGroup::Destination,
@@ -100,7 +112,8 @@ pub fn build_doc(workflow: &Workflow) -> Result<DocModel, String> {
                 topo_rank: rank,
                 group: group_of(&workflow.graph, ni),
                 type_id: n.type_id.clone(),
-                config_json: serde_json::to_string_pretty(&n.config).unwrap_or_else(|_| "\"<unserializable>\"".into()),
+                config_json: serde_json::to_string_pretty(&n.config)
+                    .unwrap_or_else(|_| "\"<unserializable>\"".into()),
                 state: format!("{:?}", n.state),
                 mode: format!("{:?}", n.mode),
                 error_mode: format!("{:?}", n.error_mode),
@@ -169,7 +182,11 @@ fn render_mermaid(doc: &DocModel) -> String {
         let _ = writeln!(g, "  end");
     }
     for e in &doc.edges {
-        let _ = writeln!(g, "  n{} -->|p{}→p{}| n{}", e.from_index, e.source_port, e.target_port, e.to_index);
+        let _ = writeln!(
+            g,
+            "  n{} -->|p{}→p{}| n{}",
+            e.from_index, e.source_port, e.target_port, e.to_index
+        );
     }
     g
 }
@@ -189,8 +206,14 @@ fn render_css() -> String {
 pub fn render_html(doc: &DocModel, mermaid: bool) -> String {
     let mut html = String::new();
     let title = escape_html(&doc.workflow_name);
-    let _ = writeln!(html, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">");
-    let _ = writeln!(html, "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+    let _ = writeln!(
+        html,
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    );
+    let _ = writeln!(
+        html,
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    );
     let _ = writeln!(html, "<title>SwanFlow lineage — {title}</title>");
     let _ = writeln!(html, "<style>{}</style></head><body>", render_css());
     let _ = writeln!(html, "<h1>SwanFlow lineage — {title}</h1>");
@@ -213,7 +236,12 @@ pub fn render_html(doc: &DocModel, mermaid: bool) -> String {
     let _ = writeln!(html, "<h2 id=\"nodes\">Nodes</h2><p class=\"meta\">");
     for group in [NodeGroup::Source, NodeGroup::Step, NodeGroup::Destination] {
         let count = doc.nodes.iter().filter(|n| n.group == group).count();
-        let _ = write!(html, "<a href=\"#g-{:?}\">{}</a> ({count}) · ", group, group.label());
+        let _ = write!(
+            html,
+            "<a href=\"#g-{:?}\">{}</a> ({count}) · ",
+            group,
+            group.label()
+        );
     }
     let _ = writeln!(html, "</p>");
 
@@ -232,7 +260,10 @@ pub fn render_html(doc: &DocModel, mermaid: bool) -> String {
     }
 
     let _ = writeln!(html, "<h2 id=\"edges\">Edges</h2>");
-    let _ = writeln!(html, "<table><tr><th>From</th><th>To</th><th>Ports</th></tr>");
+    let _ = writeln!(
+        html,
+        "<table><tr><th>From</th><th>To</th><th>Ports</th></tr>"
+    );
     for e in &doc.edges {
         let _ = writeln!(
             html,
@@ -276,8 +307,22 @@ mod tests {
         let a = wf.graph.add_node(node("core.io.duckdb_read"));
         let b = wf.graph.add_node(node("core.sql"));
         let c = wf.graph.add_node(node("core.io.duckdb_write"));
-        wf.graph.add_edge(a, b, EdgeInstance { source_port: 0, target_port: 0 });
-        wf.graph.add_edge(b, c, EdgeInstance { source_port: 0, target_port: 0 });
+        wf.graph.add_edge(
+            a,
+            b,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        );
+        wf.graph.add_edge(
+            b,
+            c,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        );
         wf
     }
 
@@ -302,8 +347,22 @@ mod tests {
         let mut wf = Workflow::default();
         let a = wf.graph.add_node(node("a"));
         let b = wf.graph.add_node(node("b"));
-        wf.graph.add_edge(a, b, EdgeInstance { source_port: 0, target_port: 0 });
-        wf.graph.add_edge(b, a, EdgeInstance { source_port: 0, target_port: 0 });
+        wf.graph.add_edge(
+            a,
+            b,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        );
+        wf.graph.add_edge(
+            b,
+            a,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        );
         assert!(build_doc(&wf).is_err());
     }
 

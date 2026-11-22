@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use datafusion::arrow::array::{
-    ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, StringBuilder, TimestampNanosecondBuilder,
+    ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, StringBuilder,
+    TimestampNanosecondBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -17,8 +18,8 @@ use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::{
-    coalesce_partitions::CoalescePartitionsExec, DisplayAs, DisplayFormatType,
-    ExecutionPlan, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
+    coalesce_partitions::CoalescePartitionsExec, DisplayAs, DisplayFormatType, ExecutionPlan,
+    PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use futures::Stream;
 use futures::StreamExt;
@@ -267,10 +268,9 @@ impl ExecutionPlan for ClickHouseScanExec {
                 .await
                 .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
             if !bytes.is_empty() {
-                let reader =
-                    StreamReader::try_new(bytes.as_ref(), None).map_err(|e| {
-                        datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
-                    })?;
+                let reader = StreamReader::try_new(bytes.as_ref(), None).map_err(|e| {
+                    datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                })?;
                 for batch in reader {
                     let batch = batch.map_err(|e| {
                         datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
@@ -471,12 +471,12 @@ impl ExecutionPlan for DuckDBScanExec {
 
             for ext in &extensions {
                 // r4 C5: by-name INSTALLs must pass the shared allowlist.
-                if !(ext.contains('/') || ext.contains('\\') || ext.ends_with(".duckdb_extension")) {
+                if !(ext.contains('/') || ext.contains('\\') || ext.ends_with(".duckdb_extension"))
+                {
                     let name = ext.trim();
                     let safe = !name.is_empty()
                         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                        && crate::nodes::sql_duckdb::ALLOWED_INSTALLABLE_EXTENSIONS
-                            .contains(&name);
+                        && crate::nodes::sql_duckdb::ALLOWED_INSTALLABLE_EXTENSIONS.contains(&name);
                     if !safe {
                         return Err(datafusion::error::DataFusionError::Plan(format!(
                             "extension '{}' is not in the installable allowlist",
@@ -503,8 +503,11 @@ impl ExecutionPlan for DuckDBScanExec {
             // parquet (same bridge technique as sql_duckdb::run_duckdb_query).
             for (i, plan) in input_plans.iter().enumerate() {
                 let mut stream = plan.execute(0, task_context.clone())?;
-                let f = std::env::temp_dir()
-                    .join(format!("rustflow_dbscan_in_{}_{}.parquet", i, uuid::Uuid::new_v4()));
+                let f = std::env::temp_dir().join(format!(
+                    "rustflow_dbscan_in_{}_{}.parquet",
+                    i,
+                    uuid::Uuid::new_v4()
+                ));
                 use parquet::arrow::ArrowWriter;
                 let mut writer: Option<ArrowWriter<std::fs::File>> = None;
                 while let Some(batch) = stream.next().await {
@@ -512,14 +515,14 @@ impl ExecutionPlan for DuckDBScanExec {
                     if writer.is_none() {
                         let file = std::fs::File::create(&f)
                             .map_err(datafusion::error::DataFusionError::IoError)?;
-                        writer = Some(
-                            ArrowWriter::try_new(file, batch.schema(), None)
-                                .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?,
-                        );
+                        writer = Some(ArrowWriter::try_new(file, batch.schema(), None).map_err(
+                            |e| datafusion::error::DataFusionError::External(Box::new(e)),
+                        )?);
                     }
                     if let Some(w) = writer.as_mut() {
-                        w.write(&batch)
-                            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+                        w.write(&batch).map_err(|e| {
+                            datafusion::error::DataFusionError::External(Box::new(e))
+                        })?;
                     }
                 }
                 if writer.is_none() {
@@ -544,7 +547,8 @@ impl ExecutionPlan for DuckDBScanExec {
 
             // Use a temporary parquet file to bridge DuckDB and DataFusion Arrow versions
             let tmp_dir = std::env::temp_dir();
-            let tmp_file = tmp_dir.join(format!("rustflow_duckdb_{}.parquet", uuid::Uuid::new_v4()));
+            let tmp_file =
+                tmp_dir.join(format!("rustflow_duckdb_{}.parquet", uuid::Uuid::new_v4()));
             let tmp_path = tmp_file.to_str().unwrap();
 
             let copy_sql = format!("COPY ({}) TO '{}' (FORMAT PARQUET)", query, tmp_path);
@@ -584,9 +588,7 @@ impl ExecutionPlan for DuckDBScanExec {
                     Arc::new(target_schema.clone()),
                     columns,
                 )
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
-                })?;
+                .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
                 if tx.send(Ok(batch)).await.is_err() {
                     break; // receiver dropped
                 }
@@ -652,7 +654,6 @@ pub trait Connector: Send + Sync {
     /// Return the human-readable driver name (e.g. "postgres", "mysql", "clickhouse").
     fn name(&self) -> &'static str;
 }
-
 
 pub mod excel;
 pub use excel::*;
@@ -763,7 +764,11 @@ impl UserDefinedLogicalNodeCore for DuckDBWriteSinkLogical {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "DuckDBWriteSink(db={}, table={})", self.db_path, self.table)
+        write!(
+            f,
+            "DuckDBWriteSink(db={}, table={})",
+            self.db_path, self.table
+        )
     }
     fn with_exprs_and_inputs(
         &self,
@@ -991,10 +996,9 @@ impl DuckDBWriteSinkExec {
             // Unreachable: the loop either breaks with Some(c) or returns
             // Err. Keep a defensive arm mapping the last retry error.
             None => {
-                return Err(datafusion::error::DataFusionError::External(format!(
-                    "duckdb open retry exhausted for {db_path}"
-                )
-                .into()))
+                return Err(datafusion::error::DataFusionError::External(
+                    format!("duckdb open retry exhausted for {db_path}").into(),
+                ))
             }
         };
 
@@ -1129,7 +1133,13 @@ impl DuckDBWriteSinkExec {
                         total_rows
                     })
             }
-            WriteMode::Scd2 { keys, tracked, valid_from, valid_to, is_current } => {
+            WriteMode::Scd2 {
+                keys,
+                tracked,
+                valid_from,
+                valid_to,
+                is_current,
+            } => {
                 // Type-2 SCD, Starlake-style, in one transaction:
                 //  1. create-if-missing with control columns bolted on;
                 //  2. CLOSE changed current rows in place (valid_to = this
@@ -1169,9 +1179,7 @@ impl DuckDBWriteSinkExec {
                         .fields()
                         .iter()
                         .map(|f| f.name().to_string())
-                        .filter(|n| {
-                            !key_set.contains(n.as_str()) && !control.contains(&n.as_str())
-                        })
+                        .filter(|n| !key_set.contains(n.as_str()) && !control.contains(&n.as_str()))
                         .collect()
                 } else {
                     tracked.clone()
@@ -1282,7 +1290,11 @@ impl DuckDBWriteSinkExec {
 
 impl DisplayAs for DuckDBWriteSinkExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "DuckDBWriteSinkExec(db={}, table={})", self.db_path, self.table)
+        write!(
+            f,
+            "DuckDBWriteSinkExec(db={}, table={})",
+            self.db_path, self.table
+        )
     }
 }
 
@@ -1476,8 +1488,7 @@ mod duckdb_write_sink_tests {
     }
 
     fn temp_db_path() -> (String, std::path::PathBuf) {
-        let db = std::env::temp_dir()
-            .join(format!("swan_sink_union_{}.db", uuid::Uuid::new_v4()));
+        let db = std::env::temp_dir().join(format!("swan_sink_union_{}.db", uuid::Uuid::new_v4()));
         let s = db.to_str().unwrap().to_string();
         (s, db)
     }
@@ -1526,11 +1537,14 @@ mod duckdb_write_sink_tests {
 
     #[test]
     fn write_batches_persists_to_duckdb_and_reads_back() {
-        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
         let batches = sample_batches();
 
-        let rows = DuckDBWriteSinkExec::write_batches(&db_str, "people", &batches, &WriteMode::Replace).unwrap();
+        let rows =
+            DuckDBWriteSinkExec::write_batches(&db_str, "people", &batches, &WriteMode::Replace)
+                .unwrap();
         assert_eq!(rows, 3);
 
         // Durable: a FRESH connection must see the data.
@@ -1548,7 +1562,9 @@ mod duckdb_write_sink_tests {
 
         // Floats survived the round-trip.
         let score: f64 = conn
-            .query_row("SELECT score FROM people WHERE name='carol'", [], |r| r.get(0))
+            .query_row("SELECT score FROM people WHERE name='carol'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!((score - 88.25).abs() < 1e-9);
         std::fs::remove_file(&db).ok();
@@ -1561,9 +1577,12 @@ mod duckdb_write_sink_tests {
         // lock on open, so naive concurrent write_batches must either
         // serialize or retry — never silently lose a writer. 8 writers,
         // one distinct name each; all 8 rows must be durable at the end.
-        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
-        let mode = WriteMode::Append { partition_by: vec![] };
+        let mode = WriteMode::Append {
+            partition_by: vec![],
+        };
         let names: Vec<String> = (0..8).map(|i| format!("p{i}")).collect();
 
         let (tx, rx) = std::sync::mpsc::channel::<String>();
@@ -1615,7 +1634,9 @@ mod duckdb_write_sink_tests {
             .join(format!("./{}", db.file_name().unwrap().to_str().unwrap()));
         let link = tmp.join(format!("swan_duckdb_alias_{}.lnk", uuid::Uuid::new_v4()));
         std::os::unix::fs::symlink(&db, &link).expect("symlink");
-        let mode = WriteMode::Append { partition_by: vec![] };
+        let mode = WriteMode::Append {
+            partition_by: vec![],
+        };
 
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         std::thread::scope(|s| {
@@ -1656,11 +1677,13 @@ mod duckdb_write_sink_tests {
 
     #[test]
     fn write_batches_is_idempotent_replace() {
-        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
         let batches = sample_batches();
 
-        DuckDBWriteSinkExec::write_batches(&db_str, "people", &batches, &WriteMode::Replace).unwrap();
+        DuckDBWriteSinkExec::write_batches(&db_str, "people", &batches, &WriteMode::Replace)
+            .unwrap();
         // Second run with fewer rows must REPLACE, not append.
         let one = vec![batches[0].slice(0, 1)];
         DuckDBWriteSinkExec::write_batches(&db_str, "people", &one, &WriteMode::Replace).unwrap();
@@ -1675,20 +1698,29 @@ mod duckdb_write_sink_tests {
 
     #[test]
     fn write_batches_append_accumulates() {
-        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
         let batches = sample_batches();
 
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "people", &batches,
-            &WriteMode::Append { partition_by: vec![] },
+            &db_str,
+            "people",
+            &batches,
+            &WriteMode::Append {
+                partition_by: vec![],
+            },
         )
         .unwrap();
         // Second run with a different single row must APPEND.
         let other = sample_batches_named("dave", 77.5);
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "people", &other,
-            &WriteMode::Append { partition_by: vec![] },
+            &db_str,
+            "people",
+            &other,
+            &WriteMode::Append {
+                partition_by: vec![],
+            },
         )
         .unwrap();
 
@@ -1704,15 +1736,17 @@ mod duckdb_write_sink_tests {
     fn write_batches_append_partition_is_idempotent() {
         // The core backfill promise: re-writing the same partition replaces
         // exactly its own rows, never duplicates, never touches siblings.
-        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
-        let mode = WriteMode::Append { partition_by: vec![PartitionCol { column: "name".into(), trunc: None }] };
+        let mode = WriteMode::Append {
+            partition_by: vec![PartitionCol {
+                column: "name".into(),
+                trunc: None,
+            }],
+        };
 
-        DuckDBWriteSinkExec::write_batches(
-            &db_str, "people", &sample_batches(),
-            &mode,
-        )
-        .unwrap();
+        DuckDBWriteSinkExec::write_batches(&db_str, "people", &sample_batches(), &mode).unwrap();
         // Re-write alice's partition with a different score.
         let alice_v2 = sample_batches_named("alice", 99.0);
         DuckDBWriteSinkExec::write_batches(&db_str, "people", &alice_v2, &mode).unwrap();
@@ -1726,13 +1760,23 @@ mod duckdb_write_sink_tests {
             .unwrap();
         assert_eq!(n, 3, "3 original people, alice replaced in place");
         let alice_score: f64 = conn
-            .query_row("SELECT score FROM people WHERE name='alice'", [], |r| r.get(0))
+            .query_row("SELECT score FROM people WHERE name='alice'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert!((alice_score - 100.0).abs() < 1e-9, "alice is the latest write");
+        assert!(
+            (alice_score - 100.0).abs() < 1e-9,
+            "alice is the latest write"
+        );
         let bob_score: f64 = conn
-            .query_row("SELECT score FROM people WHERE name='bob'", [], |r| r.get(0))
+            .query_row("SELECT score FROM people WHERE name='bob'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert!((bob_score - 77.0).abs() < 1e-9, "sibling partition untouched");
+        assert!(
+            (bob_score - 77.0).abs() < 1e-9,
+            "sibling partition untouched"
+        );
         std::fs::remove_file(&db).ok();
     }
 
@@ -1740,12 +1784,19 @@ mod duckdb_write_sink_tests {
     fn write_batches_append_multi_column_key() {
         // Composite partition key: (name, age). Re-writing alice@31 must
         // replace exactly that row even if alice@32 also exists.
-        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
         let mode = WriteMode::Append {
             partition_by: vec![
-                PartitionCol { column: "name".into(), trunc: None },
-                PartitionCol { column: "age".into(), trunc: None },
+                PartitionCol {
+                    column: "name".into(),
+                    trunc: None,
+                },
+                PartitionCol {
+                    column: "age".into(),
+                    trunc: None,
+                },
             ],
         };
         DuckDBWriteSinkExec::write_batches(&db_str, "people", &sample_batches(), &mode).unwrap();
@@ -1762,13 +1813,24 @@ mod duckdb_write_sink_tests {
             .unwrap();
         assert_eq!(n, 4, "alice has two age-partitions, each exactly once");
         let s31: f64 = conn
-            .query_row("SELECT score FROM people WHERE name='alice' AND age=31", [], |r| r.get(0))
+            .query_row(
+                "SELECT score FROM people WHERE name='alice' AND age=31",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!((s31 - 99.0).abs() < 1e-9, "alice@31 replaced with latest");
         let s32: f64 = conn
-            .query_row("SELECT score FROM people WHERE name='alice' AND age=32", [], |r| r.get(0))
+            .query_row(
+                "SELECT score FROM people WHERE name='alice' AND age=32",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert!((s32 - 55.0).abs() < 1e-9, "sibling composite partition untouched");
+        assert!(
+            (s32 - 55.0).abs() < 1e-9,
+            "sibling composite partition untouched"
+        );
         std::fs::remove_file(&db).ok();
     }
 
@@ -1776,25 +1838,40 @@ mod duckdb_write_sink_tests {
 
     #[test]
     fn write_batches_merge_upserts_by_key() {
-        let db = std::env::temp_dir().join(format!("swan_duckdb_merge_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_merge_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
         // Seed: alice(30) + bob via one batch each, keyed by name.
-        let mode = WriteMode::Merge { keys: vec!["name".to_string()] };
+        let mode = WriteMode::Merge {
+            keys: vec!["name".to_string()],
+        };
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "people", &sample_batches_with_age("alice", 30, 1.0), &mode,
+            &db_str,
+            "people",
+            &sample_batches_with_age("alice", 30, 1.0),
+            &mode,
         )
         .unwrap();
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "people", &sample_batches_with_age("bob", 40, 2.0), &mode,
+            &db_str,
+            "people",
+            &sample_batches_with_age("bob", 40, 2.0),
+            &mode,
         )
         .unwrap();
         // Upsert: same key (alice) new attributes + a fresh key (carol).
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "people", &sample_batches_with_age("alice", 31, 9.9), &mode,
+            &db_str,
+            "people",
+            &sample_batches_with_age("alice", 31, 9.9),
+            &mode,
         )
         .unwrap();
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "people", &sample_batches_with_age("carol", 25, 3.0), &mode,
+            &db_str,
+            "people",
+            &sample_batches_with_age("carol", 25, 3.0),
+            &mode,
         )
         .unwrap();
 
@@ -1814,7 +1891,10 @@ mod duckdb_write_sink_tests {
         assert!((score - 9.9).abs() < 1e-9);
         // Idempotency: re-running the same batch changes nothing.
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "people", &sample_batches_with_age("alice", 31, 9.9), &mode,
+            &db_str,
+            "people",
+            &sample_batches_with_age("alice", 31, 9.9),
+            &mode,
         )
         .unwrap();
         let n2: i64 = conn
@@ -1837,18 +1917,27 @@ mod duckdb_write_sink_tests {
         };
         // Run 1: alice age 30 — becomes the initial current version.
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "dim_people", &sample_batches_with_age("alice", 30, 1.0), &mode,
+            &db_str,
+            "dim_people",
+            &sample_batches_with_age("alice", 30, 1.0),
+            &mode,
         )
         .unwrap();
         // Run 2: alice age 31 — tracked attr changed -> new current
         // version, old version closed.
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "dim_people", &sample_batches_with_age("alice", 31, 1.0), &mode,
+            &db_str,
+            "dim_people",
+            &sample_batches_with_age("alice", 31, 1.0),
+            &mode,
         )
         .unwrap();
         // Run 3: alice age 31 again — no tracked change -> still 2 rows.
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "dim_people", &sample_batches_with_age("alice", 31, 1.5), &mode,
+            &db_str,
+            "dim_people",
+            &sample_batches_with_age("alice", 31, 1.5),
+            &mode,
         )
         .unwrap();
 
@@ -1858,11 +1947,9 @@ mod duckdb_write_sink_tests {
             .unwrap();
         assert_eq!(n, 2, "scd2: one closed version + one current version");
         let cur_age: i64 = conn
-            .query_row(
-                "SELECT age FROM dim_people WHERE _is_current",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT age FROM dim_people WHERE _is_current", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(cur_age, 31, "scd2 current version must carry new attribute");
         let closed: i64 = conn
@@ -1883,11 +1970,7 @@ mod duckdb_write_sink_tests {
     // F1/F2/F3/F4/F5/F12 from `.campaign/out/sigil-review-writemodes.md`).
 
     /// Two rows for the SAME key in one batch, distinct (age, score).
-    fn sample_batches_dup_key(
-        name: &str,
-        ages: [i64; 2],
-        scores: [f64; 2],
-    ) -> Vec<RecordBatch> {
+    fn sample_batches_dup_key(name: &str, ages: [i64; 2], scores: [f64; 2]) -> Vec<RecordBatch> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("name", DataType::Utf8, true),
             Field::new("age", DataType::Int64, true),
@@ -1932,7 +2015,8 @@ mod duckdb_write_sink_tests {
         // must not. Pre-fix, an empty `tracked` produced an empty change
         // predicate → every run closed the current row unconditionally:
         // re-running the identical batch appended a bogus history version.
-        let db = std::env::temp_dir().join(format!("swan_duckdb_scd2def_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_scd2def_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
         let mode = WriteMode::Scd2 {
             keys: vec!["name".to_string()],
@@ -1942,24 +2026,36 @@ mod duckdb_write_sink_tests {
             is_current: "_is_current".to_string(),
         };
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "dim_default", &sample_batches_with_age("alice", 30, 1.0), &mode,
+            &db_str,
+            "dim_default",
+            &sample_batches_with_age("alice", 30, 1.0),
+            &mode,
         )
         .unwrap();
         // Identical batch re-run: default tracked means "compare every non-key
         // column" — nothing changed, so nothing may be closed or inserted.
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "dim_default", &sample_batches_with_age("alice", 30, 1.0), &mode,
+            &db_str,
+            "dim_default",
+            &sample_batches_with_age("alice", 30, 1.0),
+            &mode,
         )
         .unwrap();
         let conn = duckdb::Connection::open(&db).unwrap();
         let n: i64 = conn
             .query_row("SELECT count(*) FROM dim_default", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 1, "identical re-run must be a no-op (idempotent), got {n} versions");
+        assert_eq!(
+            n, 1,
+            "identical re-run must be a no-op (idempotent), got {n} versions"
+        );
 
         // A non-key column that is NOT `age` changed → new version.
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "dim_default", &sample_batches_with_age("alice", 30, 2.0), &mode,
+            &db_str,
+            "dim_default",
+            &sample_batches_with_age("alice", 30, 2.0),
+            &mode,
         )
         .unwrap();
         // Fresh connection: a connection opened before the write keeps its own
@@ -1970,7 +2066,10 @@ mod duckdb_write_sink_tests {
         let n2: i64 = conn
             .query_row("SELECT count(*) FROM dim_default", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n2, 2, "score is a non-key column: its change must open a version");
+        assert_eq!(
+            n2, 2,
+            "score is a non-key column: its change must open a version"
+        );
         let cur: (i64, f64) = conn
             .query_row(
                 "SELECT age, score FROM dim_default WHERE _is_current",
@@ -1979,7 +2078,10 @@ mod duckdb_write_sink_tests {
             )
             .unwrap();
         assert_eq!(cur.0, 30);
-        assert!((cur.1 - 2.0).abs() < 1e-9, "current version carries the new score");
+        assert!(
+            (cur.1 - 2.0).abs() < 1e-9,
+            "current version carries the new score"
+        );
         std::fs::remove_file(&db).ok();
     }
 
@@ -1990,11 +2092,17 @@ mod duckdb_write_sink_tests {
         // Silent either-way is worse than a loud failure: the target state
         // would depend on batch/file layout. Must be rejected with a
         // diagnostic that names the mode and the key count.
-        let db = std::env::temp_dir().join(format!("swan_duckdb_mergedup_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_mergedup_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
-        let mode = WriteMode::Merge { keys: vec!["name".to_string()] };
+        let mode = WriteMode::Merge {
+            keys: vec!["name".to_string()],
+        };
         let err = DuckDBWriteSinkExec::write_batches(
-            &db_str, "people", &sample_batches_dup_key("alice", [30, 31], [1.0, 2.0]), &mode,
+            &db_str,
+            "people",
+            &sample_batches_dup_key("alice", [30, 31], [1.0, 2.0]),
+            &mode,
         )
         .expect_err("duplicate keys in one merge batch must be rejected");
         let msg = format!("{err}");
@@ -2022,17 +2130,28 @@ mod duckdb_write_sink_tests {
         // common: a SELECT list reordered, a union of differently-ordered
         // batches, a parquet read from another writer) silently writes values
         // into the WRONG columns. Merge must map BY NAME, like Append does.
-        let db = std::env::temp_dir().join(format!("swan_duckdb_mergeorder_{}.db", uuid::Uuid::new_v4()));
+        let db = std::env::temp_dir().join(format!(
+            "swan_duckdb_mergeorder_{}.db",
+            uuid::Uuid::new_v4()
+        ));
         let db_str = db.to_str().unwrap().to_string();
         // Target table established with (name, age, score).
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "people", &sample_batches_with_age("alice", 30, 1.0), &WriteMode::Replace,
+            &db_str,
+            "people",
+            &sample_batches_with_age("alice", 30, 1.0),
+            &WriteMode::Replace,
         )
         .unwrap();
         // Merge a batch whose physical order is (age, score, name).
-        let mode = WriteMode::Merge { keys: vec!["name".to_string()] };
+        let mode = WriteMode::Merge {
+            keys: vec!["name".to_string()],
+        };
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "people", &sample_batches_reordered("alice", 31, 9.5), &mode,
+            &db_str,
+            "people",
+            &sample_batches_reordered("alice", 31, 9.5),
+            &mode,
         )
         .unwrap();
         let conn = duckdb::Connection::open(&db).unwrap();
@@ -2041,7 +2160,10 @@ mod duckdb_write_sink_tests {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .unwrap();
-        assert_eq!(row.0, "alice", "name column must not receive a numeric value");
+        assert_eq!(
+            row.0, "alice",
+            "name column must not receive a numeric value"
+        );
         assert_eq!(row.1, 31, "age must land in age");
         assert!((row.2 - 9.5).abs() < 1e-9, "score must land in score");
         std::fs::remove_file(&db).ok();
@@ -2053,7 +2175,8 @@ mod duckdb_write_sink_tests {
         // closing run — not a mangled epoch (the spike divided microseconds by
         // 1000 and fed the result to a millisecond formatter, so a unit slip
         // would land the column decades off without failing any assertion).
-        let db = std::env::temp_dir().join(format!("swan_duckdb_scd2ts_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_scd2ts_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
         let mode = WriteMode::Scd2 {
             keys: vec!["name".to_string()],
@@ -2063,11 +2186,17 @@ mod duckdb_write_sink_tests {
             is_current: "_is_current".to_string(),
         };
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "dim_ts", &sample_batches_with_age("alice", 30, 1.0), &mode,
+            &db_str,
+            "dim_ts",
+            &sample_batches_with_age("alice", 30, 1.0),
+            &mode,
         )
         .unwrap();
         DuckDBWriteSinkExec::write_batches(
-            &db_str, "dim_ts", &sample_batches_with_age("alice", 31, 1.0), &mode,
+            &db_str,
+            "dim_ts",
+            &sample_batches_with_age("alice", 31, 1.0),
+            &mode,
         )
         .unwrap();
         let conn = duckdb::Connection::open(&db).unwrap();
@@ -2101,7 +2230,10 @@ mod duckdb_write_sink_tests {
             )
             .unwrap();
         assert!(closed_n > 0, "expected one closed version");
-        assert!(closed_ok, "_valid_to must be a current wall-clock timestamp");
+        assert!(
+            closed_ok,
+            "_valid_to must be a current wall-clock timestamp"
+        );
         // And the window must be coherent: closed version's valid_to equals the
         // current version's valid_from (no gap, no overlap).
         let coherent: i64 = conn
@@ -2121,7 +2253,8 @@ mod duckdb_write_sink_tests {
     fn write_batches_scd2_rejects_duplicate_keys_within_one_batch() {
         // Same ambiguity as merge: one key with two versions in one batch has
         // no defensible ordering. Reject loudly.
-        let db = std::env::temp_dir().join(format!("swan_duckdb_scd2dup_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_scd2dup_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
         let mode = WriteMode::Scd2 {
             keys: vec!["name".to_string()],
@@ -2131,7 +2264,10 @@ mod duckdb_write_sink_tests {
             is_current: "_is_current".to_string(),
         };
         let err = DuckDBWriteSinkExec::write_batches(
-            &db_str, "dim_dup", &sample_batches_dup_key("alice", [30, 31], [1.0, 2.0]), &mode,
+            &db_str,
+            "dim_dup",
+            &sample_batches_dup_key("alice", [30, 31], [1.0, 2.0]),
+            &mode,
         )
         .expect_err("duplicate keys in one scd2 batch must be rejected");
         assert!(
@@ -2148,7 +2284,11 @@ mod duckdb_write_sink_tests {
         // would never match under plain equality).
         use datafusion::arrow::array::TimestampMicrosecondArray;
         let schema = Arc::new(Schema::new(vec![
-            Field::new("ts", DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Microsecond, None), true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Microsecond, None),
+                true,
+            ),
             Field::new("v", DataType::Int64, true),
         ]));
         // 2026-10-06 10:15:00 and 10:45:00 UTC — same HOUR partition.
@@ -2167,10 +2307,14 @@ mod duckdb_write_sink_tests {
         let t1045 = t1015 + 30 * 60 * 1_000_000;
         let t1215 = t1015 + 2 * hour; // different hour
 
-        let db = std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
+        let db =
+            std::env::temp_dir().join(format!("swan_duckdb_write_{}.db", uuid::Uuid::new_v4()));
         let db_str = db.to_str().unwrap().to_string();
         let mode = WriteMode::Append {
-            partition_by: vec![PartitionCol { column: "ts".into(), trunc: Some("hour".into()) }],
+            partition_by: vec![PartitionCol {
+                column: "ts".into(),
+                trunc: Some("hour".into()),
+            }],
         };
         DuckDBWriteSinkExec::write_batches(&db_str, "ticks", &mk(t1015, 1), &mode).unwrap();
         DuckDBWriteSinkExec::write_batches(&db_str, "ticks", &mk(t1215, 7), &mode).unwrap();
@@ -2204,7 +2348,9 @@ mod duckdb_write_sink_tests {
     #[test]
     fn httpfs_static_fetch_jsonplaceholder() {
         let conn = duckdb::Connection::open_in_memory().unwrap();
-        let ver: String = conn.query_row("SELECT version()", [], |r| r.get(0)).unwrap();
+        let ver: String = conn
+            .query_row("SELECT version()", [], |r| r.get(0))
+            .unwrap();
         eprintln!("[diag] bundled duckdb = {ver}");
 
         // Baseline: no force_download.
@@ -2217,7 +2363,8 @@ mod duckdb_write_sink_tests {
 
         // With force_download=true.
         let c2 = duckdb::Connection::open_in_memory().unwrap();
-        c2.execute_batch("SET force_download=true;").expect("force_download is a valid GUC in this build");
+        c2.execute_batch("SET force_download=true;")
+            .expect("force_download is a valid GUC in this build");
         let forced = c2.query_row(
             "SELECT count(*) FROM read_json_auto('https://jsonplaceholder.typicode.com/users')",
             [],

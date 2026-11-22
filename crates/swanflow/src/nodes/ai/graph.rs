@@ -408,43 +408,41 @@ impl Stream for EntityExtractionStream {
                             // (string view) buffers; cast those to plain Utf8
                             // so string columns are accepted as-is (same policy
                             // as ai.community_batches, see communities.rs).
-                            let text_array: ArrayRef =
-                                if let Some(_sa) = batch
+                            let text_array: ArrayRef = if let Some(_sa) =
+                                batch
                                     .column(0)
                                     .as_any()
                                     .downcast_ref::<datafusion::arrow::array::StringArray>()
-                                {
-                                    std::sync::Arc::clone(batch.column(0))
-                                } else {
-                                    let schema = batch.schema();
-                                    let f = schema.field(0);
-                                    if !matches!(
-                                        f.data_type(),
-                                        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                                    ) {
-                                        return Err(DataFusionError::Execution(format!(
+                            {
+                                std::sync::Arc::clone(batch.column(0))
+                            } else {
+                                let schema = batch.schema();
+                                let f = schema.field(0);
+                                if !matches!(
+                                    f.data_type(),
+                                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                                ) {
+                                    return Err(DataFusionError::Execution(format!(
                                             "ai.entity_extractor expects column 0 to be a string, got {} ({:?}). Put the text column first.",
                                             f.data_type(),
                                             f.name()
                                         )));
-                                    }
-                                    datafusion::arrow::compute::cast(
-                                        batch.column(0),
-                                        &DataType::Utf8,
-                                    )
+                                }
+                                datafusion::arrow::compute::cast(batch.column(0), &DataType::Utf8)
                                     .map_err(|e| {
-                                        DataFusionError::Execution(format!(
-                                            "ai.entity_extractor: cannot cast column 0 {} to Utf8: {e}",
-                                            f.name()
-                                        ))
-                                    })?
-                                };
+                                    DataFusionError::Execution(format!(
+                                        "ai.entity_extractor: cannot cast column 0 {} to Utf8: {e}",
+                                        f.name()
+                                    ))
+                                })?
+                            };
                             let text_col = text_array
                                 .as_any()
                                 .downcast_ref::<datafusion::arrow::array::StringArray>()
                                 .ok_or_else(|| {
                                     DataFusionError::Execution(
-                                        "ai.entity_extractor: column 0 is not a string array".to_string(),
+                                        "ai.entity_extractor: column 0 is not a string array"
+                                            .to_string(),
                                     )
                                 })?;
 
@@ -484,11 +482,12 @@ impl Stream for EntityExtractionStream {
                                             "{prompt}\nIMPORTANT: Output the COMPLETE JSON object. It must be valid JSON ending with the closing brace }}. Do not stop early."
                                         )
                                     };
-                                    let result = provider.complete(&attempt_prompt).await.map_err(|e| {
-                                        DataFusionError::Execution(format!(
+                                    let result =
+                                        provider.complete(&attempt_prompt).await.map_err(|e| {
+                                            DataFusionError::Execution(format!(
                                             "Entity extraction LLM call failed for row {i}: {e}"
                                         ))
-                                    })?;
+                                        })?;
                                     let json_str =
                                         crate::nodes::ai::ConfigWizard::extract_json_from_response(
                                             &result,
@@ -523,12 +522,10 @@ impl Stream for EntityExtractionStream {
                                 if let Some(nodes) = json["nodes"].as_array() {
                                     for n in nodes {
                                         let name = n["name"].as_str().unwrap_or("");
-                                        node_id_builder
-                                            .append_value(hash_string_to_i64(name));
+                                        node_id_builder.append_value(hash_string_to_i64(name));
                                         node_name_builder.append_value(name);
-                                        node_label_builder.append_value(
-                                            n["label"].as_str().unwrap_or(""),
-                                        );
+                                        node_label_builder
+                                            .append_value(n["label"].as_str().unwrap_or(""));
                                         node_props_builder
                                             .append_value(n["properties"].to_string());
                                     }
@@ -537,15 +534,12 @@ impl Stream for EntityExtractionStream {
                                     for e in edges {
                                         let src = e["source"].as_str().unwrap_or("");
                                         let dst = e["target"].as_str().unwrap_or("");
-                                        edge_src_builder
-                                            .append_value(hash_string_to_i64(src));
-                                        edge_dst_builder
-                                            .append_value(hash_string_to_i64(dst));
+                                        edge_src_builder.append_value(hash_string_to_i64(src));
+                                        edge_dst_builder.append_value(hash_string_to_i64(dst));
                                         edge_type_builder
                                             .append_value(e["type"].as_str().unwrap_or(""));
-                                        edge_weight_builder.append_value(
-                                            e["weight"].as_f64().unwrap_or(1.0),
-                                        );
+                                        edge_weight_builder
+                                            .append_value(e["weight"].as_f64().unwrap_or(1.0));
                                     }
                                 }
                             }
@@ -796,7 +790,7 @@ impl ExecutionPlan for GraphRetrieverExec {
             entity_name: self.entity_name.clone(),
             cache_dir: self.cache_dir.clone(),
             state: StreamState::PollingInput,
-             ran_config_retrieval: false,
+            ran_config_retrieval: false,
         }))
     }
     fn properties(&self) -> &PlanProperties {
@@ -812,7 +806,8 @@ struct GraphRetrievalStream {
     depth: u64,
     entity_name: Option<String>,
     cache_dir: String,
-    state: StreamState,    ran_config_retrieval: bool,
+    state: StreamState,
+    ran_config_retrieval: bool,
 }
 
 impl Stream for GraphRetrievalStream {
@@ -956,8 +951,7 @@ impl Stream for GraphRetrievalStream {
                             let entity_name = self.entity_name.clone();
                             let fut = async move {
                                 let mut context_builder = StringBuilder::new();
-                                let metadata_path =
-                                    format!("{}/metadata.duckdb", cache_dir);
+                                let metadata_path = format!("{}/metadata.duckdb", cache_dir);
                                 let anchors: Vec<String> = if let Some(name) = &entity_name {
                                     vec![format!(
                                         "SELECT id, 0 FROM meta.__graph_nodes WHERE name = '{}'",
@@ -980,49 +974,47 @@ impl Stream for GraphRetrievalStream {
                                          SELECT n.name, n.label, n.properties
                                          FROM walk w JOIN meta.__graph_nodes n ON n.id = w.entity_id"
                                     );
-                                    let batches =
-                                        crate::nodes::io::DuckDBHelper::query_arrow(
-                                            ":memory:",
-                                            &query,
-                                            &[],
-                                            &Some(format!(
-                                                "ATTACH '{}' AS meta (READ_ONLY, TYPE duckdb);",
-                                                metadata_path
-                                            )),
+                                    let batches = crate::nodes::io::DuckDBHelper::query_arrow(
+                                        ":memory:",
+                                        &query,
+                                        &[],
+                                        &Some(format!(
+                                            "ATTACH '{}' AS meta (READ_ONLY, TYPE duckdb);",
+                                            metadata_path
+                                        )),
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        DataFusionError::Execution(format!(
+                                            "Graph retrieval query failed: {e}"
+                                        ))
+                                    })?;
+                                    for b in batches {
+                                        let names_col = datafusion::arrow::compute::cast(
+                                            b.column(0),
+                                            &DataType::Utf8,
                                         )
-                                        .await
                                         .map_err(|e| {
                                             DataFusionError::Execution(format!(
-                                                "Graph retrieval query failed: {e}"
+                                                "Graph retrieval: cast name column failed: {e}"
                                             ))
                                         })?;
-                                    for b in batches {
-                                        let names_col =
-                                            datafusion::arrow::compute::cast(
-                                                b.column(0),
-                                                &DataType::Utf8,
-                                            )
-                                            .map_err(|e| {
-                                                DataFusionError::Execution(format!(
-                                                    "Graph retrieval: cast name column failed: {e}"
-                                                ))
-                                            })?;
-                                        let labels_col =
-                                            datafusion::arrow::compute::cast(
-                                                b.column(1),
-                                                &DataType::Utf8,
-                                            )
-                                            .map_err(|e| {
-                                                DataFusionError::Execution(format!(
-                                                    "Graph retrieval: cast label column failed: {e}"
-                                                ))
-                                            })?;
+                                        let labels_col = datafusion::arrow::compute::cast(
+                                            b.column(1),
+                                            &DataType::Utf8,
+                                        )
+                                        .map_err(|e| {
+                                            DataFusionError::Execution(format!(
+                                                "Graph retrieval: cast label column failed: {e}"
+                                            ))
+                                        })?;
                                         let names = names_col
                                             .as_any()
                                             .downcast_ref::<StringArray>()
                                             .ok_or_else(|| {
                                                 DataFusionError::Execution(
-                                                    "Graph retrieval: name column not string".into(),
+                                                    "Graph retrieval: name column not string"
+                                                        .into(),
                                                 )
                                             })?;
                                         let labels = labels_col
@@ -1030,7 +1022,8 @@ impl Stream for GraphRetrievalStream {
                                             .downcast_ref::<StringArray>()
                                             .ok_or_else(|| {
                                                 DataFusionError::Execution(
-                                                    "Graph retrieval: label column not string".into(),
+                                                    "Graph retrieval: label column not string"
+                                                        .into(),
                                                 )
                                             })?;
                                         for j in 0..b.num_rows() {
@@ -1050,9 +1043,7 @@ impl Stream for GraphRetrievalStream {
                                     )])),
                                     vec![Arc::new(context_builder.finish())],
                                 )
-                                .map_err(|e| {
-                                    DataFusionError::ArrowError(Box::new(e), None)
-                                })?;
+                                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                                 Ok(batch)
                             };
                             self.state = StreamState::Processing(Box::pin(fut));

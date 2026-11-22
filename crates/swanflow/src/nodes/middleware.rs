@@ -50,9 +50,18 @@ pub type MiddlewareBuilder = fn(&JsonValue) -> Result<Box<dyn PlanMiddleware>>;
 /// Registry point 1: type id → builder.
 pub fn mw_builders() -> HashMap<&'static str, MiddlewareBuilder> {
     let mut m: HashMap<&'static str, MiddlewareBuilder> = HashMap::new();
-    m.insert("column_select", crate::nodes::middleware::builtins::column_select_builder);
-    m.insert("row_limit", crate::nodes::middleware::builtins::row_limit_builder);
-    m.insert("column_rename", crate::nodes::middleware::builtins::column_rename_builder);
+    m.insert(
+        "column_select",
+        crate::nodes::middleware::builtins::column_select_builder,
+    );
+    m.insert(
+        "row_limit",
+        crate::nodes::middleware::builtins::row_limit_builder,
+    );
+    m.insert(
+        "column_rename",
+        crate::nodes::middleware::builtins::column_rename_builder,
+    );
     m
 }
 
@@ -87,13 +96,8 @@ pub fn compile_middleware_stack(config: &JsonValue) -> Result<Vec<Box<dyn PlanMi
         Some(JsonValue::Array(items)) => {
             let mut out = Vec::with_capacity(items.len());
             for (i, item) in items.iter().enumerate() {
-                let decl: MiddlewareDecl = serde_json::from_value(item.clone()).map_err(|e| {
-                    anyhow!(
-                        "middleware[{}]: invalid declaration: {}",
-                        i,
-                        e
-                    )
-                })?;
+                let decl: MiddlewareDecl = serde_json::from_value(item.clone())
+                    .map_err(|e| anyhow!("middleware[{}]: invalid declaration: {}", i, e))?;
                 out.push(decl);
             }
             out
@@ -151,10 +155,7 @@ pub fn apply_stack_all(
     stack: &[Box<dyn PlanMiddleware>],
     plans: Vec<LogicalPlan>,
 ) -> Result<Vec<LogicalPlan>> {
-    plans
-        .into_iter()
-        .map(|p| apply_stack(stack, &p))
-        .collect()
+    plans.into_iter().map(|p| apply_stack(stack, &p)).collect()
 }
 
 pub mod builtins;
@@ -235,10 +236,8 @@ mod tests {
 
     #[test]
     fn apply_stack_all_runs_in_declared_order() {
-        use crate::nodes::middleware::builtins::{
-            column_rename_builder, row_limit_builder,
-        };
-        
+        use crate::nodes::middleware::builtins::{column_rename_builder, row_limit_builder};
+
         use datafusion::prelude::*;
 
         // Base plan with columns a, b and 2 rows.
@@ -250,11 +249,16 @@ mod tests {
             ),
             (
                 "b",
-                std::sync::Arc::new(datafusion::arrow::array::StringArray::from(vec!["x", "y"])) as _,
+                std::sync::Arc::new(datafusion::arrow::array::StringArray::from(vec!["x", "y"]))
+                    as _,
             ),
         ])
         .unwrap();
-        let plan = df.read_batches(vec![batches]).unwrap().into_optimized_plan().unwrap();
+        let plan = df
+            .read_batches(vec![batches])
+            .unwrap()
+            .into_optimized_plan()
+            .unwrap();
 
         // Stack: row_limit first, then column_rename.
         let stack: Vec<Box<dyn PlanMiddleware>> = vec![
@@ -269,7 +273,11 @@ mod tests {
             .iter()
             .map(|f| f.name().clone())
             .collect();
-        assert!(names.contains(&"z".to_string()), "renamed applied: {:?}", names);
+        assert!(
+            names.contains(&"z".to_string()),
+            "renamed applied: {:?}",
+            names
+        );
         // row_limit applied first — fetch present in the final plan.
         assert!(format!("{:?}", out[0]).contains("fetch"));
     }

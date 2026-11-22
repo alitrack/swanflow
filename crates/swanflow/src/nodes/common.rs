@@ -19,10 +19,7 @@ pub fn hash_string_to_i64(s: &str) -> i64 {
 }
 
 /// Create a one-shot stream that emits a single RecordBatch then finishes.
-pub fn one_shot_stream(
-    schema: SchemaRef,
-    batch: RecordBatch,
-) -> SendableRecordBatchStream {
+pub fn one_shot_stream(schema: SchemaRef, batch: RecordBatch) -> SendableRecordBatchStream {
     struct OneShotStream {
         schema: SchemaRef,
         batch: Option<RecordBatch>,
@@ -34,12 +31,12 @@ pub fn one_shot_stream(
     }
     impl Stream for OneShotStream {
         type Item = DFResult<RecordBatch>;
-        fn poll_next(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Option<Self::Item>> {
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             Poll::Ready(self.batch.take().map(Ok))
         }
     }
-    Box::pin(OneShotStream { schema, batch: Some(batch) })
+    Box::pin(OneShotStream {
+        schema,
+        batch: Some(batch),
+    })
 }

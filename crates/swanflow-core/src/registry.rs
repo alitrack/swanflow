@@ -1,6 +1,4 @@
-use crate::nodes::{
-    DesignerMetadata, NodeBehavior, NodeCapability, NodeSpec,
-};
+use crate::nodes::{DesignerMetadata, NodeBehavior, NodeCapability, NodeSpec};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,11 +69,7 @@ impl NodeRegistry {
 
     /// Validate that a node is safe to execute in the current context.
     /// Returns an error if the node requires external access that isn't available.
-    pub fn validate_capability_gate(
-        &self,
-        type_id: &str,
-        allow_external: bool,
-    ) -> Result<()> {
+    pub fn validate_capability_gate(&self, type_id: &str, allow_external: bool) -> Result<()> {
         let node = self.get_node(type_id)?;
         if !allow_external {
             match node.capability() {

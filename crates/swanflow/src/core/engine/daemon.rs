@@ -218,7 +218,9 @@ impl Default for QuackConfig {
 
 fn default_db_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".swanflow").join("quack_server.duckdb")
+    PathBuf::from(home)
+        .join(".swanflow")
+        .join("quack_server.duckdb")
 }
 
 pub struct Daemon {
@@ -308,7 +310,9 @@ static DAEMON_LOG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Append one event line to `<cache_dir>/daemon.log` (best-effort: log
 /// failures must never break the daemon — fall back to tracing).
 fn daemon_log(event: &str) {
-    let Some(path) = daemon_log_path() else { return };
+    let Some(path) = daemon_log_path() else {
+        return;
+    };
     let _g = DAEMON_LOG_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
     // Roll when oversized: rename current -> .1 (replacing any old .1).
     if let Ok(meta) = std::fs::metadata(&path) {
@@ -318,11 +322,7 @@ fn daemon_log(event: &str) {
             let _ = std::fs::rename(&path, &rolled);
         }
     }
-    let line = format!(
-        "{} {}\n",
-        chrono::Utc::now().to_rfc3339(),
-        event.trim()
-    );
+    let line = format!("{} {}\n", chrono::Utc::now().to_rfc3339(), event.trim());
     use std::io::Write;
     let res = std::fs::OpenOptions::new()
         .create(true)
@@ -542,7 +542,10 @@ impl Daemon {
         }
 
         let listener = UnixListener::bind(&self.socket_path)?;
-        tracing::info!("SwanFlow daemon listening on {}", self.socket_path.display());
+        tracing::info!(
+            "SwanFlow daemon listening on {}",
+            self.socket_path.display()
+        );
 
         // ── ADR-014 Stage 3: restore persisted watches from watched.json ──
         // Reloads each workflow file from disk (config edits since the last
@@ -569,10 +572,8 @@ impl Daemon {
                             workflow,
                             last_ready,
                             path: Some(p),
-                            generation: WATCH_GENERATION.fetch_add(
-                                1,
-                                std::sync::atomic::Ordering::Relaxed,
-                            ),
+                            generation: WATCH_GENERATION
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                             running_claim: None,
                             pending_remove: false,
                         });
@@ -597,9 +598,7 @@ impl Daemon {
                 Some(bind) => Some(
                     crate::core::engine::webhook_server::spawn_webhook_listener(bind)
                         .await
-                        .map_err(|e| {
-                            format!("webhook ingress failed to bind '{bind}': {e}")
-                        })?,
+                        .map_err(|e| format!("webhook ingress failed to bind '{bind}': {e}"))?,
                 ),
                 None => None,
             };
@@ -700,9 +699,9 @@ async fn sensor_tick(
                 // A failed open/read is tri-stated as "unavailable" (not
                 // "never ran") so FreshnessViolated skips instead of
                 // firing on missing data.
-                let mat_res = crate::core::engine::assets::AssetLedger::open(
-                    std::path::Path::new(&crate::core::engine::default_cache_dir()),
-                )
+                let mat_res = crate::core::engine::assets::AssetLedger::open(std::path::Path::new(
+                    &crate::core::engine::default_cache_dir(),
+                ))
                 .and_then(|l| l.last_materialized_at(node.id));
                 let (mat, ledger_unavailable) = match mat_res {
                     Ok(v) => (v, false),
@@ -732,7 +731,8 @@ async fn sensor_tick(
                     Some(false) => {}
                     None => tracing::debug!(
                         "automation sensor: '{}' node {n} Unknown — skipping this tick",
-                        ww.workflow.name, n = node.id
+                        ww.workflow.name,
+                        n = node.id
                     ),
                 }
             }
@@ -815,7 +815,8 @@ async fn sensor_tick(
         }
         tracing::info!(
             "automation sensor: {} node(s) ready in '{}' — executing",
-            ready_nodes.len(), workflow.name
+            ready_nodes.len(),
+            workflow.name
         );
         daemon_log(&format!(
             "run '{}' ({wf_id}) gen={generation} nodes={}",
@@ -829,7 +830,10 @@ async fn sensor_tick(
                 let mut errs = 0usize;
                 let mut first_err = String::new();
                 while let Some(ev) = rx.recv().await {
-                    if let crate::core::engine::NodeEvent::Error { message, node_id, .. } = &ev {
+                    if let crate::core::engine::NodeEvent::Error {
+                        message, node_id, ..
+                    } = &ev
+                    {
                         errs += 1;
                         if first_err.is_empty() {
                             first_err = format!("node {node_id}: {message}");
@@ -929,11 +933,14 @@ async fn handle_client(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
-                logs: None,
+                    logs: None,
                     status: None,
                 };
                 if let Err(e) = write_response(&mut writer, &resp).await {
-                    eprintln!("[daemon] WARNING: write response to client {} failed: {}", peer, e);
+                    eprintln!(
+                        "[daemon] WARNING: write response to client {} failed: {}",
+                        peer, e
+                    );
                 }
                 continue;
             }
@@ -956,11 +963,14 @@ async fn handle_client(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
-                logs: None,
+                    logs: None,
                     status: None,
                 };
                 if let Err(e) = write_response(&mut writer, &resp).await {
-                    eprintln!("[daemon] WARNING: write response to client {} failed: {}", peer, e);
+                    eprintln!(
+                        "[daemon] WARNING: write response to client {} failed: {}",
+                        peer, e
+                    );
                 }
             }
             return Ok(());
@@ -968,7 +978,10 @@ async fn handle_client(
 
         let resp = handle_method(&req, &engine, &workflows, &watched, webhook_queue.as_ref()).await;
         if let Err(e) = write_response(&mut writer, &resp).await {
-            eprintln!("[daemon] WARNING: write response to client {} failed: {}", peer, e);
+            eprintln!(
+                "[daemon] WARNING: write response to client {} failed: {}",
+                peer, e
+            );
         }
     }
 
@@ -988,7 +1001,11 @@ async fn handle_method(
         // {"path": "/hooks/refresh"}. Works with or without the HTTP
         // listener — the CLI's `daemon trigger` lands here.
         "automation.webhook" => {
-            let path = req.params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let path = req
+                .params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if path.is_empty() {
                 return DaemonResponse {
                     id: req.id.clone(),
@@ -1040,7 +1057,11 @@ async fn handle_method(
         // sensor. Params: {"path": "<workflow.yaml>"} (swanflow YAML/JSON,
         // NOT knwf).
         "automation.register" => {
-            let path = req.params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let path = req
+                .params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if path.is_empty() {
                 return DaemonResponse {
                     id: req.id.clone(),
@@ -1049,7 +1070,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
-                logs: None,
+                    logs: None,
                     status: None,
                 };
             }
@@ -1065,7 +1086,7 @@ async fn handle_method(
                         workflow_id: None,
                         workflows: None,
                         watched: None,
-                logs: None,
+                        logs: None,
                         status: None,
                     }
                 }
@@ -1082,7 +1103,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
-                logs: None,
+                    logs: None,
                     status: None,
                 };
             }
@@ -1113,7 +1134,11 @@ async fn handle_method(
             // misconfiguration). Quoted forms like on_cron("*/5 * * * *")
             // are supported.
             for i in workflow.graph.node_indices() {
-                if let Some(dsl) = workflow.graph[i].config.get("automation").and_then(|v| v.as_str()) {
+                if let Some(dsl) = workflow.graph[i]
+                    .config
+                    .get("automation")
+                    .and_then(|v| v.as_str())
+                {
                     if let Err(e) = crate::core::engine::automation::parse_automation(dsl) {
                         return DaemonResponse {
                             id: req.id.clone(),
@@ -1125,7 +1150,7 @@ async fn handle_method(
                             workflow_id: None,
                             workflows: None,
                             watched: None,
-                logs: None,
+                            logs: None,
                             status: None,
                         };
                     }
@@ -1206,7 +1231,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
-                logs: None,
+                    logs: None,
                     status: None,
                 };
             }
@@ -1226,7 +1251,9 @@ async fn handle_method(
                             || canon
                                 .as_ref()
                                 .map(|c| {
-                                    std::fs::canonicalize(wwp).map(|cp| cp == *c).unwrap_or(false)
+                                    std::fs::canonicalize(wwp)
+                                        .map(|cp| cp == *c)
+                                        .unwrap_or(false)
                                 })
                                 .unwrap_or(false)
                     })
@@ -1253,10 +1280,10 @@ async fn handle_method(
             }
             match wf_id {
                 Some(id) => {
-                    tracing::info!(
-                        "automation sensor: unregistered {removed} watch(es) for {id}"
-                    );
-                    daemon_log(&format!("unwatch id={id} removed={removed} deferred={deferred}"));
+                    tracing::info!("automation sensor: unregistered {removed} watch(es) for {id}");
+                    daemon_log(&format!(
+                        "unwatch id={id} removed={removed} deferred={deferred}"
+                    ));
                 }
                 None => {
                     tracing::info!(
@@ -1321,7 +1348,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
-                logs: None,
+                    logs: None,
                     status: None,
                 };
             }
@@ -1334,7 +1361,7 @@ async fn handle_method(
                     workflow_id: Some(wf_id.to_string()),
                     workflows: None,
                     watched: None,
-                logs: None,
+                    logs: None,
                     status: None,
                 },
                 Err(e) => DaemonResponse {
@@ -1344,7 +1371,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
-                logs: None,
+                    logs: None,
                     status: None,
                 },
             }
@@ -1451,7 +1478,7 @@ async fn handle_method(
                             workflow_id: None,
                             workflows: None,
                             watched: None,
-                logs: None,
+                            logs: None,
                             status: Some(WorkflowStatus {
                                 id: id.to_string(),
                                 name: wf.name.clone(),
@@ -1475,7 +1502,7 @@ async fn handle_method(
                             workflow_id: None,
                             workflows: None,
                             watched: None,
-                logs: None,
+                            logs: None,
                             status: None,
                         }
                     }
@@ -1487,7 +1514,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
-                logs: None,
+                    logs: None,
                     status: None,
                 },
             }
@@ -1512,7 +1539,7 @@ async fn handle_method(
                             workflow_id: Some(id.to_string()),
                             workflows: None,
                             watched: None,
-                logs: None,
+                            logs: None,
                             status: None,
                         }
                     } else {
@@ -1523,7 +1550,7 @@ async fn handle_method(
                             workflow_id: None,
                             workflows: None,
                             watched: None,
-                logs: None,
+                            logs: None,
                             status: None,
                         }
                     }
@@ -1535,7 +1562,7 @@ async fn handle_method(
                     workflow_id: None,
                     workflows: None,
                     watched: None,
-                logs: None,
+                    logs: None,
                     status: None,
                 },
             }
@@ -1573,8 +1600,8 @@ async fn submit_workflow(
         .await
         .map_err(|e| format!("Failed to import KNIME workflow: {}", e))?;
     let mut workflow: Workflow = {
-        let workflow_json = serde_json::to_value(&core_wf)
-            .map_err(|e| format!("Serialization error: {}", e))?;
+        let workflow_json =
+            serde_json::to_value(&core_wf).map_err(|e| format!("Serialization error: {}", e))?;
         serde_json::from_value(workflow_json)
             .map_err(|e| format!("Deserialization error: {}", e))?
     };
@@ -1615,15 +1642,14 @@ async fn submit_workflow(
     let wf_name_clone = wf_name.clone();
 
     tokio::spawn(async move {
-        let result =
-            tokio::select! {
-                r = engine_clone.execute_workflow(&workflow) => r,
-                _ = cancel.cancelled() => {
-                    let mut st = state_clone.blocking_lock();
-                    st.run_state = "cancelled".to_string();
-                    return;
-                }
-            };
+        let result = tokio::select! {
+            r = engine_clone.execute_workflow(&workflow) => r,
+            _ = cancel.cancelled() => {
+                let mut st = state_clone.blocking_lock();
+                st.run_state = "cancelled".to_string();
+                return;
+            }
+        };
 
         match result {
             Ok(mut rx) => {
@@ -1717,7 +1743,10 @@ async fn stream_workflow_events(
                     "nodes_total": state.nodes_total,
                 });
                 if let Err(e) = writer
-                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap_or_default()).as_bytes())
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&event).unwrap_or_default())
+                            .as_bytes(),
+                    )
                     .await
                 {
                     // P2-4: write failed -> peer gone; warn and stop streaming this connection.
@@ -1728,14 +1757,19 @@ async fn stream_workflow_events(
                     break;
                 }
 
-                state.run_state == "completed" || state.run_state == "error" || state.run_state == "cancelled"
+                state.run_state == "completed"
+                    || state.run_state == "error"
+                    || state.run_state == "cancelled"
             } else {
                 let event = serde_json::json!({
                     "event": "workflow.not_found",
                     "workflow_id": wf_id.to_string(),
                 });
                 if let Err(e) = writer
-                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap_or_default()).as_bytes())
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&event).unwrap_or_default())
+                            .as_bytes(),
+                    )
                     .await
                 {
                     // P2-4: write failed -> peer gone; warn and stop streaming this connection.
@@ -1750,8 +1784,12 @@ async fn stream_workflow_events(
         };
 
         if done {
-            let done_event = serde_json::json!({"event":"workflow.stream_end","workflow_id":wf_id.to_string()});
-            if let Err(e) = writer.write_all(format!("{}\n", done_event).as_bytes()).await {
+            let done_event =
+                serde_json::json!({"event":"workflow.stream_end","workflow_id":wf_id.to_string()});
+            if let Err(e) = writer
+                .write_all(format!("{}\n", done_event).as_bytes())
+                .await
+            {
                 // P2-4: connection already gone when delivering the end event.
                 eprintln!(
                     "[daemon] WARNING: write to client {} failed (workflow {}), stream end not delivered: {}",
@@ -1832,10 +1870,7 @@ mod watched_persistence_tests {
         let text = serde_json::to_string_pretty(&e).unwrap();
         let back: WatchedEntry = serde_json::from_str(&text).unwrap();
         assert_eq!(back.path, "/tmp/wf.yaml");
-        assert_eq!(
-            back.workflow_id,
-            "aaaaaaaa-0000-0000-0000-000000000001"
-        );
+        assert_eq!(back.workflow_id, "aaaaaaaa-0000-0000-0000-000000000001");
         let ts = back
             .last_ready
             .get("11111111-2222-3333-4444-555555555555")
@@ -1850,8 +1885,8 @@ mod watched_persistence_tests {
     /// would race on it (observed as flaky FAILED when run filtered).
     #[tokio::test]
     async fn load_save_roundtrip_tolerates_garbage_and_persists() {
-        let dir = std::env::temp_dir()
-            .join(format!("swanflow-watched-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("swanflow-watched-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("watched.json"), "{not valid json").unwrap();
         let _env = EnvDir::set(dir.to_str().unwrap());
@@ -1877,8 +1912,7 @@ mod watched_persistence_tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
 
-        let watched: Arc<Mutex<Vec<WatchedWorkflow>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let watched: Arc<Mutex<Vec<WatchedWorkflow>>> = Arc::new(Mutex::new(Vec::new()));
         let mut wf = Workflow::default();
         wf.id = uuid::Uuid::parse_str("aaaaaaaa-0000-0000-0000-000000000001").unwrap();
         wf.name = "persisted".into();
@@ -1923,7 +1957,8 @@ mod watched_persistence_tests {
 
     #[tokio::test]
     async fn concurrent_saves_never_lose_state() {
-        let dir = std::env::temp_dir().join(format!("swanflow_watched_race_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("swanflow_watched_race_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // codex-review P1 (r2): concurrent save_watched_entries callers
@@ -2038,10 +2073,7 @@ mod watched_persistence_tests {
         // and its post-run bookkeeping was lost. With claims: unregister
         // marks pending_remove, the entry survives until the claim is
         // cleared, THEN is removed and persisted.
-        let dir = std::env::temp_dir().join(format!(
-            "swanflow_claim_e2e_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("swanflow_claim_e2e_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let _env = EnvDir::set(dir.to_str().unwrap());
@@ -2100,7 +2132,10 @@ mod watched_persistence_tests {
         }
         // And the persisted file reflects the removal (empty list).
         let entries = load_watched_entries();
-        assert!(entries.is_empty(), "watched.json must show removal: {entries:?}");
+        assert!(
+            entries.is_empty(),
+            "watched.json must show removal: {entries:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

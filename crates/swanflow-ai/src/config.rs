@@ -40,19 +40,13 @@ impl RouterConfig {
     pub fn validate(&self) -> Result<(), AiError> {
         // Model names must be non-empty
         if self.cheap.model.is_empty() {
-            return Err(AiError::InvalidResponse(
-                "cheap model name is empty".into(),
-            ));
+            return Err(AiError::InvalidResponse("cheap model name is empty".into()));
         }
         if self.mid.model.is_empty() {
-            return Err(AiError::InvalidResponse(
-                "mid model name is empty".into(),
-            ));
+            return Err(AiError::InvalidResponse("mid model name is empty".into()));
         }
         if self.best.model.is_empty() {
-            return Err(AiError::InvalidResponse(
-                "best model name is empty".into(),
-            ));
+            return Err(AiError::InvalidResponse("best model name is empty".into()));
         }
 
         // Endpoints must be non-empty

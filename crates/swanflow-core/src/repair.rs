@@ -57,9 +57,7 @@ pub struct EdgeRef {
 #[serde(tag = "operator", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RepairOperator {
     /// Modify the failed node's parameters (the original behavior).
-    Rebind {
-        fixed_config: Value,
-    },
+    Rebind { fixed_config: Value },
     /// Insert a node that establishes a missing precondition in front of the
     /// failed node.
     InsertPrereq {
@@ -69,10 +67,7 @@ pub enum RepairOperator {
     },
     /// Replace the failed node's type, keeping downstream interface compatible
     /// (compatibility is checked at warning level, not hard-fail).
-    Substitute {
-        new_type: String,
-        new_config: Value,
-    },
+    Substitute { new_type: String, new_config: Value },
     /// Local edge rewiring (add/remove) around the failed node's neighborhood.
     Rewire {
         add_edges: Vec<RepairEdgeSpec>,
@@ -88,9 +83,7 @@ pub enum RepairOperator {
 #[serde(untagged)]
 pub enum RepairResponse {
     Tagged(RepairOperator),
-    LegacyRebind {
-        fixed_config: Value,
-    },
+    LegacyRebind { fixed_config: Value },
 }
 
 impl RepairResponse {
@@ -187,8 +180,7 @@ mod tests {
 
     #[test]
     fn tagged_response_parses() {
-        let resp: RepairResponse =
-            serde_json::from_str(r#"{"operator":"BYPASS"}"#).unwrap();
+        let resp: RepairResponse = serde_json::from_str(r#"{"operator":"BYPASS"}"#).unwrap();
         assert_eq!(resp.into_operator(), RepairOperator::Bypass);
     }
 }

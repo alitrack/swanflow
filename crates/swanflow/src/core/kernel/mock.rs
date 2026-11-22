@@ -192,8 +192,7 @@ impl KeyStore for MockKeyStore {
     }
 
     async fn set(&self, key: &str, value: &str) -> CoreResult<()> {
-        lk(&self.store)
-            .insert(key.to_string(), value.to_string());
+        lk(&self.store).insert(key.to_string(), value.to_string());
         Ok(())
     }
 
@@ -322,14 +321,12 @@ impl MockShellExec {
     }
 
     pub fn with_result(self, command: &str, output: ShellOutput) -> Self {
-        lk(&self.results)
-            .insert(command.to_string(), (Ok(output),));
+        lk(&self.results).insert(command.to_string(), (Ok(output),));
         self
     }
 
     pub fn with_error(self, command: &str, error: SwanFlowError) -> Self {
-        lk(&self.results)
-            .insert(command.to_string(), (Err(error),));
+        lk(&self.results).insert(command.to_string(), (Err(error),));
         self
     }
 }
@@ -344,9 +341,7 @@ impl ShellExec for MockShellExec {
                 stdout: out.stdout.clone(),
                 stderr: out.stderr.clone(),
             }),
-            Some((Err(e),)) => {
-                Err(SwanFlowError::new(e.category, e.code, &e.message))
-            }
+            Some((Err(e),)) => Err(SwanFlowError::new(e.category, e.code, &e.message)),
             None => Ok(ShellOutput {
                 exit_code: 0,
                 stdout: String::new(),
@@ -436,8 +431,7 @@ impl MockProgress {
 #[async_trait]
 impl Progress for MockProgress {
     async fn report(&self, fraction: f64, message: Option<&str>) {
-        lk(&self.reports)
-            .push((fraction, message.unwrap_or_default().to_string()));
+        lk(&self.reports).push((fraction, message.unwrap_or_default().to_string()));
     }
 
     fn last_reported(&self) -> Option<(f64, String)> {
@@ -445,8 +439,7 @@ impl Progress for MockProgress {
     }
 
     async fn complete(&self, message: Option<&str>) {
-        lk(&self.reports)
-            .push((1.0, message.unwrap_or("complete").to_string()));
+        lk(&self.reports).push((1.0, message.unwrap_or("complete").to_string()));
     }
 }
 
@@ -643,8 +636,7 @@ impl MockNotification {
 #[async_trait]
 impl Notification for MockNotification {
     async fn send(&self, channel: &str, title: &str, body: &str) -> CoreResult<()> {
-        lk(&self.sent)
-            .push((channel.to_string(), title.to_string(), body.to_string()));
+        lk(&self.sent).push((channel.to_string(), title.to_string(), body.to_string()));
         Ok(())
     }
 
@@ -673,14 +665,11 @@ impl MockCache {
 #[async_trait]
 impl Cache for MockCache {
     async fn get(&self, key: &str) -> CoreResult<Option<String>> {
-        Ok(lk(&self.store)
-            .get(key)
-            .map(|(v, _)| v.clone()))
+        Ok(lk(&self.store).get(key).map(|(v, _)| v.clone()))
     }
 
     async fn set(&self, key: &str, value: &str, ttl_secs: u64) -> CoreResult<()> {
-        lk(&self.store)
-            .insert(key.to_string(), (value.to_string(), ttl_secs));
+        lk(&self.store).insert(key.to_string(), (value.to_string(), ttl_secs));
         Ok(())
     }
 
@@ -729,18 +718,15 @@ impl MockTelemetry {
 #[async_trait]
 impl Telemetry for MockTelemetry {
     async fn counter_inc(&self, name: &str, value: u64, labels: Vec<(String, String)>) {
-        lk(&self.counters)
-            .push((name.to_string(), value, labels));
+        lk(&self.counters).push((name.to_string(), value, labels));
     }
 
     async fn histogram_observe(&self, name: &str, value: f64, labels: Vec<(String, String)>) {
-        lk(&self.histograms)
-            .push((name.to_string(), value, labels));
+        lk(&self.histograms).push((name.to_string(), value, labels));
     }
 
     async fn gauge_set(&self, name: &str, value: f64, labels: Vec<(String, String)>) {
-        lk(&self.gauges)
-            .push((name.to_string(), value, labels));
+        lk(&self.gauges).push((name.to_string(), value, labels));
     }
 }
 
@@ -821,8 +807,7 @@ impl MockSchemaRegistry {
 #[async_trait]
 impl SchemaRegistry for MockSchemaRegistry {
     async fn register_schema(&self, name: &str, columns: Vec<SchemaColumn>) -> CoreResult<()> {
-        lk(&self.schemas)
-            .insert(name.to_string(), columns);
+        lk(&self.schemas).insert(name.to_string(), columns);
         Ok(())
     }
 
@@ -934,17 +919,25 @@ impl PluginHost for MockPluginHost {
         }
     }
 
-    async fn init(&self, _handle: &PluginHandle, _config: HashMap<String, String>) -> CoreResult<()> {
+    async fn init(
+        &self,
+        _handle: &PluginHandle,
+        _config: HashMap<String, String>,
+    ) -> CoreResult<()> {
         Ok(())
     }
 
-    async fn run(&self, handle: &PluginHandle, _function: &str, _args: &[u8]) -> CoreResult<Vec<u8>> {
+    async fn run(
+        &self,
+        handle: &PluginHandle,
+        _function: &str,
+        _args: &[u8],
+    ) -> CoreResult<Vec<u8>> {
         Ok(format!("result from {}", handle.name).into_bytes())
     }
 
     async fn unload(&self, handle: &PluginHandle) -> CoreResult<()> {
-        lk(&self.loaded)
-            .retain(|n| n != &handle.name);
+        lk(&self.loaded).retain(|n| n != &handle.name);
         Ok(())
     }
 
@@ -985,17 +978,19 @@ impl MockWasmExec {
 impl WasmExec for MockWasmExec {
     async fn compile(&self, bytes: &[u8]) -> CoreResult<WasmModule> {
         let name = format!("mod_{}", bytes.len());
-        let module = lk(&self.modules)
-            .get(&name)
-            .cloned()
-            .unwrap_or(WasmModule {
-                name,
-                exports: vec!["add".into()],
-            });
+        let module = lk(&self.modules).get(&name).cloned().unwrap_or(WasmModule {
+            name,
+            exports: vec!["add".into()],
+        });
         Ok(module)
     }
 
-    async fn execute(&self, _module: &WasmModule, _function: &str, args: &[u8]) -> CoreResult<Vec<u8>> {
+    async fn execute(
+        &self,
+        _module: &WasmModule,
+        _function: &str,
+        args: &[u8],
+    ) -> CoreResult<Vec<u8>> {
         // Mock: sum all bytes and return as a single-byte result.
         let sum: u8 = args.iter().sum();
         Ok(vec![0, sum])
@@ -1065,7 +1060,10 @@ mod tests {
     #[tokio::test]
     async fn test_mock_http_post_json() {
         let http = MockHttp::new().with_response("https://api.example.com/submit", "done");
-        let body = http.post_json("https://api.example.com/submit", r#"{"x":1}"#).await.unwrap();
+        let body = http
+            .post_json("https://api.example.com/submit", r#"{"x":1}"#)
+            .await
+            .unwrap();
         assert_eq!(body, "done");
     }
 
@@ -1074,7 +1072,10 @@ mod tests {
     #[tokio::test]
     async fn test_mock_keystore() {
         let ks = MockKeyStore::new().with_entry("db_url", "postgres://localhost");
-        assert_eq!(ks.get("db_url").await.unwrap(), Some("postgres://localhost".into()));
+        assert_eq!(
+            ks.get("db_url").await.unwrap(),
+            Some("postgres://localhost".into())
+        );
         assert_eq!(ks.get("missing").await.unwrap(), None);
         ks.set("api_key", "sk-abc123").await.unwrap();
         assert_eq!(ks.get("api_key").await.unwrap(), Some("sk-abc123".into()));
@@ -1122,7 +1123,10 @@ mod tests {
     #[tokio::test]
     async fn test_mock_blob_store() {
         let store = MockBlobStore::new();
-        store.put("dataset.parquet", vec![0, 1, 2, 3]).await.unwrap();
+        store
+            .put("dataset.parquet", vec![0, 1, 2, 3])
+            .await
+            .unwrap();
         assert!(store.exists("dataset.parquet").await);
         let data = store.get("dataset.parquet").await.unwrap().unwrap();
         assert_eq!(data, vec![0, 1, 2, 3]);
@@ -1134,11 +1138,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_shell_exec() {
-        let sh = MockShellExec::new().with_result("echo", ShellOutput {
-            exit_code: 0,
-            stdout: "hello".into(),
-            stderr: String::new(),
-        });
+        let sh = MockShellExec::new().with_result(
+            "echo",
+            ShellOutput {
+                exit_code: 0,
+                stdout: "hello".into(),
+                stderr: String::new(),
+            },
+        );
         let out = sh.run("echo", &[]).await.unwrap();
         assert_eq!(out.stdout, "hello");
         assert_eq!(out.exit_code, 0);
@@ -1366,10 +1373,17 @@ mod tests {
         let _bus_clone = bus.clone();
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let ev_clone = events.clone();
-        let sid = bus.subscribe("node.complete", move |topic, payload| {
-            ev_clone.lock().unwrap().push((topic.to_string(), payload.to_string()));
-        }).await;
-        bus.publish("node.complete", r#"{"id":"n1"}"#).await.unwrap();
+        let sid = bus
+            .subscribe("node.complete", move |topic, payload| {
+                ev_clone
+                    .lock()
+                    .unwrap()
+                    .push((topic.to_string(), payload.to_string()));
+            })
+            .await;
+        bus.publish("node.complete", r#"{"id":"n1"}"#)
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert_eq!(events.lock().unwrap().len(), 1);
         bus.unsubscribe(&sid).await.unwrap();
@@ -1381,8 +1395,18 @@ mod tests {
     async fn test_mock_schema_registry() {
         let sr = MockSchemaRegistry::new();
         let cols = vec![
-            SchemaColumn { name: "id".into(), data_type: "INTEGER".into(), nullable: false, entity_type: None },
-            SchemaColumn { name: "name".into(), data_type: "VARCHAR".into(), nullable: true, entity_type: Some("Patient".into()) },
+            SchemaColumn {
+                name: "id".into(),
+                data_type: "INTEGER".into(),
+                nullable: false,
+                entity_type: None,
+            },
+            SchemaColumn {
+                name: "name".into(),
+                data_type: "VARCHAR".into(),
+                nullable: true,
+                entity_type: Some("Patient".into()),
+            },
         ];
         sr.register_schema("patients", cols).await.unwrap();
         let schema = sr.get_schema("patients").await.unwrap().unwrap();
@@ -1396,7 +1420,11 @@ mod tests {
     #[tokio::test]
     async fn test_mock_auth_provider() {
         let auth = MockAuthProvider::new().with_token("tk_abc123");
-        let creds = AuthCredentials { username: Some("admin".into()), password: Some("pass".into()), api_key: None };
+        let creds = AuthCredentials {
+            username: Some("admin".into()),
+            password: Some("pass".into()),
+            api_key: None,
+        };
         let token = auth.authenticate(creds).await.unwrap();
         assert_eq!(token.value, "tk_abc123");
         let authorized = auth.authorize(&token, "read:data").await.unwrap();

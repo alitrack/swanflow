@@ -101,9 +101,8 @@ impl CheckpointManager {
     /// Load a checkpoint by run_id.
     pub fn load_checkpoint(&self, run_id: &str) -> anyhow::Result<Option<EngineCheckpoint>> {
         let conn = Connection::open(&self.metadata_path)?;
-        let mut stmt = conn.prepare(
-            "SELECT checkpoint_json FROM __execution_checkpoints WHERE run_id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT checkpoint_json FROM __execution_checkpoints WHERE run_id = ?1")?;
         let mut rows = stmt.query(params![run_id])?;
         match rows.next()? {
             Some(row) => {
@@ -266,10 +265,7 @@ mod tests {
         // resuming it would skip levels whose materializations were
         // recorded under the old digest algorithm, bypassing the v2
         // invalidation. The workflow simply re-runs from level 0 once.
-        let tmp = std::env::temp_dir().join(format!(
-            "checkpoint_resume_v1_{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("checkpoint_resume_v1_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         let cm = CheckpointManager::new(tmp.to_str().unwrap());
 

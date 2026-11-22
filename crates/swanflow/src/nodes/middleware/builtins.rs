@@ -127,8 +127,8 @@ pub fn column_rename_schema() -> JsonValue {
 
 impl PlanMiddleware for ColumnRenameMiddleware {
     fn apply(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
-        use datafusion::logical_expr::Expr;
         use datafusion::logical_expr::expr::Alias;
+        use datafusion::logical_expr::Expr;
         let schema = plan.schema();
         if schema.field_with_name(None, &self.from).is_err() {
             return Err(anyhow!(
@@ -164,7 +164,7 @@ impl PlanMiddleware for ColumnRenameMiddleware {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use datafusion::prelude::*;
     use serde_json::json;
 
@@ -178,11 +178,15 @@ mod tests {
             ),
             (
                 "b",
-                std::sync::Arc::new(datafusion::arrow::array::StringArray::from(vec!["x", "y"])) as _,
+                std::sync::Arc::new(datafusion::arrow::array::StringArray::from(vec!["x", "y"]))
+                    as _,
             ),
         ])
         .unwrap();
-        df.read_batches(vec![batches]).unwrap().into_optimized_plan().unwrap()
+        df.read_batches(vec![batches])
+            .unwrap()
+            .into_optimized_plan()
+            .unwrap()
     }
 
     #[test]
@@ -232,8 +236,16 @@ mod tests {
             .iter()
             .map(|f| f.name().clone())
             .collect();
-        assert!(names.contains(&"z".to_string()), "renamed col present: {:?}", names);
-        assert!(!names.contains(&"a".to_string()), "old name gone: {:?}", names);
+        assert!(
+            names.contains(&"z".to_string()),
+            "renamed col present: {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"a".to_string()),
+            "old name gone: {:?}",
+            names
+        );
     }
 
     #[test]

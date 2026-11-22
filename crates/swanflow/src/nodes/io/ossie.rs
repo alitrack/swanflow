@@ -115,8 +115,8 @@ impl DialectExpr {
 
 fn parse_model(text: &str) -> Result<OssieModel> {
     // YAML is a superset of JSON — one parser covers both formats.
-    let model: OssieModel =
-        serde_yaml::from_str(text).context("Failed to parse Ossie model (expected 0.2.x JSON/YAML)")?;
+    let model: OssieModel = serde_yaml::from_str(text)
+        .context("Failed to parse Ossie model (expected 0.2.x JSON/YAML)")?;
     if model.semantic_model.is_empty() {
         return Err(anyhow!(
             "Ossie model (version {:?}) has no `semantic_model` entries — not an Ossie 0.2.x export?",
@@ -128,7 +128,10 @@ fn parse_model(text: &str) -> Result<OssieModel> {
 
 fn str_col<S: Into<String> + Clone>(values: Vec<S>) -> ArrayRef {
     Arc::new(StringArray::from(
-        values.into_iter().map(|v| v.into()).collect::<Vec<String>>(),
+        values
+            .into_iter()
+            .map(|v| v.into())
+            .collect::<Vec<String>>(),
     ))
 }
 
@@ -363,7 +366,10 @@ semantic_model:
             .unwrap();
         assert_eq!(plans.len(), 1);
         let ctx = SessionContext::new();
-        let df = ctx.execute_logical_plan(plans.into_iter().next().unwrap()).await.unwrap();
+        let df = ctx
+            .execute_logical_plan(plans.into_iter().next().unwrap())
+            .await
+            .unwrap();
         let batches = df.collect().await.unwrap();
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 3, "2 terms + 1 metric + 0 relations");
@@ -372,6 +378,8 @@ semantic_model:
     #[test]
     fn validates_missing_path() {
         let node = OssieReadNode;
-        assert!(node.validate(&serde_json::json!({ "path": "/no/such/model.ossie.json" })).is_err());
+        assert!(node
+            .validate(&serde_json::json!({ "path": "/no/such/model.ossie.json" }))
+            .is_err());
     }
 }

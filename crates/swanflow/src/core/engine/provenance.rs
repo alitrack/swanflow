@@ -231,7 +231,11 @@ pub fn schema_set_hash(
     let mut parts: Vec<String> = Vec::with_capacity(input_tables.len() + 1);
     // Output first, then inputs in the caller's order — the same order
     // `compute_artifact_id` walks `inputs[]`, so the two stay reconcilable.
-    parts.push(format!("out|{}|{}", output_table, schema_hash(conn, output_table)?));
+    parts.push(format!(
+        "out|{}|{}",
+        output_table,
+        schema_hash(conn, output_table)?
+    ));
     for t in input_tables {
         parts.push(format!("in|{}|{}", t, schema_hash(conn, t)?));
     }
@@ -264,7 +268,10 @@ pub fn engine_version(conn: &duckdb::Connection) -> Result<String> {
 ///
 /// New code should call [`table_fingerprint_kind`] with the kind recorded in
 /// the header it is verifying.
-pub fn table_fingerprint_aggregate(conn: &duckdb::Connection, table: &str) -> Result<(i64, String)> {
+pub fn table_fingerprint_aggregate(
+    conn: &duckdb::Connection,
+    table: &str,
+) -> Result<(i64, String)> {
     table_fingerprint_kind(conn, table, FP_AGGREGATE)
 }
 
@@ -595,8 +602,8 @@ fn now_rfc3339() -> String {
 /// Read a header back from disk. Fails loudly on bad JSON — a header we cannot
 /// parse is an incomplete header, not an empty one.
 pub fn load_header(path: &std::path::Path) -> Result<ArtifactHeader> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read header {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("read header {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parse header {}", path.display()))
 }
 
@@ -614,10 +621,15 @@ pub fn validate_header(h: &ArtifactHeader) -> Vec<String> {
         problems.push("code.text is empty (nothing can be re-run from this header)".into());
     }
     if !matches!(h.code.language.as_str(), "sql" | "dag" | "python") {
-        problems.push(format!("code.language '{}' is not one of sql/dag/python", h.code.language));
+        problems.push(format!(
+            "code.language '{}' is not one of sql/dag/python",
+            h.code.language
+        ));
     }
     if h.env.engine.version.trim().is_empty() {
-        problems.push("env.engine.version is empty (version drift is the #1 cause of failed reruns)".into());
+        problems.push(
+            "env.engine.version is empty (version drift is the #1 cause of failed reruns)".into(),
+        );
     }
     if h.env.schema_hash.len() != 64 {
         problems.push("env.schema_hash must be 64 hex chars".into());
@@ -693,7 +705,8 @@ pub fn check_structure(header: &ArtifactHeader) -> CheckReport {
     } else {
         (
             verdict::PASS,
-            "structural check only (no database given): inputs were not re-fingerprinted".to_string(),
+            "structural check only (no database given): inputs were not re-fingerprinted"
+                .to_string(),
         )
     };
     CheckReport {
@@ -753,19 +766,20 @@ pub fn check(conn: &duckdb::Connection, header: &ArtifactHeader) -> Result<Check
         // Dispatch on the kind *recorded in the header*, never on the current
         // default: an artifact written under `aggregate` must be re-fingerprinted
         // the same way it was made, or every old artifact reports "data changed".
-        let (rows, content) = match table_fingerprint_kind(conn, &input.path, &input.fingerprint_kind) {
-            Ok(v) => v,
-            Err(_) => {
-                changed.push(format!("{} (missing)", input.path));
-                inputs.push(InputStatus {
-                    path: input.path.clone(),
-                    status: "missing".into(),
-                    rows_expected: input.rows,
-                    rows_observed: -1,
-                });
-                continue;
-            }
-        };
+        let (rows, content) =
+            match table_fingerprint_kind(conn, &input.path, &input.fingerprint_kind) {
+                Ok(v) => v,
+                Err(_) => {
+                    changed.push(format!("{} (missing)", input.path));
+                    inputs.push(InputStatus {
+                        path: input.path.clone(),
+                        status: "missing".into(),
+                        rows_expected: input.rows,
+                        rows_observed: -1,
+                    });
+                    continue;
+                }
+            };
         // Schema verification. Per-input, because the input table is always
         // present even in a header-only review (env.schema_hash is a set hash
         // that also covers the absent output table, so it cannot be recomputed
@@ -815,7 +829,10 @@ pub fn check(conn: &duckdb::Connection, header: &ArtifactHeader) -> Result<Check
     let (v, detail) = if !changed.is_empty() {
         (
             verdict::DATA_CHANGED,
-            format!("data changed since this artifact was made: {}", changed.join("; ")),
+            format!(
+                "data changed since this artifact was made: {}",
+                changed.join("; ")
+            ),
         )
     } else if !id_verified {
         (
@@ -1071,7 +1088,8 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
     let (v, detail) = if engine_note.is_some() {
         (
             verdict::VERSION_MISMATCH,
-            "engine version differs — reported as a version difference, not as a wrong answer".into(),
+            "engine version differs — reported as a version difference, not as a wrong answer"
+                .into(),
         )
     } else if stored_table_differs && identical {
         // The dangerous case, and the reason this is not just a hash compare: the
@@ -1120,7 +1138,9 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
             verdict::DIFF,
             format!(
                 "output differs: {} rows now vs {} recorded; columns {}",
-                rows_observed, expected.rows, cols.join(", ")
+                rows_observed,
+                expected.rows,
+                cols.join(", ")
             ),
         )
     } else {
@@ -1258,11 +1278,25 @@ mod tests {
         let wide = mk("BIGINT");
 
         let h_narrow = build_header(
-            &narrow, "out_n", "row count", code, "sql", &["jiesuan"], conv(), vec![],
+            &narrow,
+            "out_n",
+            "row count",
+            code,
+            "sql",
+            &["jiesuan"],
+            conv(),
+            vec![],
         )
         .unwrap();
         let h_wide = build_header(
-            &wide, "out_n", "row count", code, "sql", &["jiesuan"], conv(), vec![],
+            &wide,
+            "out_n",
+            "row count",
+            code,
+            "sql",
+            &["jiesuan"],
+            conv(),
+            vec![],
         )
         .unwrap();
 
@@ -1421,19 +1455,27 @@ mod tests {
         conn.execute_batch("CREATE TABLE sales_rev AS SELECT * FROM sales ORDER BY id DESC;")
             .unwrap();
         conn.execute_batch("DROP TABLE sales;").unwrap();
-        conn.execute_batch("ALTER TABLE sales_rev RENAME TO sales;").unwrap();
+        conn.execute_batch("ALTER TABLE sales_rev RENAME TO sales;")
+            .unwrap();
         let after = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET).unwrap();
-        assert_eq!(before, after, "reversing the physical order must not move it");
+        assert_eq!(
+            before, after,
+            "reversing the physical order must not move it"
+        );
     }
 
     #[test]
     fn row_multiset_sees_a_value_change_that_the_row_count_cannot() {
         let conn = setup_with_output();
         let before = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET).unwrap();
-        conn.execute_batch("UPDATE sales SET region='south' WHERE id=2;").unwrap();
+        conn.execute_batch("UPDATE sales SET region='south' WHERE id=2;")
+            .unwrap();
         let after = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET).unwrap();
         assert_eq!(before.0, after.0, "row count is unchanged on purpose");
-        assert_ne!(before.1, after.1, "content change must move the fingerprint");
+        assert_ne!(
+            before.1, after.1,
+            "content change must move the fingerprint"
+        );
     }
 
     #[test]
@@ -1442,8 +1484,12 @@ mod tests {
         // never be mistakable for the other. This is what makes "recorded kind"
         // a reliable instruction rather than a hint.
         let conn = setup_with_output();
-        let a = table_fingerprint_kind(&conn, "sales", FP_AGGREGATE).unwrap().1;
-        let b = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET).unwrap().1;
+        let a = table_fingerprint_kind(&conn, "sales", FP_AGGREGATE)
+            .unwrap()
+            .1;
+        let b = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET)
+            .unwrap()
+            .1;
         assert_ne!(a, b);
     }
 
@@ -1462,13 +1508,15 @@ mod tests {
             let mut h = header_for(&conn);
             // Rewrite as an old aggregate header: kind, both fingerprints, id.
             h.outputs[0].fingerprint_kind = FP_AGGREGATE.into();
-            h.outputs[0].content_sha256 =
-                table_fingerprint_kind(&conn, "out_region", FP_AGGREGATE).unwrap().1;
+            h.outputs[0].content_sha256 = table_fingerprint_kind(&conn, "out_region", FP_AGGREGATE)
+                .unwrap()
+                .1;
             for i in 0..h.inputs.len() {
                 let path = h.inputs[i].path.clone();
                 h.inputs[i].fingerprint_kind = FP_AGGREGATE.into();
-                h.inputs[i].content_sha256 =
-                    table_fingerprint_kind(&conn, &path, FP_AGGREGATE).unwrap().1;
+                h.inputs[i].content_sha256 = table_fingerprint_kind(&conn, &path, FP_AGGREGATE)
+                    .unwrap()
+                    .1;
             }
             h.artifact_id = compute_artifact_id(&h);
             h
@@ -1664,7 +1712,10 @@ mod tests {
         let r = rerun(&db, &h).unwrap();
         assert_eq!(r.verdict, verdict::PASS, "detail: {}", r.detail);
         assert_eq!(r.hash_observed, h.outputs[0].content_sha256);
-        assert!(!r.stored_table_compared, "there was nothing on disk to compare");
+        assert!(
+            !r.stored_table_compared,
+            "there was nothing on disk to compare"
+        );
         assert!(r.column_diffs.is_empty());
     }
 
@@ -1731,7 +1782,14 @@ mod tests {
         let narrow = mk("INTEGER");
         let wide = mk("BIGINT");
         let h = build_header(
-            &narrow, "out_n", "row count", code, "sql", &["jiesuan"], conv(), vec![],
+            &narrow,
+            "out_n",
+            "row count",
+            code,
+            "sql",
+            &["jiesuan"],
+            conv(),
+            vec![],
         )
         .unwrap();
 
@@ -1747,9 +1805,17 @@ mod tests {
         );
 
         let r = check(&wide, &h).unwrap();
-        assert_eq!(r.verdict, verdict::DATA_CHANGED, "a shape change must not pass");
+        assert_eq!(
+            r.verdict,
+            verdict::DATA_CHANGED,
+            "a shape change must not pass"
+        );
         assert_eq!(r.inputs[0].status, "schema_changed");
-        assert!(r.detail.contains("SCHEMA"), "detail must name the reason: {}", r.detail);
+        assert!(
+            r.detail.contains("SCHEMA"),
+            "detail must name the reason: {}",
+            r.detail
+        );
     }
 
     #[test]
@@ -1759,10 +1825,15 @@ mod tests {
         h.inputs[0].schema_sha256 = None;
         let problems = validate_header(&h);
         assert!(
-            problems.iter().any(|p| p.contains("inputs[0].schema_sha256")),
+            problems
+                .iter()
+                .any(|p| p.contains("inputs[0].schema_sha256")),
             "must name the field, not fail vaguely: {problems:?}"
         );
-        assert_eq!(check(&conn, &h).unwrap().verdict, verdict::INCOMPLETE_HEADER);
+        assert_eq!(
+            check(&conn, &h).unwrap().verdict,
+            verdict::INCOMPLETE_HEADER
+        );
     }
 
     #[test]
@@ -1773,15 +1844,27 @@ mod tests {
         assert!(h.env.skill.is_none());
 
         let tagged = with_skill(h.clone(), Some("医保自查-DRG高倍率病例筛查@0.1.0".into()));
-        assert_eq!(tagged.env.skill.as_deref(), Some("医保自查-DRG高倍率病例筛查@0.1.0"));
-        assert_ne!(tagged.artifact_id, base, "a different template version is a different analysis");
+        assert_eq!(
+            tagged.env.skill.as_deref(),
+            Some("医保自查-DRG高倍率病例筛查@0.1.0")
+        );
+        assert_ne!(
+            tagged.artifact_id, base,
+            "a different template version is a different analysis"
+        );
         // ...and the new id must still re-derive from its own fields.
         assert_eq!(compute_artifact_id(&tagged), tagged.artifact_id);
 
         // Contrast: an audit record must NOT move the id (that is what makes
         // repeated reviews possible at all).
         let mut audited = tagged.clone();
-        append_replication(&mut audited, "check", verdict::PASS, Some("lhy".into()), None);
+        append_replication(
+            &mut audited,
+            "check",
+            verdict::PASS,
+            Some("lhy".into()),
+            None,
+        );
         assert_eq!(compute_artifact_id(&audited), tagged.artifact_id);
     }
 
@@ -1806,11 +1889,19 @@ mod tests {
 
         let mut moved = h.clone();
         moved.env.locale = Some("de_DE.UTF-8".into());
-        assert_eq!(compute_artifact_id(&moved), base, "locale must not move the id");
+        assert_eq!(
+            compute_artifact_id(&moved),
+            base,
+            "locale must not move the id"
+        );
 
         let mut unset = h.clone();
         unset.env.locale = None;
-        assert_eq!(compute_artifact_id(&unset), base, "locale absent must not move the id");
+        assert_eq!(
+            compute_artifact_id(&unset),
+            base,
+            "locale absent must not move the id"
+        );
     }
 
     #[test]
@@ -1819,7 +1910,11 @@ mod tests {
         let mut h = header_for(&conn);
         let id = h.artifact_id.clone();
         append_replication(&mut h, "check", verdict::PASS, Some("lhy".into()), None);
-        assert_eq!(compute_artifact_id(&h), id, "audit records must not move the id");
+        assert_eq!(
+            compute_artifact_id(&h),
+            id,
+            "audit records must not move the id"
+        );
         assert_eq!(h.replications.len(), 1);
         let json = serde_json::to_string(&h).unwrap();
         assert!(json.contains("\"replications\""));

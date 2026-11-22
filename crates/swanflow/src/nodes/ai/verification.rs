@@ -1,16 +1,16 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use datafusion::arrow::array::{Array, RecordBatch, StringBuilder, StringArray};
+use datafusion::arrow::array::{Array, RecordBatch, StringArray, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field};
+use datafusion::common::DataFusionError;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::LogicalPlan;
-use datafusion::common::DataFusionError;
 use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion::physical_plan::RecordBatchStream;
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::any::Any;
@@ -194,14 +194,14 @@ impl NodeBehavior for FactClaimVerifierNode {
         let threshold = config["support_threshold"].as_f64().unwrap_or(0.6) as f32;
         let require_evidence = config["require_evidence"].as_bool().unwrap_or(true);
         // Output schema: claim / score / verdict / evidence_excerpt
-        let out_schema = Arc::new(DFSchema::try_from(datafusion::arrow::datatypes::Schema::new(
-            vec![
+        let out_schema = Arc::new(DFSchema::try_from(
+            datafusion::arrow::datatypes::Schema::new(vec![
                 Field::new("claim", DataType::Utf8, false),
                 Field::new("score", DataType::Float32, false),
                 Field::new("verdict", DataType::Utf8, false),
                 Field::new("evidence_excerpt", DataType::Utf8, true),
-            ],
-        ))?);
+            ]),
+        )?);
         Ok(vec![LogicalPlan::Extension(Extension {
             node: Arc::new(FactVerifyLogical {
                 threshold_bits: threshold.to_bits(),
@@ -249,7 +249,8 @@ impl UserDefinedLogicalNodeCore for FactVerifyLogical {
         write!(
             f,
             "FactVerify: threshold={}, require_evidence={}",
-            f32::from_bits(self.threshold_bits), self.require_evidence
+            f32::from_bits(self.threshold_bits),
+            self.require_evidence
         )
     }
     fn with_exprs_and_inputs(
@@ -419,8 +420,9 @@ impl Stream for FactVerifyStream {
                             self.evidence_column
                         ))
                     })?;
-                let claims_vec: Vec<String> =
-                    (0..claims.len()).map(|i| claims.value(i).to_string()).collect();
+                let claims_vec: Vec<String> = (0..claims.len())
+                    .map(|i| claims.value(i).to_string())
+                    .collect();
                 let evidences_vec: Vec<String> = (0..evidences.len())
                     .map(|i| evidences.value(i).to_string())
                     .collect();
@@ -534,7 +536,7 @@ mod fact_verify_tests {
         ];
         let evidences = vec![
             "The Eiffel Tower is a landmark in Paris, France.".to_string(),
-            "The tower is very tall.".to_string(),  // partial, 0.5 — not the best
+            "The tower is very tall.".to_string(), // partial, 0.5 — not the best
         ];
         let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
             Field::new("claim", DataType::Utf8, false),
@@ -542,8 +544,7 @@ mod fact_verify_tests {
             Field::new("verdict", DataType::Utf8, false),
             Field::new("evidence_excerpt", DataType::Utf8, true),
         ]));
-        let batch =
-            score_claims_to_batch(&claims, &evidences, 0.6, true, schema).unwrap();
+        let batch = score_claims_to_batch(&claims, &evidences, 0.6, true, schema).unwrap();
         assert_eq!(batch.num_rows(), 2);
         let verdicts = batch
             .column_by_name("verdict")

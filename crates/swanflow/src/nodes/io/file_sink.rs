@@ -156,7 +156,11 @@ impl UserDefinedLogicalNodeCore for FileSinkLogical {
     }
 
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "FileSink(format={:?}, path={:?})", self.format, self.path)
+        write!(
+            f,
+            "FileSink(format={:?}, path={:?})",
+            self.format, self.path
+        )
     }
 
     fn with_exprs_and_inputs(
@@ -336,17 +340,15 @@ impl Stream for FileWritingStream {
                     Ok(()) => {
                         // Buffered sink: one aggregated batch, then done. The
                         // engine still gets a typed, possibly empty, output.
-                        let merged = datafusion::arrow::compute::concat_batches(
-                            &this.schema,
-                            &this.batches,
-                        )
-                        .unwrap_or_else(|_| RecordBatch::new_empty(this.schema.clone()));
+                        let merged =
+                            datafusion::arrow::compute::concat_batches(&this.schema, &this.batches)
+                                .unwrap_or_else(|_| RecordBatch::new_empty(this.schema.clone()));
                         return Poll::Ready(Some(Ok(merged)));
                     }
                     Err(e) => {
-                        return Poll::Ready(Some(Err(datafusion::error::DataFusionError::Execution(
-                            format!("{e:#}"),
-                        ))))
+                        return Poll::Ready(Some(Err(
+                            datafusion::error::DataFusionError::Execution(format!("{e:#}")),
+                        )))
                     }
                 }
             }
@@ -384,9 +386,8 @@ fn write_file(
 ) -> AnyResult<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                anyhow!("cannot create output directory {}: {e}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow!("cannot create output directory {}: {e}", parent.display()))?;
         }
     }
 
@@ -413,8 +414,8 @@ fn write_file(
 }
 
 fn write_csv(path: &Path, header: bool, delimiter: u8, batches: &[RecordBatch]) -> AnyResult<()> {
-    let file =
-        std::fs::File::create(path).map_err(|e| anyhow!("cannot create {}: {e}", path.display()))?;
+    let file = std::fs::File::create(path)
+        .map_err(|e| anyhow!("cannot create {}: {e}", path.display()))?;
     let mut writer = datafusion::arrow::csv::WriterBuilder::new()
         .with_header(header)
         .with_delimiter(delimiter)
@@ -433,8 +434,8 @@ fn write_parquet(
     schema: &SchemaRef,
     batches: &[RecordBatch],
 ) -> AnyResult<()> {
-    let file =
-        std::fs::File::create(path).map_err(|e| anyhow!("cannot create {}: {e}", path.display()))?;
+    let file = std::fs::File::create(path)
+        .map_err(|e| anyhow!("cannot create {}: {e}", path.display()))?;
     let props = parquet::file::properties::WriterProperties::builder()
         .set_compression(compression.to_parquet())
         .build();
@@ -557,9 +558,10 @@ impl NodeBehavior for ParquetWriteNode {
         NodeSpec {
             type_id: "core.io.parquet_write".to_string(),
             display_name: "Parquet Writer".to_string(),
-            description: "Write the incoming rows to a Parquet file. The file appears only when the \
+            description:
+                "Write the incoming rows to a Parquet file. The file appears only when the \
                           run completes — it is written to a temp file and renamed."
-                .to_string(),
+                    .to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "input".into(),
@@ -648,7 +650,8 @@ mod tests {
     }
 
     fn tmp_path(tag: &str, ext: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("swanflow-filesink-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("swanflow-filesink-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(format!("out.{ext}"))
     }
@@ -667,10 +670,16 @@ mod tests {
             &[batch.clone()],
         )
         .unwrap();
-        assert!(path.exists(), "the file must be in place after a successful write");
+        assert!(
+            path.exists(),
+            "the file must be in place after a successful write"
+        );
 
         let ctx = SessionContext::new();
-        let df = ctx.read_csv(path.to_str().unwrap(), CsvReadOptions::new()).await.unwrap();
+        let df = ctx
+            .read_csv(path.to_str().unwrap(), CsvReadOptions::new())
+            .await
+            .unwrap();
         let batches = df.collect().await.unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(rows, 3, "every input row must come back");
@@ -696,7 +705,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "temp file must be renamed away: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "temp file must be renamed away: {leftovers:?}"
+        );
     }
 
     #[tokio::test]
@@ -722,7 +734,10 @@ mod tests {
             .unwrap();
         let batches = df.collect().await.unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(rows, 3, "every input row must come back — a missing footer would fail here");
+        assert_eq!(
+            rows, 3,
+            "every input row must come back — a missing footer would fail here"
+        );
     }
 
     #[tokio::test]
@@ -752,7 +767,10 @@ mod tests {
     #[test]
     fn empty_delimiter_and_directory_paths_are_rejected() {
         let multi = serde_json::json!({ "path": "/tmp/x.csv", "delimiter": ",," });
-        assert!(CsvWriteNode.validate(&multi).is_err(), "two bytes is not a delimiter");
+        assert!(
+            CsvWriteNode.validate(&multi).is_err(),
+            "two bytes is not a delimiter"
+        );
 
         let dir = std::env::temp_dir();
         let as_dir = serde_json::json!({ "path": dir.to_str().unwrap() });

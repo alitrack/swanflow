@@ -56,7 +56,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use wasmtime::{Config, Engine, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Trap};
+use wasmtime::{
+    Config, Engine, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
+};
 
 use crate::core::error::{CoreResult, SwanFlowError};
 use crate::core::kernel::plugin::{PluginDescriptor, PluginHandle, PluginHost, PluginType};
@@ -203,7 +205,12 @@ impl WasmPluginHost {
     fn compile(&self, dir: &Path, manifest: WasmPluginManifest) -> CoreResult<LoadedPlugin> {
         let path = manifest.module_path(dir);
         let bytes = std::fs::read(&path).map_err(|e| {
-            SwanFlowError::io_error(format!("plugin '{}': module {}: {}", manifest.name, path.display(), e))
+            SwanFlowError::io_error(format!(
+                "plugin '{}': module {}: {}",
+                manifest.name,
+                path.display(),
+                e
+            ))
         })?;
         let module = Module::new(&self.engine, &bytes).map_err(|e| {
             SwanFlowError::config_error(format!(
@@ -264,12 +271,15 @@ impl WasmPluginHost {
 
         let result = (|| -> CoreResult<Vec<u8>> {
             let linker = Linker::new(engine);
-            let instance: Instance = linker.instantiate(&mut store, &plugin.module).map_err(|e| {
-                SwanFlowError::config_error(format!(
-                    "plugin '{}': instantiate failed: {}",
-                    plugin.manifest.name, e
-                ))
-            })?;
+            let instance: Instance =
+                linker
+                    .instantiate(&mut store, &plugin.module)
+                    .map_err(|e| {
+                        SwanFlowError::config_error(format!(
+                            "plugin '{}': instantiate failed: {}",
+                            plugin.manifest.name, e
+                        ))
+                    })?;
 
             let alloc = instance
                 .get_typed_func::<i32, i32>(&mut store, "alloc")
@@ -279,13 +289,20 @@ impl WasmPluginHost {
                 .map_err(|_| abi_error(&plugin.manifest.name, "dealloc(ptr: i32, size: i32)"))?;
             let func = instance
                 .get_typed_func::<(i32, i32), i32>(&mut store, function)
-                .map_err(|_| abi_error(&plugin.manifest.name, &format!("{}(ptr: i32, len: i32) -> i32", function)))?;
+                .map_err(|_| {
+                    abi_error(
+                        &plugin.manifest.name,
+                        &format!("{}(ptr: i32, len: i32) -> i32", function),
+                    )
+                })?;
             let memory = instance.get_memory(&mut store, "memory").ok_or_else(|| {
                 abi_error(&plugin.manifest.name, "linear memory exported as 'memory'")
             })?;
 
             let input_len = input.len() as i32;
-            let input_ptr = alloc.call(&mut store, input_len).map_err(|e| trapped(&plugin.manifest.name, "alloc", e))?;
+            let input_ptr = alloc
+                .call(&mut store, input_len)
+                .map_err(|e| trapped(&plugin.manifest.name, "alloc", e))?;
             if input_ptr == 0 && input_len > 0 {
                 return Err(SwanFlowError::unknown(format!(
                     "plugin '{}': alloc({}) returned null",
@@ -482,10 +499,11 @@ impl PluginHost for WasmPluginHost {
                 .loaded
                 .lock()
                 .map_err(|_| SwanFlowError::unknown("plugin registry poisoned"))?;
-            map.get(&handle.name).ok_or_else(|| {
-                SwanFlowError::config_error(format!("plugin '{}' is not loaded", handle.name))
-            })?
-            .clone_ref()
+            map.get(&handle.name)
+                .ok_or_else(|| {
+                    SwanFlowError::config_error(format!("plugin '{}' is not loaded", handle.name))
+                })?
+                .clone_ref()
         };
         let engine = self.engine.clone();
         self.invoke(&engine, &plugin, function, args)
@@ -578,11 +596,7 @@ mod tests {
     }
 
     fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "swanflow-plug-{}-{}",
-            tag,
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("swanflow-plug-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -598,18 +612,32 @@ mod tests {
         let found = host.scan(dir.to_str().unwrap()).await.unwrap();
 
         // The good one is discoverable; the bad one does not poison discovery.
-        assert_eq!(found.len(), 1, "found: {:?}", found.iter().map(|d| &d.name).collect::<Vec<_>>());
+        assert_eq!(
+            found.len(),
+            1,
+            "found: {:?}",
+            found.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
         assert_eq!(found[0].name, "echo");
         assert_eq!(found[0].plugin_type, PluginType::Wasm);
 
         // ...and asking for it by name explains the mismatch by field name.
-        let handle = PluginHandle { name: "future".into(), plugin_type: PluginType::Wasm };
+        let handle = PluginHandle {
+            name: "future".into(),
+            plugin_type: PluginType::Wasm,
+        };
         let mut cfg = HashMap::new();
         cfg.insert("dir".to_string(), dir.to_str().unwrap().to_string());
         let err = host.init(&handle, cfg).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("abi"), "must name the offending field, got: {msg}");
-        assert!(msg.contains("swanflow-plugin-99"), "must quote what it found, got: {msg}");
+        assert!(
+            msg.contains("abi"),
+            "must name the offending field, got: {msg}"
+        );
+        assert!(
+            msg.contains("swanflow-plugin-99"),
+            "must quote what it found, got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -618,7 +646,10 @@ mod tests {
         write_plugin(&dir, "echo", PLUGIN_ABI, ECHO_WAT);
 
         let host = WasmPluginHost::new();
-        let handle = PluginHandle { name: "echo".into(), plugin_type: PluginType::Wasm };
+        let handle = PluginHandle {
+            name: "echo".into(),
+            plugin_type: PluginType::Wasm,
+        };
         let mut cfg = HashMap::new();
         cfg.insert("dir".to_string(), dir.to_str().unwrap().to_string());
         host.init(&handle, cfg).await.unwrap();
@@ -626,7 +657,10 @@ mod tests {
         assert_eq!(host.loaded(), vec!["echo".to_string()]);
         let payload = b"\x00\x01far more interesting than an empty buffer\xff";
         let out = host.run(&handle, "echo", payload).await.unwrap();
-        assert_eq!(out, payload, "the host must return exactly the plugin's payload, length prefix stripped");
+        assert_eq!(
+            out, payload,
+            "the host must return exactly the plugin's payload, length prefix stripped"
+        );
     }
 
     #[tokio::test]
@@ -636,7 +670,10 @@ mod tests {
 
         // 150 ms is enough: the plugin never yields, so only the epoch can stop it.
         let host = WasmPluginHost::with_limits(Duration::from_millis(150), DEFAULT_MEMORY_LIMIT);
-        let handle = PluginHandle { name: "spin".into(), plugin_type: PluginType::Wasm };
+        let handle = PluginHandle {
+            name: "spin".into(),
+            plugin_type: PluginType::Wasm,
+        };
         let mut cfg = HashMap::new();
         cfg.insert("dir".to_string(), dir.to_str().unwrap().to_string());
         host.init(&handle, cfg).await.unwrap();
@@ -650,7 +687,10 @@ mod tests {
             msg.contains("deadline") || msg.contains("interrupted"),
             "the error must say it ran out of time, not blame the data: {msg}"
         );
-        assert!(elapsed < Duration::from_secs(5), "deadline not enforced: took {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "deadline not enforced: took {elapsed:?}"
+        );
 
         // The host is still usable afterwards — that is the claim being tested.
         assert_eq!(host.loaded(), vec!["spin".to_string()]);

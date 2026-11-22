@@ -558,7 +558,12 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file, legacy_yaml, skip_fresh, json } => {
+        Commands::Run {
+            file,
+            legacy_yaml,
+            skip_fresh,
+            json,
+        } => {
             let workflow = load_workflow(file)?;
             if json {
                 println!(
@@ -567,7 +572,8 @@ async fn main() -> anyhow::Result<()> {
                     workflow.id
                 );
             } else {
-                eprintln!("🚀 Loading Workflow: {} (ID: {})",
+                eprintln!(
+                    "🚀 Loading Workflow: {} (ID: {})",
                     workflow.name, workflow.id
                 );
             }
@@ -631,7 +637,13 @@ async fn main() -> anyhow::Result<()> {
                 let slug: String = workflow
                     .name
                     .chars()
-                    .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+                    .map(|c| {
+                        if c.is_alphanumeric() {
+                            c.to_ascii_lowercase()
+                        } else {
+                            '-'
+                        }
+                    })
                     .collect();
                 let slug = slug.trim_matches('-').to_string();
                 let base = if slug.is_empty() {
@@ -691,7 +703,13 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Agent { command } => match command {
-            AgentCommands::Approve { file, yes, dry_run, explain, json } => {
+            AgentCommands::Approve {
+                file,
+                yes,
+                dry_run,
+                explain,
+                json,
+            } => {
                 use swanflow::hotl::ApprovalGate;
 
                 let workflow = load_workflow(file)?;
@@ -760,7 +778,9 @@ async fn main() -> anyhow::Result<()> {
 
                 if !approved {
                     if json {
-                        println!("{{\"event\":\"finished\",\"ok\":false,\"reason\":\"cancelled\"}}");
+                        println!(
+                            "{{\"event\":\"finished\",\"ok\":false,\"reason\":\"cancelled\"}}"
+                        );
                     } else {
                         println!("❌ Execution cancelled by human reviewer.");
                     }
@@ -774,7 +794,10 @@ async fn main() -> anyhow::Result<()> {
                         workflow.id
                     );
                 } else {
-                    println!("✅ Approved — executing workflow: {} ({})", workflow.name, workflow.id);
+                    println!(
+                        "✅ Approved — executing workflow: {} ({})",
+                        workflow.name, workflow.id
+                    );
                 }
                 let mut rx = engine.execute_workflow(&workflow).await?;
                 let mut failed = false;
@@ -810,7 +833,13 @@ async fn main() -> anyhow::Result<()> {
                     println!("✅ Execution Finished.");
                 }
             }
-            AgentCommands::Analyze { prompt, model, endpoint, api_key, out } => {
+            AgentCommands::Analyze {
+                prompt,
+                model,
+                endpoint,
+                api_key,
+                out,
+            } => {
                 use swanflow::agent::AnalystAgent;
                 use swanflow::nodes::ai::providers::{LlmConfig, OpenAiProvider, ProviderKind};
 
@@ -844,7 +873,15 @@ async fn main() -> anyhow::Result<()> {
                 println!("   Next: swanflow agent approve {}", path.display());
             }
         },
-        Commands::Deploy { file, mode, endpoint, token, flights_dir, manifest_dir, rollback } => {
+        Commands::Deploy {
+            file,
+            mode,
+            endpoint,
+            token,
+            flights_dir,
+            manifest_dir,
+            rollback,
+        } => {
             use swanflow::deploy;
 
             let workflow = swanflow::load_workflow_file(&file)?;
@@ -854,7 +891,11 @@ async fn main() -> anyhow::Result<()> {
 
             if rollback {
                 let restored = deploy::deployer::rollback(
-                    &dag_id, &flights_dir, &manifest_dir, endpoint, token,
+                    &dag_id,
+                    &flights_dir,
+                    &manifest_dir,
+                    endpoint,
+                    token,
                 )
                 .await?;
                 println!(
@@ -866,7 +907,9 @@ async fn main() -> anyhow::Result<()> {
             }
 
             if mode != "inline" && mode != "per-node" {
-                return Err(anyhow::anyhow!("unsupported mode '{mode}' (inline | per-node)"));
+                return Err(anyhow::anyhow!(
+                    "unsupported mode '{mode}' (inline | per-node)"
+                ));
             }
 
             let programs = match mode.as_str() {
@@ -876,56 +919,71 @@ async fn main() -> anyhow::Result<()> {
 
             println!("📦 compiled {} flight(s) (mode={mode})", programs.len());
             for p in &programs {
-                println!("   • {} (sha256 {}…)", p.flight_name, &p.source_sha256[..12]);
+                println!(
+                    "   • {} (sha256 {}…)",
+                    p.flight_name,
+                    &p.source_sha256[..12]
+                );
             }
 
             let manifest = deploy::deployer::deploy(
-                programs, &mode, &dag_id, &flights_dir, &manifest_dir, endpoint, token,
+                programs,
+                &mode,
+                &dag_id,
+                &flights_dir,
+                &manifest_dir,
+                endpoint,
+                token,
             )
             .await?;
             println!(
                 "🚀 deployed dag {dag_id}: {} flight(s), manifest at {}",
                 manifest.flights.len(),
-                manifest_dir.join(deploy::deployer::manifest_file_name(&dag_id)).display()
+                manifest_dir
+                    .join(deploy::deployer::manifest_file_name(&dag_id))
+                    .display()
             );
         }
-        Commands::Import { command } => match command {
-            ImportCommands::Duckorch { dir, output } => {
-                use swanflow::nodes::import_duckorch as orch;
+        Commands::Import { command } => {
+            match command {
+                ImportCommands::Duckorch { dir, output } => {
+                    use swanflow::nodes::import_duckorch as orch;
 
-                println!("🦆 Importing duckOrch tasks from: {}", dir.display());
-                let report = orch::import_folder(&dir)?;
-                print!("{}", report);
+                    println!("🦆 Importing duckOrch tasks from: {}", dir.display());
+                    let report = orch::import_folder(&dir)?;
+                    print!("{}", report);
 
-                // Build the workflow: one core.sql.duckdb node per task,
-                // edges from inputs/depends_on (task-name resolution).
-                use petgraph::stable_graph::StableGraph;
-                use swanflow_core::graph::{EdgeInstance, NodeInstance, Workflow};
-                use swanflow_core::nodes::NodeState;
+                    // Build the workflow: one core.sql.duckdb node per task,
+                    // edges from inputs/depends_on (task-name resolution).
+                    use petgraph::stable_graph::StableGraph;
+                    use swanflow_core::graph::{EdgeInstance, NodeInstance, Workflow};
+                    use swanflow_core::nodes::NodeState;
 
-                let name_by_table: std::collections::HashMap<String, String> = report
-                    .tasks
-                    .iter()
-                    .flat_map(|t| t.outputs.iter().map(|o| (o.clone(), t.name.clone())))
-                    .collect();
+                    let name_by_table: std::collections::HashMap<String, String> = report
+                        .tasks
+                        .iter()
+                        .flat_map(|t| t.outputs.iter().map(|o| (o.clone(), t.name.clone())))
+                        .collect();
 
-                let mut graph: StableGraph<NodeInstance, EdgeInstance> = StableGraph::new();
-                let mut idx_by_task: std::collections::HashMap<String, petgraph::graph::NodeIndex> =
-                    std::collections::HashMap::new();
+                    let mut graph: StableGraph<NodeInstance, EdgeInstance> = StableGraph::new();
+                    let mut idx_by_task: std::collections::HashMap<
+                        String,
+                        petgraph::graph::NodeIndex,
+                    > = std::collections::HashMap::new();
 
-                for t in &report.tasks {
-                    let idx = graph.add_node(NodeInstance {
-                        id: orch::task_node_id(&t.name),
-                        type_id: "core.sql.duckdb".to_string(),
-                        config: serde_json::json!({ "query": t.sql }),
-                        state: NodeState::Configured,
-                        ..Default::default()
-                    });
-                    idx_by_task.insert(t.name.clone(), idx);
-                }
+                    for t in &report.tasks {
+                        let idx = graph.add_node(NodeInstance {
+                            id: orch::task_node_id(&t.name),
+                            type_id: "core.sql.duckdb".to_string(),
+                            config: serde_json::json!({ "query": t.sql }),
+                            state: NodeState::Configured,
+                            ..Default::default()
+                        });
+                        idx_by_task.insert(t.name.clone(), idx);
+                    }
 
-                let mut added = std::collections::BTreeSet::<(String, String)>::new();
-                let add_edge = |from: &str, to: &str,
+                    let mut added = std::collections::BTreeSet::<(String, String)>::new();
+                    let add_edge = |from: &str, to: &str,
                                     idx_by_task: &std::collections::HashMap<
                     String,
                     petgraph::graph::NodeIndex,
@@ -946,54 +1004,53 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
 
-                for t in &report.tasks {
-                    let upstream_names: Vec<String> = t
-                        .inputs
-                        .iter()
-                        .filter_map(|i| name_by_table.get(i).cloned())
-                        .chain(t.depends_on.iter().cloned())
-                        .collect();
-                    for up in upstream_names {
-                        add_edge(&up, &t.name, &idx_by_task, &mut graph, &mut added);
-                    }
-                    if t.inputs.is_empty() {
-                        if let Some(inf) = report.inferred_inputs.get(&t.name) {
-                            for up in inf {
-                                add_edge(up, &t.name, &idx_by_task, &mut graph, &mut added);
+                    for t in &report.tasks {
+                        let upstream_names: Vec<String> = t
+                            .inputs
+                            .iter()
+                            .filter_map(|i| name_by_table.get(i).cloned())
+                            .chain(t.depends_on.iter().cloned())
+                            .collect();
+                        for up in upstream_names {
+                            add_edge(&up, &t.name, &idx_by_task, &mut graph, &mut added);
+                        }
+                        if t.inputs.is_empty() {
+                            if let Some(inf) = report.inferred_inputs.get(&t.name) {
+                                for up in inf {
+                                    add_edge(up, &t.name, &idx_by_task, &mut graph, &mut added);
+                                }
                             }
                         }
                     }
+
+                    let workflow = Workflow {
+                        id: uuid::Uuid::new_v4(),
+                        name: dir
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("duckorch-import")
+                            .to_string(),
+                        context: Default::default(),
+                        graph,
+                    };
+
+                    let out_path = output.unwrap_or_else(|| dir.clone());
+                    let out_path = if out_path.is_dir() {
+                        let stem = dir
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("duckorch-import");
+                        out_path.join(format!("{}.yaml", stem))
+                    } else {
+                        out_path
+                    };
+                    let yaml = serde_yaml::to_string(&workflow)?;
+                    std::fs::write(&out_path, &yaml)?;
+                    println!("\n💾 Workflow saved to: {}", out_path.display());
+                    println!("   Next: swanflow inspect {}", out_path.display());
                 }
-
-                let workflow = Workflow {
-                    id: uuid::Uuid::new_v4(),
-                    name: dir
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("duckorch-import")
-                        .to_string(),
-                    context: Default::default(),
-                    graph,
-                };
-
-                let out_path = output.unwrap_or_else(|| {
-                    dir.clone()
-                });
-                let out_path = if out_path.is_dir() {
-                    let stem = dir
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("duckorch-import");
-                    out_path.join(format!("{}.yaml", stem))
-                } else {
-                    out_path
-                };
-                let yaml = serde_yaml::to_string(&workflow)?;
-                std::fs::write(&out_path, &yaml)?;
-                println!("\n💾 Workflow saved to: {}", out_path.display());
-                println!("   Next: swanflow inspect {}", out_path.display());
             }
-        },
+        }
         Commands::Provenance { command } => match command {
             ProvenanceCommands::Header {
                 db,
@@ -1126,7 +1183,14 @@ async fn main() -> anyhow::Result<()> {
 
                 println!("🔍 Replicate --check: {}", header.display());
                 println!("   id       {}", h.artifact_id);
-                println!("   id ok    {}", if report.id_verified { "re-derives ✅" } else { "does NOT re-derive ❌" });
+                println!(
+                    "   id ok    {}",
+                    if report.id_verified {
+                        "re-derives ✅"
+                    } else {
+                        "does NOT re-derive ❌"
+                    }
+                );
                 for input in &report.inputs {
                     println!(
                         "   input    {}  {}  ({} rows now, {} recorded)",
@@ -1201,7 +1265,10 @@ async fn main() -> anyhow::Result<()> {
                         );
                     }
                     if !report.columns_only_in_rerun.is_empty() {
-                        println!("   columns new   {}", report.columns_only_in_rerun.join(", "));
+                        println!(
+                            "   columns new   {}",
+                            report.columns_only_in_rerun.join(", ")
+                        );
                     }
                     if report.stored_table_compared {
                         println!(
@@ -1266,7 +1333,10 @@ async fn main() -> anyhow::Result<()> {
                     std::path::PathBuf::from(swanflow::core::engine::default_cache_dir());
                 let ledger_path = cache_dir.join("assets.duckdb");
                 if !ledger_path.exists() {
-                    println!("📭 No materialization ledger yet ({} absent).", ledger_path.display());
+                    println!(
+                        "📭 No materialization ledger yet ({} absent).",
+                        ledger_path.display()
+                    );
                     println!("   Run a workflow to populate it (ADR-014 Stage 1).");
                     return Ok(());
                 }
@@ -1285,23 +1355,31 @@ async fn main() -> anyhow::Result<()> {
                 use swanflow::core::engine::assets::{status_for_workflow, AssetLedger};
 
                 let workflow = load_workflow(file)?;
-                println!("🔎 Asset status for workflow: {} (ID: {})", workflow.name, workflow.id);
+                println!(
+                    "🔎 Asset status for workflow: {} (ID: {})",
+                    workflow.name, workflow.id
+                );
 
                 let cache_dir =
                     std::path::PathBuf::from(swanflow::core::engine::default_cache_dir());
                 let ledger_path = cache_dir.join("assets.duckdb");
                 if !ledger_path.exists() {
-                    println!("📭 No materialization ledger yet ({} absent).", ledger_path.display());
+                    println!(
+                        "📭 No materialization ledger yet ({} absent).",
+                        ledger_path.display()
+                    );
                     println!("   Every node would be: never-run.");
                     // Still show automation readiness — never-materialized
                     // means freshness_violated fires (maximally stale).
                     let now = chrono::Utc::now();
                     for idx in workflow.graph.node_indices() {
                         let node = &workflow.graph[idx];
-                        let Some(dsl) = node.config.get("automation").and_then(|v| v.as_str()) else {
+                        let Some(dsl) = node.config.get("automation").and_then(|v| v.as_str())
+                        else {
                             continue;
                         };
-                        let label = match swanflow::core::engine::automation::parse_automation(dsl) {
+                        let label = match swanflow::core::engine::automation::parse_automation(dsl)
+                        {
                             Err(e) => format!("❌ parse error: {e}"),
                             Ok(cond) => {
                                 // The ledger FILE does not exist — that is a
@@ -1323,7 +1401,10 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                         };
-                        println!("  ⚙️  {} automation: {dsl} — {label} (never materialized)", node.id);
+                        println!(
+                            "  ⚙️  {} automation: {dsl} — {label} (never materialized)",
+                            node.id
+                        );
                     }
                     return Ok(());
                 }
@@ -1341,10 +1422,12 @@ async fn main() -> anyhow::Result<()> {
                     let now = chrono::Utc::now();
                     for idx in workflow.graph.node_indices() {
                         let node = &workflow.graph[idx];
-                        let Some(dsl) = node.config.get("automation").and_then(|v| v.as_str()) else {
+                        let Some(dsl) = node.config.get("automation").and_then(|v| v.as_str())
+                        else {
                             continue;
                         };
-                        let label = match swanflow::core::engine::automation::parse_automation(dsl) {
+                        let label = match swanflow::core::engine::automation::parse_automation(dsl)
+                        {
                             Err(e) => format!("❌ parse error: {e}"),
                             Ok(cond) => {
                                 let ctx = swanflow::core::engine::automation::EvalContext {
@@ -1361,13 +1444,24 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                         };
-                        println!("  ⚙️  {} automation: {dsl} — {label} (ledger locked or busy)", node.id);
+                        println!(
+                            "  ⚙️  {} automation: {dsl} — {label} (ledger locked or busy)",
+                            node.id
+                        );
                     }
                     return Ok(());
                 };
                 let rows = status_for_workflow(&ledger, &workflow)?;
-                let fresh = rows.iter().filter(|r| r.2 == swanflow::core::engine::assets::AssetVerdict::Fresh).count();
-                println!("{} node(s): {} fresh, {} action needed\n", rows.len(), fresh, rows.len() - fresh);
+                let fresh = rows
+                    .iter()
+                    .filter(|r| r.2 == swanflow::core::engine::assets::AssetVerdict::Fresh)
+                    .count();
+                println!(
+                    "{} node(s): {} fresh, {} action needed\n",
+                    rows.len(),
+                    fresh,
+                    rows.len() - fresh
+                );
                 for (node_id, type_id, verdict) in rows {
                     let marker = match verdict {
                         swanflow::core::engine::assets::AssetVerdict::Fresh => "✅",
@@ -1387,39 +1481,46 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     };
                     any_automation = true;
-                    let (label, detail) = match swanflow::core::engine::automation::parse_automation(dsl) {
-                        Err(e) => (format!("❌ parse error: {e}"), String::new()),
-                        Ok(cond) => {
-                            let ledger_unavailable = ledger.last_materialized_at(node.id).is_err();
-                            let mat = if ledger_unavailable {
-                                None
-                            } else {
-                                ledger.last_materialized_at(node.id).ok().flatten()
-                            };
-                            let ctx = swanflow::core::engine::automation::EvalContext {
-                                now,
-                                last_materialized_at: mat,
-                                // last_eval_ready_at unknown for a fresh CLI
-                                // process — the daemon owns that state; for
-                                // status display treat cron gating as open
-                                // since the daemon's last tick.
-                                last_eval_ready_at: Some(now),
-                                ledger_unavailable,
-                                webhook_fired: std::collections::HashSet::new(),
-                            };
-                            let lag = mat.map(|t| (now - t).num_minutes()).unwrap_or(i64::MAX);
-                            let lag_s = if lag == i64::MAX { "never".into() } else { format!("{lag}m ago") };
-                            let ready = swanflow::core::engine::automation::evaluate(&cond, &ctx);
-                            (
-                                match ready {
-                                    Some(true) => "🟢 ready".to_string(),
-                                    Some(false) => "⏸ hold".to_string(),
-                                    None => "❓ unknown".to_string(),
-                                },
-                                format!("(materialized {lag_s})"),
-                            )
-                        }
-                    };
+                    let (label, detail) =
+                        match swanflow::core::engine::automation::parse_automation(dsl) {
+                            Err(e) => (format!("❌ parse error: {e}"), String::new()),
+                            Ok(cond) => {
+                                let ledger_unavailable =
+                                    ledger.last_materialized_at(node.id).is_err();
+                                let mat = if ledger_unavailable {
+                                    None
+                                } else {
+                                    ledger.last_materialized_at(node.id).ok().flatten()
+                                };
+                                let ctx = swanflow::core::engine::automation::EvalContext {
+                                    now,
+                                    last_materialized_at: mat,
+                                    // last_eval_ready_at unknown for a fresh CLI
+                                    // process — the daemon owns that state; for
+                                    // status display treat cron gating as open
+                                    // since the daemon's last tick.
+                                    last_eval_ready_at: Some(now),
+                                    ledger_unavailable,
+                                    webhook_fired: std::collections::HashSet::new(),
+                                };
+                                let lag = mat.map(|t| (now - t).num_minutes()).unwrap_or(i64::MAX);
+                                let lag_s = if lag == i64::MAX {
+                                    "never".into()
+                                } else {
+                                    format!("{lag}m ago")
+                                };
+                                let ready =
+                                    swanflow::core::engine::automation::evaluate(&cond, &ctx);
+                                (
+                                    match ready {
+                                        Some(true) => "🟢 ready".to_string(),
+                                        Some(false) => "⏸ hold".to_string(),
+                                        None => "❓ unknown".to_string(),
+                                    },
+                                    format!("(materialized {lag_s})"),
+                                )
+                            }
+                        };
                     println!("  ⚙️  {} automation: {dsl} — {label} {detail}", node.id);
                 }
                 if any_automation {
@@ -1433,9 +1534,7 @@ async fn main() -> anyhow::Result<()> {
                 to,
                 dry_run,
             } => {
-                use swanflow::core::engine::assets::{
-                    daily_gaps, render_calendar, AssetLedger,
-                };
+                use swanflow::core::engine::assets::{daily_gaps, render_calendar, AssetLedger};
 
                 let workflow = load_workflow(file)?;
                 let parse = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d");
@@ -1456,7 +1555,9 @@ async fn main() -> anyhow::Result<()> {
                     let i = idx.checked_sub(1).filter(|i| *i < nodes.len());
                     match i {
                         Some(i) => nodes[i].0,
-                        None => anyhow::bail!("node index {} out of range (1..={})", idx, nodes.len()),
+                        None => {
+                            anyhow::bail!("node index {} out of range (1..={})", idx, nodes.len())
+                        }
                     }
                 } else {
                     let hits: Vec<_> = nodes
@@ -1494,11 +1595,19 @@ async fn main() -> anyhow::Result<()> {
 
                 println!(
                     "\n{} interval(s) done, {} gap batch(es):",
-                    completed.iter().filter(|d| **d >= from_d && **d <= to_d).count(),
+                    completed
+                        .iter()
+                        .filter(|d| **d >= from_d && **d <= to_d)
+                        .count(),
                     gaps.len()
                 );
                 for (s, e) in &gaps {
-                    println!("  ❌ gap {} ..= {} ({} day(s))", s, e, (*e - *s).num_days() + 1);
+                    println!(
+                        "  ❌ gap {} ..= {} ({} day(s))",
+                        s,
+                        e,
+                        (*e - *s).num_days() + 1
+                    );
                 }
                 println!("\n{}", render_calendar(&completed, from_d, to_d));
 
@@ -1526,7 +1635,6 @@ async fn main() -> anyhow::Result<()> {
                 // independent DuckDB instances writing one file corrupt it
                 // (SerializationException: field id mismatch). Reopen per
                 // day AFTER the run completes to record the interval.
-                
 
                 // Build the upstream-closure subgraph once.
                 let sub = upstream_closure(&workflow, node_id);
@@ -1556,9 +1664,7 @@ async fn main() -> anyhow::Result<()> {
                         // Fresh engine per day: skip-if-fresh must see the
                         // interval env as a digest input, so re-running a
                         // day does NOT get skipped by a matching digest.
-                        let engine = SwanFlowEngine::new(Arc::new(
-                            NodeRegistry::default(),
-                        ));
+                        let engine = SwanFlowEngine::new(Arc::new(NodeRegistry::default()));
                         let mut ok = true;
                         let mut rx = match engine.execute_workflow(&sub).await {
                             Ok(rx) => rx,
@@ -1646,7 +1752,13 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Commands::Knime { command } => match command {
-            KnimeCommands::Run { input, engine, print, push_shaper, shaper_db } => {
+            KnimeCommands::Run {
+                input,
+                engine,
+                print,
+                push_shaper,
+                shaper_db,
+            } => {
                 println!("🧩 Parsing KNIME workflow: {:?}", input);
                 let archive = KnwfParser::parse_file(&input)?;
                 println!(
@@ -1656,10 +1768,8 @@ async fn main() -> anyhow::Result<()> {
                     archive.metanodes.len(),
                 );
 
-                let core_wf = swanflow_knime::import_knwf(
-                    input.to_str().unwrap_or("unknown"),
-                )
-                .await?;
+                let core_wf =
+                    swanflow_knime::import_knwf(input.to_str().unwrap_or("unknown")).await?;
 
                 // Convert swanflow_core::Workflow → swanflow::Workflow via JSON
                 let json = serde_json::to_value(&core_wf)?;
@@ -1727,7 +1837,11 @@ async fn main() -> anyhow::Result<()> {
                             errors += 1;
                             println!("  ❌ Node[{}]: {}", &node_id.to_string()[..8], message);
                         }
-                        NodeEvent::Materialized { node_id, table_name, .. } => {
+                        NodeEvent::Materialized {
+                            node_id,
+                            table_name,
+                            ..
+                        } => {
                             println!(
                                 "  💾 Node[{}] → table `{}`",
                                 &node_id.to_string()[..8],
@@ -1737,10 +1851,7 @@ async fn main() -> anyhow::Result<()> {
                         _ => {}
                     }
                 }
-                println!(
-                    "✅ Done — {} executed, {} errors",
-                    executed, errors
-                );
+                println!("✅ Done — {} executed, {} errors", executed, errors);
 
                 if print {
                     // Read the last materialized node's output from metadata DB
@@ -1764,11 +1875,16 @@ async fn main() -> anyhow::Result<()> {
                                         println!("\n📋 Output table: `{}`", table_name);
                                         // Read parquet with DuckDB and print first 5 rows
                                         if let Ok(pconn) = duckdb::Connection::open_in_memory() {
-                                            if pconn.execute_batch(&format!(
-                                                "CREATE VIEW output AS SELECT * FROM '{}';",
-                                                parquet_path
-                                            )).is_ok() {
-                                                if let Ok(mut stmt) = pconn.prepare("SELECT * FROM output LIMIT 5") {
+                                            if pconn
+                                                .execute_batch(&format!(
+                                                    "CREATE VIEW output AS SELECT * FROM '{}';",
+                                                    parquet_path
+                                                ))
+                                                .is_ok()
+                                            {
+                                                if let Ok(mut stmt) =
+                                                    pconn.prepare("SELECT * FROM output LIMIT 5")
+                                                {
                                                     if let Ok(mut rows) = stmt.query([]) {
                                                         // Get columns from first row
                                                         let mut first = true;
@@ -1795,11 +1911,20 @@ async fn main() -> anyhow::Result<()> {
                                                                 .collect();
                                                             if first {
                                                                 // Use column indices as headers
-                                                                let headers: Vec<String> = (0..ncols)
+                                                                let headers: Vec<String> = (0
+                                                                    ..ncols)
                                                                     .map(|i| format!("col{}", i))
                                                                     .collect();
-                                                                println!("  {}", headers.join(" | "));
-                                                                println!("  {}", "-".repeat(headers.join(" | ").len()));
+                                                                println!(
+                                                                    "  {}",
+                                                                    headers.join(" | ")
+                                                                );
+                                                                println!(
+                                                                    "  {}",
+                                                                    "-".repeat(
+                                                                        headers.join(" | ").len()
+                                                                    )
+                                                                );
                                                                 first = false;
                                                             }
                                                             println!("  {}", vals.join(" | "));
@@ -1822,7 +1947,10 @@ async fn main() -> anyhow::Result<()> {
 
                 if push_shaper {
                     if errors > 0 {
-                        println!("\n⚠️  {} execution errors — pushing dashboard anyway", errors);
+                        println!(
+                            "\n⚠️  {} execution errors — pushing dashboard anyway",
+                            errors
+                        );
                     }
                     println!("\n📊 Generating Shaper dashboard...");
                     let queries = swanflow_knime::shaper::generate_shaper_queries(&archive);
@@ -1863,8 +1991,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             KnimeCommands::Scan { inputs } => {
-                println!("🔍 Scanning {} workflow(s) for factory types...", inputs.len());
-                let mut all_factories: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                println!(
+                    "🔍 Scanning {} workflow(s) for factory types...",
+                    inputs.len()
+                );
+                let mut all_factories: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
                 for path in &inputs {
                     if let Ok(archive) = KnwfParser::parse_file(path) {
                         for node in &archive.nodes {
@@ -1886,7 +2018,10 @@ async fn main() -> anyhow::Result<()> {
                 let mappings = mapper.list_all();
                 println!("\"factory\",\"swanflow_type\",\"category\",\"compat\"");
                 for m in &mappings {
-                    println!("\"{}\",\"{}\",\"{}\",\"{}\"", m.factory, m.sw_type, m.category, m.compat);
+                    println!(
+                        "\"{}\",\"{}\",\"{}\",\"{}\"",
+                        m.factory, m.sw_type, m.category, m.compat
+                    );
                 }
             }
             KnimeCommands::Shaper {
@@ -1935,10 +2070,7 @@ async fn main() -> anyhow::Result<()> {
                             duckdb::params![id, name, content],
                         )?;
 
-                        println!(
-                            "✅ Pushed dashboard '{}' to Shaper SQLite",
-                            name
-                        );
+                        println!("✅ Pushed dashboard '{}' to Shaper SQLite", name);
                     }
                 } else {
                     let queries = swanflow_knime::shaper::generate_shaper_queries(&archive);
@@ -2092,7 +2224,15 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
     }
 
     match cmd {
-        DaemonCommands::Start { socket, tick, webhook_bind, quack, quack_bind, quack_token, foreground } => {
+        DaemonCommands::Start {
+            socket,
+            tick,
+            webhook_bind,
+            quack,
+            quack_bind,
+            quack_token,
+            foreground,
+        } => {
             if foreground {
                 // Forked child — run daemon in foreground
                 let registry = Arc::new(NodeRegistry::default());
@@ -2115,12 +2255,15 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
                     }
                     daemon = daemon.with_quack(qc);
                 }
-                daemon.start().await
+                daemon
+                    .start()
+                    .await
                     .map_err(|e| anyhow::anyhow!("Daemon error: {}", e))?;
                 return Ok(());
             }
 
-            let socket_path = socket.clone()
+            let socket_path = socket
+                .clone()
                 .unwrap_or_else(swanflow::core::engine::daemon::default_socket_path);
 
             // Double-daemon guard: refuse to fork another daemon if one is
@@ -2144,7 +2287,8 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             // Fork to background
             let exe = std::env::current_exe()?;
             let mut child = std::process::Command::new(exe);
-            child.arg("daemon")
+            child
+                .arg("daemon")
                 .arg("start")
                 .arg("--foreground")
                 .stdout(std::process::Stdio::null())
@@ -2180,7 +2324,10 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
                     }
                     if quack {
                         let token_display = quack_token.as_deref().unwrap_or("<auto-generated>");
-                        println!("   Quack:  quack://{}/ (token: {})", quack_bind, token_display);
+                        println!(
+                            "   Quack:  quack://{}/ (token: {})",
+                            quack_bind, token_display
+                        );
                     }
                     println!("   Submit: swanflow daemon submit <file>");
                     println!("   Attach: swanflow daemon attach <workflow_id>");
@@ -2219,7 +2366,12 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
         }
         DaemonCommands::Submit { file, socket } => {
             let path = file.to_string_lossy().to_string();
-            let resp = send_daemon_raw(&socket, "workflow.submit", serde_json::json!({"path": path})).await?;
+            let resp = send_daemon_raw(
+                &socket,
+                "workflow.submit",
+                serde_json::json!({"path": path}),
+            )
+            .await?;
             println!("{}", resp);
             Ok(())
         }
@@ -2227,7 +2379,12 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             // Absolute path — the daemon's CWD differs from ours.
             let abs = std::fs::canonicalize(&file)
                 .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", file.display()))?;
-            let resp = send_daemon_raw(&socket, "automation.register", serde_json::json!({"path": abs.to_string_lossy().to_string()})).await?;
+            let resp = send_daemon_raw(
+                &socket,
+                "automation.register",
+                serde_json::json!({"path": abs.to_string_lossy().to_string()}),
+            )
+            .await?;
             println!("{}", resp);
             println!("⚙️  The daemon sensor re-evaluates automation conditions every 30s.");
             Ok(())
@@ -2237,7 +2394,12 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             // than a silent 404-equivalent on the daemon side.
             swanflow::core::engine::automation::parse_webhook_path(&path)
                 .map_err(|e| anyhow::anyhow!("invalid webhook path: {e}"))?;
-            let resp = send_daemon_raw(&socket, "automation.webhook", serde_json::json!({"path": path})).await?;
+            let resp = send_daemon_raw(
+                &socket,
+                "automation.webhook",
+                serde_json::json!({"path": path}),
+            )
+            .await?;
             println!("{}", resp);
             println!("🔔 Pushed. Matching on_webhook conditions fire on the next sensor tick.");
             Ok(())
@@ -2246,11 +2408,17 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             // UUID targets pass through as workflow_id; anything else is
             // treated as a file path (canonicalized like `daemon watch`).
             let (method, params) = match uuid::Uuid::parse_str(&target) {
-                Ok(id) => ("automation.unregister", serde_json::json!({"workflow_id": id.to_string()})),
+                Ok(id) => (
+                    "automation.unregister",
+                    serde_json::json!({"workflow_id": id.to_string()}),
+                ),
                 Err(_) => {
                     let abs = std::fs::canonicalize(&target)
                         .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", target))?;
-                    ("automation.unregister", serde_json::json!({"path": abs.to_string_lossy().to_string()}))
+                    (
+                        "automation.unregister",
+                        serde_json::json!({"path": abs.to_string_lossy().to_string()}),
+                    )
                 }
             };
             let resp = send_daemon_raw(&socket, method, params).await?;
@@ -2271,8 +2439,20 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
                         let id = r.get("workflow_id").and_then(|x| x.as_str()).unwrap_or("?");
                         let path = r.get("path").and_then(|x| x.as_str()).unwrap_or("-");
                         let gen = r.get("generation").and_then(|x| x.as_u64()).unwrap_or(0);
-                        let pend = if r.get("pending_remove").and_then(|x| x.as_bool()).unwrap_or(false) { " [pending-remove]" } else { "" };
-                        let run = if r.get("running").and_then(|x| x.as_bool()).unwrap_or(false) { " [running]" } else { "" };
+                        let pend = if r
+                            .get("pending_remove")
+                            .and_then(|x| x.as_bool())
+                            .unwrap_or(false)
+                        {
+                            " [pending-remove]"
+                        } else {
+                            ""
+                        };
+                        let run = if r.get("running").and_then(|x| x.as_bool()).unwrap_or(false) {
+                            " [running]"
+                        } else {
+                            ""
+                        };
                         println!("👁 {name}  ({id}){run}{pend}");
                         println!("   path: {path}  generation: {gen}");
                         if let Some(lr) = r.get("last_ready").and_then(|x| x.as_object()) {
@@ -2319,19 +2499,36 @@ async fn handle_daemon_command(cmd: DaemonCommands, remote: Option<String>) -> a
             println!("{}", resp);
             Ok(())
         }
-        DaemonCommands::Status { workflow_id, socket } => {
-            let resp = send_daemon_raw(&socket, "workflow.status", serde_json::json!({"workflow_id": workflow_id})).await?;
+        DaemonCommands::Status {
+            workflow_id,
+            socket,
+        } => {
+            let resp = send_daemon_raw(
+                &socket,
+                "workflow.status",
+                serde_json::json!({"workflow_id": workflow_id}),
+            )
+            .await?;
             println!("{}", resp);
             Ok(())
         }
-        DaemonCommands::Cancel { workflow_id, socket } => {
-            let resp = send_daemon_raw(&socket, "workflow.cancel", serde_json::json!({"workflow_id": workflow_id})).await?;
+        DaemonCommands::Cancel {
+            workflow_id,
+            socket,
+        } => {
+            let resp = send_daemon_raw(
+                &socket,
+                "workflow.cancel",
+                serde_json::json!({"workflow_id": workflow_id}),
+            )
+            .await?;
             println!("{}", resp);
             Ok(())
         }
-        DaemonCommands::Attach { workflow_id, socket } => {
-            attach_workflow(&socket, &workflow_id).await
-        }
+        DaemonCommands::Attach {
+            workflow_id,
+            socket,
+        } => attach_workflow(&socket, &workflow_id).await,
     }
 }
 
@@ -2389,14 +2586,20 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
 
     match cmd {
         DaemonCommands::Start { .. } => {
-            let status = Command::new("ssh").arg(host)
-                .arg("swanflow").arg("daemon").arg("start")
+            let status = Command::new("ssh")
+                .arg(host)
+                .arg("swanflow")
+                .arg("daemon")
+                .arg("start")
                 .status()?;
             anyhow::ensure!(status.success(), "Remote daemon start failed");
         }
         DaemonCommands::Stop { .. } => {
-            let _status = Command::new("ssh").arg(host)
-                .arg("swanflow").arg("daemon").arg("stop")
+            let _status = Command::new("ssh")
+                .arg(host)
+                .arg("swanflow")
+                .arg("daemon")
+                .arg("stop")
                 .status()?;
         }
         DaemonCommands::Ping { .. } => {
@@ -2410,7 +2613,10 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
             run_ssh(host, &["swanflow", "daemon", "logs", "--tail", &t])?;
         }
         DaemonCommands::Watch { file, .. } => {
-            let fname = file.file_name().and_then(|s| s.to_str()).unwrap_or("workflow.yaml");
+            let fname = file
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("workflow.yaml");
             let remote_path = format!("/tmp/{}", fname);
             let status = Command::new("scp")
                 .arg(file.to_string_lossy().as_ref())
@@ -2436,7 +2642,10 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
             run_ssh(host, &["swanflow", "daemon", "cancel", &workflow_id])?;
         }
         DaemonCommands::Submit { file, .. } => {
-            let fname = file.file_name().and_then(|s| s.to_str()).unwrap_or("workflow.knwf");
+            let fname = file
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("workflow.knwf");
             let remote_path = format!("/tmp/{}", fname);
             // SCP the file
             let status = Command::new("scp")
@@ -2449,8 +2658,13 @@ async fn handle_remote_daemon(cmd: DaemonCommands, host: &str) -> anyhow::Result
         }
         DaemonCommands::Attach { workflow_id, .. } => {
             // Use ssh -t for PTY — live streaming needs terminal
-            let status = Command::new("ssh").arg("-t").arg(host)
-                .arg("swanflow").arg("daemon").arg("attach").arg(&workflow_id)
+            let status = Command::new("ssh")
+                .arg("-t")
+                .arg(host)
+                .arg("swanflow")
+                .arg("daemon")
+                .arg("attach")
+                .arg(&workflow_id)
                 .status()?;
             anyhow::ensure!(status.success(), "Remote attach failed");
         }
@@ -2479,7 +2693,11 @@ fn probe_local_llm_endpoint(default: &str) -> String {
     if !matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]") {
         return default.to_string();
     }
-    let scheme = if default.starts_with("https") { "https" } else { "http" };
+    let scheme = if default.starts_with("https") {
+        "https"
+    } else {
+        "http"
+    };
 
     // Candidate ports: the requested one FIRST, then the known cc-switch drift
     // set (it moves between these as providers are toggled).
@@ -2513,7 +2731,9 @@ fn probe_local_llm_endpoint(default: &str) -> String {
 fn run_ssh(host: &str, args: &[&str]) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new("ssh");
     cmd.arg(host);
-    for a in args { cmd.arg(a); }
+    for a in args {
+        cmd.arg(a);
+    }
     let output = cmd.output()?;
     if !output.stdout.is_empty() {
         println!("{}", String::from_utf8_lossy(&output.stdout));
@@ -2564,7 +2784,10 @@ mod main_tests {
 // Workflow attach — stream live events from daemon (Herdr-style)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async fn attach_workflow(socket_override: &Option<PathBuf>, workflow_id: &str) -> anyhow::Result<()> {
+async fn attach_workflow(
+    socket_override: &Option<PathBuf>,
+    workflow_id: &str,
+) -> anyhow::Result<()> {
     let socket_path = socket_override
         .clone()
         .unwrap_or_else(swanflow::core::engine::daemon::default_socket_path);
@@ -2578,13 +2801,20 @@ async fn attach_workflow(socket_override: &Option<PathBuf>, workflow_id: &str) -
         "method": "workflow.events",
         "params": {"workflow_id": workflow_id},
     });
-    writer.write_all(serde_json::to_string(&req)?.as_bytes()).await?;
+    writer
+        .write_all(serde_json::to_string(&req)?.as_bytes())
+        .await?;
     writer.write_all(b"\n").await?;
     writer.shutdown().await?;
 
-    println!("📡 Attached to workflow {}. Streaming events...\n", workflow_id);
+    println!(
+        "📡 Attached to workflow {}. Streaming events...\n",
+        workflow_id
+    );
     while let Ok(Some(line)) = lines.next_line().await {
-        if line.trim().is_empty() { continue; }
+        if line.trim().is_empty() {
+            continue;
+        }
         if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
             let evt_type = event["event"].as_str().unwrap_or("");
             match evt_type {
@@ -2595,8 +2825,17 @@ async fn attach_workflow(socket_override: &Option<PathBuf>, workflow_id: &str) -
                     let done = event["nodes_done"].as_u64().unwrap_or(0);
                     let total = event["nodes_total"].as_u64().unwrap_or(0);
                     let errs = event["nodes_error"].as_u64().unwrap_or(0);
-                    let icon = match state { "running" => "▶", "completed" => "✅", "error" => "❌", "cancelled" => "⏹", _ => "·" };
-                    println!("  {} [{}/{}] {} — {} done, {} errors", icon, done, total, name, done, errs);
+                    let icon = match state {
+                        "running" => "▶",
+                        "completed" => "✅",
+                        "error" => "❌",
+                        "cancelled" => "⏹",
+                        _ => "·",
+                    };
+                    println!(
+                        "  {} [{}/{}] {} — {} done, {} errors",
+                        icon, done, total, name, done, errs
+                    );
                 }
                 "workflow.stream_end" => {
                     println!("\n✅ Workflow stream ended.");
@@ -2637,7 +2876,10 @@ fn default_shaper_db() -> String {
 /// Build the upstream closure of `target` (target + all transitive
 /// predecessors + the edges between them) as a standalone Workflow —
 /// the sub-execution unit for `assets backfill`.
-fn upstream_closure(workflow: &swanflow::core::graph::Workflow, target: uuid::Uuid) -> swanflow::core::graph::Workflow {
+fn upstream_closure(
+    workflow: &swanflow::core::graph::Workflow,
+    target: uuid::Uuid,
+) -> swanflow::core::graph::Workflow {
     use petgraph::visit::EdgeRef;
 
     // Find target's NodeIndex.
@@ -2653,12 +2895,10 @@ fn upstream_closure(workflow: &swanflow::core::graph::Workflow, target: uuid::Uu
         let mut wf = Workflow {
             name: workflow.name.clone(),
             ..serde_json::from_value(
-                serde_json::to_value(
-                    swanflow::core::graph::Workflow {
-                        name: workflow.name.clone(),
-                        ..Default::default()
-                    },
-                )
+                serde_json::to_value(swanflow::core::graph::Workflow {
+                    name: workflow.name.clone(),
+                    ..Default::default()
+                })
                 .unwrap_or_default(),
             )
             .unwrap_or_default()
@@ -2675,7 +2915,10 @@ fn upstream_closure(workflow: &swanflow::core::graph::Workflow, target: uuid::Uu
         if !keep.insert(idx) {
             continue;
         }
-        for e in workflow.graph.edges_directed(idx, petgraph::Direction::Incoming) {
+        for e in workflow
+            .graph
+            .edges_directed(idx, petgraph::Direction::Incoming)
+        {
             stack.push(e.source());
         }
     }
@@ -2684,8 +2927,10 @@ fn upstream_closure(workflow: &swanflow::core::graph::Workflow, target: uuid::Uu
     // remapping indices.
     let mut new_graph = workflow.graph.clone();
     new_graph.clear();
-    let mut remap: std::collections::HashMap<petgraph::stable_graph::NodeIndex, petgraph::stable_graph::NodeIndex> =
-        std::collections::HashMap::new();
+    let mut remap: std::collections::HashMap<
+        petgraph::stable_graph::NodeIndex,
+        petgraph::stable_graph::NodeIndex,
+    > = std::collections::HashMap::new();
     // Deterministic order: original node_indices order.
     let mut kept_sorted: Vec<_> = workflow
         .graph

@@ -121,21 +121,33 @@ impl LedgerGuard {
             // Lock file unopenable (read-only cache dir?) — writes must
             // be refused; readers may still proceed via open()'s Err.
             tracing::error!("assets.lock unopenable — ledger writes refused");
-            return Self { _pm: Some(pm), _file: None, exclusive: false };
+            return Self {
+                _pm: Some(pm),
+                _file: None,
+                exclusive: false,
+            };
         };
         let deadline = std::time::Instant::now() + timeout;
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => {
                     GUARD_EXCLUSIVE.with(|e| e.set(true));
-                    return Self { _pm: Some(pm), _file: Some(file), exclusive: true };
+                    return Self {
+                        _pm: Some(pm),
+                        _file: Some(file),
+                        exclusive: true,
+                    };
                 }
                 Err(_) if std::time::Instant::now() >= deadline => {
                     tracing::error!(
                         "assets.lock busy >{:?} — refusing uncoordinated ledger write",
                         timeout
                     );
-                    return Self { _pm: Some(pm), _file: Some(file), exclusive: false };
+                    return Self {
+                        _pm: Some(pm),
+                        _file: Some(file),
+                        exclusive: false,
+                    };
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
             }
@@ -199,9 +211,7 @@ fn canonicalize_json_str(s: &str) -> String {
                 }
                 serde_json::Value::Object(out)
             }
-            serde_json::Value::Array(a) => {
-                serde_json::Value::Array(a.iter().map(sorted).collect())
-            }
+            serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(sorted).collect()),
             other => other.clone(),
         }
     }
@@ -274,16 +284,15 @@ pub fn compute_digest(
     upd(&mut h, iv_start.as_bytes());
     upd(&mut h, iv_end.as_bytes());
     // Order-independent: sort upstream by id for deterministic digests.
-    let mut ups: Vec<(Uuid, &[u8; 32])> = upstream
-        .iter()
-        .map(|(id, d)| (*id, &d.bytes))
-        .collect();
+    let mut ups: Vec<(Uuid, &[u8; 32])> = upstream.iter().map(|(id, d)| (*id, &d.bytes)).collect();
     ups.sort_by_key(|(id, _)| *id);
     for (id, digest) in ups {
         upd(&mut h, id.as_bytes());
         upd(&mut h, digest);
     }
-    UpstreamDigest { bytes: h.finalize().into() }
+    UpstreamDigest {
+        bytes: h.finalize().into(),
+    }
 }
 
 /// One row of asset status (for `swanflow assets list`).
@@ -332,19 +341,39 @@ fn open_ledger_connection(path: &Path) -> anyhow::Result<duckdb::Connection> {
             if !ledger_open_error_is_structural(&msg) {
                 return Err(e.into());
             }
-            let base = path.file_name().and_then(|f| f.to_str()).unwrap_or("assets.duckdb");
-            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-            let backup = path.with_file_name(format!("{base}.corrupt-{}-{nanos}", std::process::id()));
+            let base = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("assets.duckdb");
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let backup =
+                path.with_file_name(format!("{base}.corrupt-{}-{nanos}", std::process::id()));
             if let Err(w) = std::fs::rename(path, &backup) {
-                eprintln!("[assets] ledger unreadable ({}) and backup FAILED — file left in place: {w}", msg.lines().next().unwrap_or(&msg));
-                return Err(anyhow::anyhow!("asset ledger unreadable and backup failed: {msg}"));
+                eprintln!(
+                    "[assets] ledger unreadable ({}) and backup FAILED — file left in place: {w}",
+                    msg.lines().next().unwrap_or(&msg)
+                );
+                return Err(anyhow::anyhow!(
+                    "asset ledger unreadable and backup failed: {msg}"
+                ));
             }
             let wal = path.with_file_name(format!("{base}.wal"));
             if wal.exists() {
-                let _ = std::fs::rename(&wal, path.with_file_name(format!("{base}.wal.corrupt-{}-{nanos}", std::process::id())));
+                let _ = std::fs::rename(
+                    &wal,
+                    path.with_file_name(format!(
+                        "{base}.wal.corrupt-{}-{nanos}",
+                        std::process::id()
+                    )),
+                );
             }
             eprintln!("[assets] ledger unreadable ({}); backed up to {} and opening a fresh ledger — previous run history in the ledger is gone.", msg.lines().next().unwrap_or(&msg), backup.display());
-            duckdb::Connection::open(path).map_err(|e2| anyhow::anyhow!("asset ledger rebuilt after corruption but re-open failed: {e2}"))
+            duckdb::Connection::open(path).map_err(|e2| {
+                anyhow::anyhow!("asset ledger rebuilt after corruption but re-open failed: {e2}")
+            })
         }
     }
 }
@@ -382,7 +411,9 @@ impl AssetLedger {
         // checkpoint) has produced DuckDB InternalException
         // (MarkBlockAsModified on an already-modified block).
         if conn
-            .execute_batch("SELECT 1 FROM asset_runs LIMIT 1; SELECT 1 FROM asset_intervals LIMIT 1")
+            .execute_batch(
+                "SELECT 1 FROM asset_runs LIMIT 1; SELECT 1 FROM asset_intervals LIMIT 1",
+            )
             .is_err()
         {
             conn.execute_batch(
@@ -409,7 +440,10 @@ impl AssetLedger {
         // another process's write is the corruption we must prevent).
         let _ = conn.execute_batch("CHECKPOINT");
         drop(guard);
-        Ok(Self { conn, cache_dir: cache_dir.to_path_buf() })
+        Ok(Self {
+            conn,
+            cache_dir: cache_dir.to_path_buf(),
+        })
     }
 
     /// Serialize a write against other processes (and our own process's
@@ -435,7 +469,9 @@ impl AssetLedger {
         let scoped = open_ledger_connection(&path)?;
         // First-use DDL (existence probe pattern from open()).
         if scoped
-            .execute_batch("SELECT 1 FROM asset_runs LIMIT 1; SELECT 1 FROM asset_intervals LIMIT 1")
+            .execute_batch(
+                "SELECT 1 FROM asset_runs LIMIT 1; SELECT 1 FROM asset_intervals LIMIT 1",
+            )
             .is_err()
         {
             scoped.execute_batch(
@@ -455,7 +491,10 @@ impl AssetLedger {
                  );",
             )?;
         }
-        let writer = AssetLedger { conn: scoped, cache_dir: self.cache_dir.clone() };
+        let writer = AssetLedger {
+            conn: scoped,
+            cache_dir: self.cache_dir.clone(),
+        };
         let r = f(&writer);
         // Flush inside the guard, then drop the scoped connection still
         // inside it — the lazy drop-checkpoint stays coordinated too.
@@ -493,7 +532,10 @@ impl AssetLedger {
 
     /// Last successful materialization time for a node (None = never).
     /// Guard-scoped fresh connection (see recorded_digest).
-    pub fn last_materialized_at(&self, node_id: Uuid) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    pub fn last_materialized_at(
+        &self,
+        node_id: Uuid,
+    ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
         self.with_write_guard(|this| {
             let mut stmt = this
                 .conn
@@ -512,11 +554,15 @@ impl AssetLedger {
     /// connection (see recorded_digest).
     pub fn all(&self) -> anyhow::Result<Vec<(String, String, String)>> {
         self.with_write_guard(|this| {
-            let mut stmt = this
-                .conn
-                .prepare("SELECT node_id, digest_hex, last_run_at FROM asset_runs ORDER BY node_id")?;
+            let mut stmt = this.conn.prepare(
+                "SELECT node_id, digest_hex, last_run_at FROM asset_runs ORDER BY node_id",
+            )?;
             let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?;
             let mut out = Vec::new();
             for r in rows {
@@ -710,8 +756,7 @@ impl AssetLedger {
                 (*id, recorded)
             })
             .collect();
-        let refs: Vec<(Uuid, &UpstreamDigest)> =
-            ups.iter().map(|(id, d)| (*id, d)).collect();
+        let refs: Vec<(Uuid, &UpstreamDigest)> = ups.iter().map(|(id, d)| (*id, d)).collect();
         let digest = compute_digest(node_id, type_id, node_config_json, rendered_config, &refs);
         self.record_run(node_id, &digest)
     }
@@ -750,7 +795,10 @@ pub fn record_asset_run(
     };
     let mut needs_init = true;
     // Cheap existence probe: SELECT from the table; on failure run DDL.
-    if conn.execute_batch("SELECT 1 FROM asset_runs LIMIT 1").is_ok() {
+    if conn
+        .execute_batch("SELECT 1 FROM asset_runs LIMIT 1")
+        .is_ok()
+    {
         needs_init = false;
     }
     if needs_init {
@@ -778,10 +826,17 @@ pub fn record_asset_run(
     // loss). After an explicit CHECKPOINT it is clean and its drop is a
     // no-op write-wise.
     let _ = conn.execute_batch("CHECKPOINT");
-    let ledger = AssetLedger { conn, cache_dir: std::path::PathBuf::from(cache_dir) };
-    if let Err(e) =
-        ledger.record_asset_run_for(node_id, type_id, node_config_json, rendered_config, upstream)
-    {
+    let ledger = AssetLedger {
+        conn,
+        cache_dir: std::path::PathBuf::from(cache_dir),
+    };
+    if let Err(e) = ledger.record_asset_run_for(
+        node_id,
+        type_id,
+        node_config_json,
+        rendered_config,
+        upstream,
+    ) {
         eprintln!("[assets] ledger record failed (ignored): {}", e);
     }
     // record_asset_run_for flushed via with_write_guard; drop the
@@ -823,11 +878,9 @@ fn parquet_footer_fingerprint(path: &std::path::Path) -> Option<String> {
     }
     let meta = reader.finish().ok()?;
     let fmeta = meta.file_metadata();
-    let arrow_schema = parquet::arrow::parquet_to_arrow_schema(
-        fmeta.schema_descr(),
-        fmeta.key_value_metadata(),
-    )
-    .ok()?;
+    let arrow_schema =
+        parquet::arrow::parquet_to_arrow_schema(fmeta.schema_descr(), fmeta.key_value_metadata())
+            .ok()?;
     Some(schema_fingerprint(&arrow_schema))
 }
 
@@ -869,7 +922,10 @@ pub fn try_skip_fresh(
         // already backed up + rebuilt inside the helper.
         Err(_) => return None,
     };
-    let ledger = AssetLedger { conn, cache_dir: std::path::PathBuf::from(cache_dir) };
+    let ledger = AssetLedger {
+        conn,
+        cache_dir: std::path::PathBuf::from(cache_dir),
+    };
     eprintln!("DBG guard-ok ledger-opened");
     // codex-review P1: skip only on a COMPLETE upstream digest set. A
     // missing upstream (filter_map upstream of us silently dropped it)
@@ -878,13 +934,14 @@ pub fn try_skip_fresh(
     if upstream.len() != upstream_digests.len() {
         return None;
     }
-    let refs: Vec<(Uuid, &UpstreamDigest)> = upstream_digests
-        .iter()
-        .map(|(id, d)| (*id, d))
-        .collect();
+    let refs: Vec<(Uuid, &UpstreamDigest)> =
+        upstream_digests.iter().map(|(id, d)| (*id, d)).collect();
     let recomputed = compute_digest(node_id, type_id, node_config_json, rendered_config, &refs);
     let recorded = ledger.recorded_digest(node_id).ok()??;
-    eprintln!("DBG digest recorded={recorded} recomputed={}", recomputed.hex());
+    eprintln!(
+        "DBG digest recorded={recorded} recomputed={}",
+        recomputed.hex()
+    );
     if recorded != recomputed.hex() {
         eprintln!("DBG bail: digest mismatch");
         return None;
@@ -893,15 +950,20 @@ pub fn try_skip_fresh(
     let metadata_path = std::path::Path::new(cache_dir).join("metadata.duckdb");
     eprintln!("DBG opening metadata: {}", metadata_path.display());
     let conn = duckdb::Connection::open(&metadata_path);
-    eprintln!("DBG metadata open: {:?}", conn.as_ref().err().map(|e| e.to_string()));
+    eprintln!(
+        "DBG metadata open: {:?}",
+        conn.as_ref().err().map(|e| e.to_string())
+    );
     let conn = conn.ok()?;
-    let qres = conn
-        .query_row(
-            "SELECT parquet_path FROM flow_metadata WHERE node_id = ? AND parquet_path != ''",
-            [&node_id.to_string()],
-            |row| row.get(0),
-        );
-    eprintln!("DBG query: {:?}", qres.as_ref().err().map(|e| e.to_string()));
+    let qres = conn.query_row(
+        "SELECT parquet_path FROM flow_metadata WHERE node_id = ? AND parquet_path != ''",
+        [&node_id.to_string()],
+        |row| row.get(0),
+    );
+    eprintln!(
+        "DBG query: {:?}",
+        qres.as_ref().err().map(|e| e.to_string())
+    );
     let parquet_path: Option<String> = qres.ok().flatten();
     let parquet_path = parquet_path?;
     eprintln!("DBG metadata-row found: {parquet_path}");
@@ -950,11 +1012,15 @@ pub fn recompute_digest(
     rendered_config: &str,
     upstream_digests: &[(Uuid, UpstreamDigest)],
 ) -> Option<UpstreamDigest> {
-    let refs: Vec<(Uuid, &UpstreamDigest)> = upstream_digests
-        .iter()
-        .map(|(id, d)| (*id, d))
-        .collect();
-    Some(compute_digest(node_id, type_id, node_config_json, rendered_config, &refs))
+    let refs: Vec<(Uuid, &UpstreamDigest)> =
+        upstream_digests.iter().map(|(id, d)| (*id, d)).collect();
+    Some(compute_digest(
+        node_id,
+        type_id,
+        node_config_json,
+        rendered_config,
+        &refs,
+    ))
 }
 
 /// Per-node staleness verdict for `assets status`.
@@ -1013,19 +1079,16 @@ pub fn status_for_workflow(
                 digest_map.get(&un.id).map(|d| (un.id, d.clone()))
             })
             .collect();
-        let refs: Vec<(Uuid, &UpstreamDigest)> =
-            upstream.iter().map(|(id, d)| (*id, d)).collect();
+        let refs: Vec<(Uuid, &UpstreamDigest)> = upstream.iter().map(|(id, d)| (*id, d)).collect();
         // v3: render with the same context the staged executor renders
         // with (workflow.context at compile time — see compiler.rs
         // run_preflight and the precomputed maps in engine/mod.rs), so
         // `assets status` verdicts stay symmetric with the digests the
         // engine records/skips on. (Sub-workflow nodes are not in this
         // top-level graph and are not verdicted here.)
-        let rendered = crate::core::templating::TemplateEngine::render_json(
-            &node.config,
-            &workflow.context,
-        )
-        .to_string();
+        let rendered =
+            crate::core::templating::TemplateEngine::render_json(&node.config, &workflow.context)
+                .to_string();
         let digest = compute_digest(
             node.id,
             &node.type_id,
@@ -1067,7 +1130,6 @@ pub fn status_for_workflow(
     Ok(out)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1089,9 +1151,7 @@ mod tests {
     static DIGEST_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn guard_digest_test() -> std::sync::MutexGuard<'static, ()> {
-        DIGEST_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        DIGEST_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     #[test]
@@ -1099,7 +1159,12 @@ mod tests {
         use chrono::NaiveDate;
         let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
         // done: 1st, 4th, 5th, 8th — range 1..=8
-        let done = vec![d("2026-09-01"), d("2026-09-04"), d("2026-09-05"), d("2026-09-08")];
+        let done = vec![
+            d("2026-09-01"),
+            d("2026-09-04"),
+            d("2026-09-05"),
+            d("2026-09-08"),
+        ];
         let gaps = daily_gaps(&done, d("2026-09-01"), d("2026-09-08"));
         // expect: [2..=3] batch, [6..=7] batch
         assert_eq!(gaps.len(), 2);
@@ -1125,7 +1190,13 @@ mod tests {
         let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
         let done = vec![d("2026-08-31"), d("2026-09-02")];
         let gaps = daily_gaps(&done, d("2026-09-01"), d("2026-09-03"));
-        assert_eq!(gaps, vec![(d("2026-09-01"), d("2026-09-01")), (d("2026-09-03"), d("2026-09-03"))]);
+        assert_eq!(
+            gaps,
+            vec![
+                (d("2026-09-01"), d("2026-09-01")),
+                (d("2026-09-03"), d("2026-09-03"))
+            ]
+        );
     }
 
     #[test]
@@ -1141,10 +1212,12 @@ mod tests {
     /// exactly as ArrowWriter does at materialization — the skip side
     /// must read the footer, never trust the file's mere existence
     /// (ADR-015 rule 6).
-    fn write_test_parquet(path: &std::path::Path, schema: &std::sync::Arc<arrow::datatypes::Schema>) {
+    fn write_test_parquet(
+        path: &std::path::Path,
+        schema: &std::sync::Arc<arrow::datatypes::Schema>,
+    ) {
         let file = std::fs::File::create(path).unwrap();
-        let mut writer =
-            parquet::arrow::ArrowWriter::try_new(file, schema.clone(), None).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema.clone(), None).unwrap();
         writer
             .write(&arrow::array::RecordBatch::new_empty(schema.clone()))
             .unwrap();
@@ -1174,7 +1247,9 @@ mod tests {
 
         // Record a run, then skip should find a matching parquet.
         let ledger = AssetLedger::open(std::path::Path::new(&dir_s)).unwrap();
-        ledger.record_asset_run_for(Uuid::nil(), "t", "{}", "", &[]).unwrap();
+        ledger
+            .record_asset_run_for(Uuid::nil(), "t", "{}", "", &[])
+            .unwrap();
         let parquet = dir.join("dummy.parquet");
         let schema = test_schema();
         write_test_parquet(&parquet, &schema);
@@ -1188,11 +1263,16 @@ mod tests {
             [Uuid::nil().to_string(), "t".to_string(), "dummy.parquet".to_string(), fp.clone()],
         ).unwrap();
         let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]);
-        assert!(got.is_none(), "relative parquet_path must not skip: {:?}", got);
+        assert!(
+            got.is_none(),
+            "relative parquet_path must not skip: {:?}",
+            got
+        );
 
         // Absolute path (as MaterializingStream records) -> skip
         let abs = parquet.to_str().unwrap().to_string();
-        meta.execute("UPDATE flow_metadata SET parquet_path = ?;", [abs.clone()]).unwrap();
+        meta.execute("UPDATE flow_metadata SET parquet_path = ?;", [abs.clone()])
+            .unwrap();
         let _ = meta.execute_batch("CHECKPOINT"); // WAL: fresh reader connections must see this row
         drop(meta); // release the file lock before re-opening inside try_skip_fresh
         let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]);
@@ -1207,27 +1287,39 @@ mod tests {
     #[test]
     fn digest_depends_on_rendered_config() {
         let _g = guard_digest_test(); // serialize env-sensitive digest tests
-        // v3: the rendered config (template-resolved values execution
-        // actually used) is part of the digest. Same raw config +
-        // different rendered config -> different digest (this is the fix
-        // for the stale-reuse hole where {{iteration}}/{{input}} changed
-        // outputs while the raw config stayed byte-identical).
+                                      // v3: the rendered config (template-resolved values execution
+                                      // actually used) is part of the digest. Same raw config +
+                                      // different rendered config -> different digest (this is the fix
+                                      // for the stale-reuse hole where {{iteration}}/{{input}} changed
+                                      // outputs while the raw config stayed byte-identical).
         let id = Uuid::new_v4();
         let raw = r#"{"query":"SELECT '{{iteration}}' AS v"}"#;
         let r1 = compute_digest(id, "t", raw, r#"{"query":"SELECT '1' AS v"}"#, &[]);
         let r2 = compute_digest(id, "t", raw, r#"{"query":"SELECT '2' AS v"}"#, &[]);
-        assert_ne!(r1.hex(), r2.hex(), "same raw config, different rendered -> different digest");
+        assert_ne!(
+            r1.hex(),
+            r2.hex(),
+            "same raw config, different rendered -> different digest"
+        );
         // Deterministic: same rendered bytes -> same digest.
         let r1b = compute_digest(id, "t", raw, r#"{"query":"SELECT '1' AS v"}"#, &[]);
         assert_eq!(r1.hex(), r1b.hex());
         // Empty rendered context (context unavailable) must not collide
         // with a populated render.
         let e = compute_digest(id, "t", raw, "", &[]);
-        assert_ne!(e.hex(), r1.hex(), "empty rendered context must not equal a populated one");
+        assert_ne!(
+            e.hex(),
+            r1.hex(),
+            "empty rendered context must not equal a populated one"
+        );
         // Rendered key order must not matter (canonicalized like raw config).
         let k1 = compute_digest(id, "t", "{}", r#"{"a":1,"b":2}"#, &[]);
         let k2 = compute_digest(id, "t", "{}", r#"{"b":2,"a":1}"#, &[]);
-        assert_eq!(k1.hex(), k2.hex(), "rendered key order must not change the digest");
+        assert_eq!(
+            k1.hex(),
+            k2.hex(),
+            "rendered key order must not change the digest"
+        );
     }
 
     #[test]
@@ -1288,7 +1380,10 @@ mod tests {
             &[],
             &[],
         );
-        assert!(got.is_none(), "rendered-context change must invalidate the skip: {got:?}");
+        assert!(
+            got.is_none(),
+            "rendered-context change must invalidate the skip: {got:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1331,10 +1426,16 @@ mod tests {
         let id = Uuid::new_v4();
         assert!(ledger.recorded_digest(id).unwrap().is_none());
         ledger.record_run(id, &d(7)).unwrap();
-        assert_eq!(ledger.recorded_digest(id).unwrap().as_deref(), Some(d(7).hex().as_str()));
+        assert_eq!(
+            ledger.recorded_digest(id).unwrap().as_deref(),
+            Some(d(7).hex().as_str())
+        );
         // overwrite
         ledger.record_run(id, &d(8)).unwrap();
-        assert_eq!(ledger.recorded_digest(id).unwrap().as_deref(), Some(d(8).hex().as_str()));
+        assert_eq!(
+            ledger.recorded_digest(id).unwrap().as_deref(),
+            Some(d(8).hex().as_str())
+        );
         let all = ledger.all().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].0, id.to_string());
@@ -1344,8 +1445,8 @@ mod tests {
     #[test]
     fn digest_ignores_json_key_order() {
         let _g = guard_digest_test(); // serialize env-sensitive digest tests
-        // P2: preserve_order bakes insertion order into config.to_string();
-        // merely re-ordering keys must NOT change the digest (phantom stale).
+                                      // P2: preserve_order bakes insertion order into config.to_string();
+                                      // merely re-ordering keys must NOT change the digest (phantom stale).
         let id = Uuid::nil();
         let a = compute_digest(id, "t", r#"{"x":1,"y":{"b":2,"a":3}}"#, "", &[]);
         let b = compute_digest(id, "t", r#"{"y":{"a":3,"b":2},"x":1}"#, "", &[]);
@@ -1362,7 +1463,7 @@ mod tests {
     #[test]
     fn digest_framing_disambiguates_concatenations() {
         let _g = guard_digest_test(); // serialize env-sensitive digest tests
-        // P2: length-prefix prevents ("ab","c") vs ("a","bc") collisions.
+                                      // P2: length-prefix prevents ("ab","c") vs ("a","bc") collisions.
         let id = Uuid::nil();
         // type_id "ab" + config "c" vs type_id "a" + config "bc"
         let a = compute_digest(id, "ab", "c", "", &[]);
@@ -1410,9 +1511,9 @@ mod tests {
     #[test]
     fn digest_changes_with_interval_env() {
         let _g = guard_digest_test(); // serialize env-sensitive digest tests
-        // codex-review P0 (domain C): backfill binds ${interval_start} at
-        // execution time; the digest must see the interval or every day
-        // reuses day 1's parquet under SWANFLOW_SKIP_FRESH=1.
+                                      // codex-review P0 (domain C): backfill binds ${interval_start} at
+                                      // execution time; the digest must see the interval or every day
+                                      // reuses day 1's parquet under SWANFLOW_SKIP_FRESH=1.
         let id = Uuid::nil();
         let d1 = UpstreamDigest { bytes: [1; 32] };
 
@@ -1434,8 +1535,15 @@ mod tests {
         std::env::remove_var("SWANFLOW_INTERVAL_END");
 
         assert_ne!(day1.hex(), day2.hex(), "different days must differ");
-        assert_ne!(base.hex(), day1.hex(), "interval run must differ from no-interval run");
-        assert_eq!(base.hex(), compute_digest(id, "t", "{}", "", &[(id, &d1)]).hex());
+        assert_ne!(
+            base.hex(),
+            day1.hex(),
+            "interval run must differ from no-interval run"
+        );
+        assert_eq!(
+            base.hex(),
+            compute_digest(id, "t", "{}", "", &[(id, &d1)]).hex()
+        );
     }
 
     #[test]
@@ -1491,7 +1599,12 @@ mod tests {
                 let ledger = AssetLedger::open(std::path::Path::new(&d)).unwrap();
                 let id = Uuid::new_v4();
                 ledger
-                    .record_run(id, &UpstreamDigest { bytes: [i as u8; 32] })
+                    .record_run(
+                        id,
+                        &UpstreamDigest {
+                            bytes: [i as u8; 32],
+                        },
+                    )
                     .unwrap();
                 drop(ledger); // normal lifecycle — drop outside any guard
             }));
@@ -1511,10 +1624,7 @@ mod tests {
         // writing a ledger the outer flock does not cover. It must be
         // degraded to non-exclusive (write refused) instead, while a
         // nested guard on the SAME cache still inherits.
-        let base = std::env::temp_dir().join(format!(
-            "swanflow_nest_{}",
-            std::process::id()
-        ));
+        let base = std::env::temp_dir().join(format!("swanflow_nest_{}", std::process::id()));
         let dir_a = base.join("a");
         let dir_b = base.join("b");
         let _ = std::fs::remove_dir_all(&base);
@@ -1522,25 +1632,17 @@ mod tests {
         std::fs::create_dir_all(&dir_b).unwrap();
 
         // Outer guard on A, properly acquired.
-        let outer = LedgerGuard::acquire_with_deadline(
-            &dir_a,
-            std::time::Duration::from_secs(5),
-        );
+        let outer = LedgerGuard::acquire_with_deadline(&dir_a, std::time::Duration::from_secs(5));
         assert!(outer.exclusive());
 
         // Nested guard, same cache -> inherits exclusivity.
-        let same = LedgerGuard::acquire_with_deadline(
-            &dir_a,
-            std::time::Duration::from_millis(50),
-        );
+        let same = LedgerGuard::acquire_with_deadline(&dir_a, std::time::Duration::from_millis(50));
         assert!(same.exclusive(), "same-cache nested guard must inherit");
         drop(same);
 
         // Nested guard, DIFFERENT cache -> must NOT inherit.
-        let cross = LedgerGuard::acquire_with_deadline(
-            &dir_b,
-            std::time::Duration::from_millis(50),
-        );
+        let cross =
+            LedgerGuard::acquire_with_deadline(&dir_b, std::time::Duration::from_millis(50));
         assert!(
             !cross.exclusive(),
             "cross-cache nested guard must be non-exclusive (write refused)"
@@ -1549,11 +1651,12 @@ mod tests {
         drop(outer);
 
         // After the outer guard drops, a fresh guard on B acquires fine.
-        let fresh = LedgerGuard::acquire_with_deadline(
-            &dir_b,
-            std::time::Duration::from_millis(500),
+        let fresh =
+            LedgerGuard::acquire_with_deadline(&dir_b, std::time::Duration::from_millis(500));
+        assert!(
+            fresh.exclusive(),
+            "guard on B must acquire after outer dropped"
         );
-        assert!(fresh.exclusive(), "guard on B must acquire after outer dropped");
         drop(fresh);
 
         let _ = std::fs::remove_dir_all(&base);
@@ -1564,10 +1667,7 @@ mod tests {
         // A structurally-unreadable ledger (non-DuckDB bytes — e.g. clobbered
         // by a wrong build or a version-bumped file the current binary can't
         // read) must be backed up + reopened fresh, not silently disabled.
-        let dir = std::env::temp_dir().join(format!(
-            "swanflow_corrupt_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("swanflow_corrupt_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1576,7 +1676,8 @@ mod tests {
 
         // open_ledger_connection must recover: usable connection now, and a
         // .corrupt-* backup of the bad file must exist.
-        let conn = open_ledger_connection(std::path::Path::new(&dir.join("assets.duckdb"))).expect("corrupt ledger must be recovered");
+        let conn = open_ledger_connection(std::path::Path::new(&dir.join("assets.duckdb")))
+            .expect("corrupt ledger must be recovered");
         // A usable connection now (open_ledger_connection does NOT run DDL —
         // the caller does; just prove the file is openable).
         conn.execute_batch("SELECT 1").unwrap();
@@ -1588,7 +1689,10 @@ mod tests {
                     .to_string_lossy()
                     .starts_with("assets.duckdb.corrupt-")
             });
-        assert!(backed_up, "corrupt ledger must be backed up with a .corrupt- suffix");
+        assert!(
+            backed_up,
+            "corrupt ledger must be backed up with a .corrupt- suffix"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
@@ -1628,7 +1732,10 @@ mod tests {
         let recorded = schema_fingerprint(schema.as_ref());
         assert_eq!(recorded, "name:Utf8,view:Utf8View,amount:Float64");
         let footer = parquet_footer_fingerprint(&path).expect("footer must be readable");
-        assert_eq!(footer, recorded, "footer fingerprint must round-trip byte-exact");
+        assert_eq!(
+            footer, recorded,
+            "footer fingerprint must round-trip byte-exact"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1638,13 +1745,16 @@ mod tests {
         // the recorded schema fingerprint does NOT match the footer
         // (engine upgrade / schema drift) -> the artifact is NOT reusable:
         // skip must fail closed to re-execution, never silently reuse.
-        let dir = std::env::temp_dir().join(format!("swanflow_skipmismatch_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("swanflow_skipmismatch_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir_s = dir.to_str().unwrap().to_string();
 
         let ledger = AssetLedger::open(std::path::Path::new(&dir_s)).unwrap();
-        ledger.record_asset_run_for(Uuid::nil(), "t", "{}", "", &[]).unwrap();
+        ledger
+            .record_asset_run_for(Uuid::nil(), "t", "{}", "", &[])
+            .unwrap();
         let parquet = dir.join("dummy.parquet");
         let schema = test_schema();
         write_test_parquet(&parquet, &schema);
@@ -1661,7 +1771,10 @@ mod tests {
         drop(meta);
 
         let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]);
-        assert!(got.is_none(), "schema fingerprint mismatch must fail closed: {got:?}");
+        assert!(
+            got.is_none(),
+            "schema fingerprint mismatch must fail closed: {got:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1671,13 +1784,16 @@ mod tests {
         // placeholder '{}', '' or NULL): skip fails closed ONCE — this is
         // migration semantics, not an error. After the (simulated) rerun
         // records a real fingerprint the same artifact skips.
-        let dir = std::env::temp_dir().join(format!("swanflow_skipemptyschema_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("swanflow_skipemptyschema_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir_s = dir.to_str().unwrap().to_string();
 
         let ledger = AssetLedger::open(std::path::Path::new(&dir_s)).unwrap();
-        ledger.record_asset_run_for(Uuid::nil(), "t", "{}", "", &[]).unwrap();
+        ledger
+            .record_asset_run_for(Uuid::nil(), "t", "{}", "", &[])
+            .unwrap();
         let parquet = dir.join("dummy.parquet");
         let schema = test_schema();
         write_test_parquet(&parquet, &schema);
@@ -1702,7 +1818,8 @@ mod tests {
 
         // B: empty string
         let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
-        meta.execute_batch("UPDATE flow_metadata SET schema_json = '';").unwrap();
+        meta.execute_batch("UPDATE flow_metadata SET schema_json = '';")
+            .unwrap();
         drop(meta);
         assert!(
             try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]).is_none(),
@@ -1711,7 +1828,8 @@ mod tests {
 
         // C: NULL
         let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
-        meta.execute_batch("UPDATE flow_metadata SET schema_json = NULL;").unwrap();
+        meta.execute_batch("UPDATE flow_metadata SET schema_json = NULL;")
+            .unwrap();
         drop(meta);
         assert!(
             try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]).is_none(),
@@ -1720,7 +1838,8 @@ mod tests {
 
         // The rerun re-records the real fingerprint -> the next run skips.
         let meta = duckdb::Connection::open(dir.join("metadata.duckdb").to_str().unwrap()).unwrap();
-        meta.execute_batch(&format!("UPDATE flow_metadata SET schema_json = '{fp}';")).unwrap();
+        meta.execute_batch(&format!("UPDATE flow_metadata SET schema_json = '{fp}';"))
+            .unwrap();
         drop(meta);
         let got = try_skip_fresh(&dir_s, Uuid::nil(), "t", "{}", "", &[], &[]);
         assert_eq!(

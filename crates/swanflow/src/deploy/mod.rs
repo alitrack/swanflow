@@ -10,8 +10,8 @@
 //! motherduck-flight.md) and stamped into every generated program header:
 //! runs-as-owner | at-least-once | version-locks at run time.
 
-pub mod motherduck;
 pub mod deployer;
+pub mod motherduck;
 
 use crate::core::graph::Workflow;
 use petgraph::visit::EdgeRef;
@@ -151,12 +151,13 @@ fn render_template(
         };
         let key = after[..end].trim();
         let value = if let Some(idx) = key.strip_prefix("input_") {
-            let port: u32 = idx.parse().map_err(|_| {
-                format!("{node_label}: bad input port reference '{key}'")
-            })?;
-            input_tables.get(&port).cloned().ok_or_else(|| {
-                format!("{node_label}: no upstream table for '{key}'")
-            })?
+            let port: u32 = idx
+                .parse()
+                .map_err(|_| format!("{node_label}: bad input port reference '{key}'"))?;
+            input_tables
+                .get(&port)
+                .cloned()
+                .ok_or_else(|| format!("{node_label}: no upstream table for '{key}'"))?
         } else if let Some(nid) = key.strip_prefix("node_") {
             format!("node_{nid}")
         } else {
@@ -175,7 +176,6 @@ fn render_template(
 pub(crate) fn sql_quote(s: &str) -> String {
     s.replace('\'', "''")
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -205,8 +205,22 @@ mod tests {
         let ia = g.add_node(mk(a, "core.io.csv_read"));
         let ib = g.add_node(mk(b, "core.sql"));
         let ic = g.add_node(mk(c, "core.io.duckdb_write"));
-        g.add_edge(ia, ib, crate::core::graph::EdgeInstance { source_port: 0, target_port: 0 });
-        g.add_edge(ib, ic, crate::core::graph::EdgeInstance { source_port: 0, target_port: 0 });
+        g.add_edge(
+            ia,
+            ib,
+            crate::core::graph::EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        );
+        g.add_edge(
+            ib,
+            ic,
+            crate::core::graph::EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        );
         let _ = g.add_node(mk(d, "core.sql")); // isolated
         wf.graph = g;
         wf

@@ -104,10 +104,12 @@ fn column_lineage_from_query(q: &Query) -> ColumnLineage {
             sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
                 let srcs = expr_column_sources(expr);
                 if !srcs.is_empty() {
-                    out.columns.insert(alias.value.clone(), resolve_aliases(srcs, &sources));
+                    out.columns
+                        .insert(alias.value.clone(), resolve_aliases(srcs, &sources));
                 }
             }
-            sqlparser::ast::SelectItem::Wildcard(_) | sqlparser::ast::SelectItem::QualifiedWildcard(..) => {
+            sqlparser::ast::SelectItem::Wildcard(_)
+            | sqlparser::ast::SelectItem::QualifiedWildcard(..) => {
                 // Wildcards need schema knowledge; skipped (documented limit).
             }
         }
@@ -159,7 +161,12 @@ fn collect_from(tf: &TableFactor, out: &mut Vec<(String, String)>) {
                 .unwrap_or_else(|| table.clone());
             out.push((alias_or_name, table));
         }
-        TableFactor::Derived { lateral, subquery, alias, .. } => {
+        TableFactor::Derived {
+            lateral,
+            subquery,
+            alias,
+            ..
+        } => {
             let _ = lateral;
             let _ = subquery;
             // Derived tables: record alias with itself as table (column
@@ -204,14 +211,14 @@ impl sqlparser::ast::Visitor for ColumnRefVisitor {
             Expr::Identifier(ident) => {
                 self.refs.push((None, ident.value.clone()));
             }
-            Expr::CompoundIdentifier(parts)
-                if parts.len() >= 2 => {
-                    let qual: Vec<&str> = parts[..parts.len() - 1]
-                        .iter()
-                        .map(|i| i.value.as_str())
-                        .collect();
-                    self.refs.push((Some(qual.join(".")), parts.last().unwrap().value.clone()));
-                }
+            Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {
+                let qual: Vec<&str> = parts[..parts.len() - 1]
+                    .iter()
+                    .map(|i| i.value.as_str())
+                    .collect();
+                self.refs
+                    .push((Some(qual.join(".")), parts.last().unwrap().value.clone()));
+            }
             _ => {}
         }
         std::ops::ControlFlow::Continue(())
@@ -229,8 +236,14 @@ mod tests {
     #[test]
     fn passthrough_columns() {
         let l = extract_column_lineage("SELECT id, name FROM input_0");
-        assert_eq!(l.columns.get("id"), Some(&vec![("input_0".into(), "id".into())]));
-        assert_eq!(l.columns.get("name"), Some(&vec![("input_0".into(), "name".into())]));
+        assert_eq!(
+            l.columns.get("id"),
+            Some(&vec![("input_0".into(), "id".into())])
+        );
+        assert_eq!(
+            l.columns.get("name"),
+            Some(&vec![("input_0".into(), "name".into())])
+        );
     }
 
     #[test]
@@ -247,15 +260,19 @@ mod tests {
         let l = extract_column_lineage(
             "SELECT s.id, c.name FROM input_0 s JOIN customers c ON s.id = c.id",
         );
-        assert_eq!(l.columns.get("id"), Some(&vec![("input_0".into(), "id".into())]));
-        assert_eq!(l.columns.get("name"), Some(&vec![("customers".into(), "name".into())]));
+        assert_eq!(
+            l.columns.get("id"),
+            Some(&vec![("input_0".into(), "id".into())])
+        );
+        assert_eq!(
+            l.columns.get("name"),
+            Some(&vec![("customers".into(), "name".into())])
+        );
     }
 
     #[test]
     fn multi_ref_expression() {
-        let l = extract_column_lineage(
-            "SELECT price * qty AS total FROM input_0",
-        );
+        let l = extract_column_lineage("SELECT price * qty AS total FROM input_0");
         assert_eq!(
             l.columns.get("total"),
             Some(&vec![
@@ -268,7 +285,10 @@ mod tests {
     #[test]
     fn function_expression() {
         let l = extract_column_lineage("SELECT upper(name) AS uname FROM input_0");
-        assert_eq!(l.columns.get("uname"), Some(&vec![("input_0".into(), "name".into())]));
+        assert_eq!(
+            l.columns.get("uname"),
+            Some(&vec![("input_0".into(), "name".into())])
+        );
     }
 
     #[test]
@@ -285,9 +305,7 @@ mod tests {
 
     #[test]
     fn cross_join_unqualified_defaults_to_unknown() {
-        let l = extract_column_lineage(
-            "SELECT a FROM input_0, other_table",
-        );
+        let l = extract_column_lineage("SELECT a FROM input_0, other_table");
         // Two sources, unqualified ref: ambiguous -> "?" marker
         assert_eq!(l.columns.get("a"), Some(&vec![("?".into(), "a".into())]));
     }

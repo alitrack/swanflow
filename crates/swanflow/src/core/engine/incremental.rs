@@ -11,10 +11,7 @@ use crate::core::engine::checkpoint::EngineCheckpoint;
 ///
 /// Returns `None` if no resumable checkpoint exists for this workflow
 /// (i.e., execute from level 0).
-pub fn find_resume_level(
-    checkpoints: &[EngineCheckpoint],
-    workflow_name: &str,
-) -> Option<usize> {
+pub fn find_resume_level(checkpoints: &[EngineCheckpoint], workflow_name: &str) -> Option<usize> {
     for cp in checkpoints {
         if cp.workflow_name == workflow_name && cp.completed_at.is_none() {
             // Return the next level after the highest completed level
@@ -26,10 +23,7 @@ pub fn find_resume_level(
 
 /// Compute the list of levels that have already been completed for a workflow.
 /// Returns an empty vec if no resumable checkpoint exists.
-pub fn completed_levels(
-    checkpoints: &[EngineCheckpoint],
-    workflow_name: &str,
-) -> Vec<usize> {
+pub fn completed_levels(checkpoints: &[EngineCheckpoint], workflow_name: &str) -> Vec<usize> {
     for cp in checkpoints {
         if cp.workflow_name == workflow_name && cp.completed_at.is_none() {
             return cp.completed_levels.clone();
@@ -53,10 +47,7 @@ pub fn is_level_completed(
 }
 
 /// Get the skip count — number of already-completed levels to fast-forward past.
-pub fn skip_count(
-    checkpoints: &[EngineCheckpoint],
-    workflow_name: &str,
-) -> usize {
+pub fn skip_count(checkpoints: &[EngineCheckpoint], workflow_name: &str) -> usize {
     find_resume_level(checkpoints, workflow_name).unwrap_or(0)
 }
 

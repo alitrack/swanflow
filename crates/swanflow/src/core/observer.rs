@@ -76,7 +76,11 @@ impl StateProbeExec {
         // planned below this node), a plain CoalescePartitionsExec would merge
         // partitions non-order-preserving and shuffle rows. Use a
         // SortPreservingMerge instead so the order survives the coalesce.
-        let input: Arc<dyn ExecutionPlan> = match input.properties().equivalence_properties().output_ordering() {
+        let input: Arc<dyn ExecutionPlan> = match input
+            .properties()
+            .equivalence_properties()
+            .output_ordering()
+        {
             Some(ordering) => {
                 let lex = datafusion::physical_expr::LexOrdering::new(ordering.iter().cloned())
                     .expect("non-empty output ordering");
@@ -87,9 +91,7 @@ impl StateProbeExec {
                 )
             }
             None => Arc::new(
-                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(
-                    input,
-                ),
+                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input),
             ),
         };
         let input_props = input.properties();
@@ -311,7 +313,11 @@ impl MaterializerExec {
         // Bug 17 (see StateProbeExec::new): keep ordering alive through the
         // coalesce, and propagate the input's equivalence properties (incl.
         // ordering) so the optimizer knows order is preserved by this node.
-        let input: Arc<dyn ExecutionPlan> = match input.properties().equivalence_properties().output_ordering() {
+        let input: Arc<dyn ExecutionPlan> = match input
+            .properties()
+            .equivalence_properties()
+            .output_ordering()
+        {
             Some(ordering) => {
                 let lex = datafusion::physical_expr::LexOrdering::new(ordering.iter().cloned())
                     .expect("non-empty output ordering");
@@ -322,9 +328,7 @@ impl MaterializerExec {
                 )
             }
             None => Arc::new(
-                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(
-                    input,
-                ),
+                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input),
             ),
         };
         let input_props = input.properties();
@@ -460,7 +464,8 @@ impl Stream for MaterializingStream {
                             // file exists. Pre-hardening rows stored '{}',
                             // which now fails closed exactly once at skip
                             // time (the rerun re-records the fingerprint).
-                            let schema_fp = crate::core::engine::assets::schema_fingerprint(schema.as_ref());
+                            let schema_fp =
+                                crate::core::engine::assets::schema_fingerprint(schema.as_ref());
                             conn.execute(
                                 "INSERT OR REPLACE INTO flow_metadata (node_id, table_name, parquet_path, schema_json) VALUES (?, ?, ?, ?)",
                                 [node_id.to_string(), table_name.clone(), path.clone(), schema_fp],

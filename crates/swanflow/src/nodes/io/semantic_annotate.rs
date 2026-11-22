@@ -105,7 +105,11 @@ fn parse_response(
         out.push(Annotation {
             table: table.to_string(),
             column: column.to_string(),
-            term: item.get("term").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            term: item
+                .get("term")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             description: item
                 .get("description")
                 .and_then(|x| x.as_str())

@@ -132,10 +132,18 @@ async fn handle_mcp(
                     let n = state.poll_count.fetch_add(1, Ordering::SeqCst);
                     let status = match &state.scenario {
                         MockScenario::Succeed => {
-                            if n == 0 { "RUNNING" } else { "SUCCEEDED" }
+                            if n == 0 {
+                                "RUNNING"
+                            } else {
+                                "SUCCEEDED"
+                            }
                         }
                         MockScenario::FailWithExit(_code) => {
-                            if n == 0 { "RUNNING" } else { "FAILED" }
+                            if n == 0 {
+                                "RUNNING"
+                            } else {
+                                "FAILED"
+                            }
                         }
                         MockScenario::NeverTerminate => "RUNNING",
                     };
@@ -195,7 +203,9 @@ async fn spawn_mock(scenario: MockScenario) -> (String, Arc<MockState>) {
     let st = state.clone();
     tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else { break };
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
             let st = st.clone();
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
@@ -333,13 +343,21 @@ async fn flight_node_ledger_replay_skips_retrigger() {
         .await
         .expect("replay run");
     assert_eq!(batch2.num_rows(), 1);
-    assert_eq!(state.run_count.load(Ordering::SeqCst), 1, "ledger replay must not re-trigger run_flight");
+    assert_eq!(
+        state.run_count.load(Ordering::SeqCst),
+        1,
+        "ledger replay must not re-trigger run_flight"
+    );
     let status2 = batch2
         .column(4)
         .as_any()
         .downcast_ref::<datafusion::arrow::array::StringArray>()
         .unwrap();
-    assert_eq!(status2.value(0), "SUCCEEDED", "replay emits the ledgered terminal row");
+    assert_eq!(
+        status2.value(0),
+        "SUCCEEDED",
+        "replay emits the ledgered terminal row"
+    );
 }
 
 // ---------------------------------------------------------------------------

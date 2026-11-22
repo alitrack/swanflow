@@ -124,8 +124,7 @@ pub(crate) struct ColumnMeta {
 pub(crate) fn open_duckdb_readonly(database: &str) -> Result<Connection> {
     use duckdb::{AccessMode, Config};
     if database == ":memory:" {
-        return Connection::open_in_memory()
-            .map_err(|e| anyhow!("in-memory DuckDB failed: {}", e));
+        return Connection::open_in_memory().map_err(|e| anyhow!("in-memory DuckDB failed: {}", e));
     }
     let cfg = Config::default()
         .access_mode(AccessMode::ReadOnly)
@@ -404,8 +403,8 @@ impl NodeBehavior for OssieExportNode {
         };
         let file = build_model(tables, &model_name, relationships);
 
-        let text = serde_json::to_string_pretty(&file)
-            .context("Failed to serialize Ossie model")?;
+        let text =
+            serde_json::to_string_pretty(&file).context("Failed to serialize Ossie model")?;
         std::fs::write(&out_path, &text)
             .map_err(|e| anyhow!("Failed to write {}: {}", out_path, e))?;
 
@@ -413,10 +412,7 @@ impl NodeBehavior for OssieExportNode {
         let ctx = SessionContext::new();
         let mut summary: BTreeMap<String, usize> = BTreeMap::new();
         for m in &file.semantic_model {
-            summary.insert(
-                "datasets".into(),
-                m.datasets.len(),
-            );
+            summary.insert("datasets".into(), m.datasets.len());
             summary.insert("metrics".into(), m.metrics.len());
         }
         let sql = format!(
@@ -479,10 +475,9 @@ mod tests {
         assert!(sm["datasets"].as_array().unwrap().len() >= 1);
         // every dataset has fields and at least the row-count metric exists
         let metrics = sm["metrics"].as_array().unwrap();
-        assert!(metrics.iter().any(|m| m["name"]
-            .as_str()
-            .unwrap()
-            .ends_with("_rows")));
+        assert!(metrics
+            .iter()
+            .any(|m| m["name"].as_str().unwrap().ends_with("_rows")));
         // dialects wrapper present on first field expression
         let f = &sm["datasets"][0]["fields"][0]["expression"]["dialects"][0];
         assert_eq!(f["dialect"], "ANSI_SQL");
@@ -518,7 +513,10 @@ mod tests {
             .unwrap();
         let batches = df.collect().await.unwrap();
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert!(rows >= 2, "exported model must read back with rows, got {rows}");
+        assert!(
+            rows >= 2,
+            "exported model must read back with rows, got {rows}"
+        );
     }
 
     #[tokio::test]
@@ -537,15 +535,21 @@ mod tests {
             .unwrap();
         let model: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(out).unwrap()).unwrap();
-        let rels = model["semantic_model"][0]["relationships"].as_array().unwrap();
+        let rels = model["semantic_model"][0]["relationships"]
+            .as_array()
+            .unwrap();
         assert!(
-            rels.iter().any(|r| r["from"] == "orders" && r["to"] == "customers"
+            rels.iter().any(|r| r["from"] == "orders"
+                && r["to"] == "customers"
                 && r["from_columns"][0] == "customer_id"),
             "orders→customers relationship missing: {rels:#?}"
         );
         // Read back with OssieReadNode: the relationship must surface as a row
         let reader = crate::nodes::io::ossie::OssieReadNode;
-        let plans = reader.propose_plan(vec![], &json!({ "path": out })).await.unwrap();
+        let plans = reader
+            .propose_plan(vec![], &json!({ "path": out }))
+            .await
+            .unwrap();
         let ctx = SessionContext::new();
         let df = ctx
             .execute_logical_plan(plans.into_iter().next().unwrap())
@@ -562,21 +566,22 @@ mod tests {
                         .downcast_ref::<datafusion::arrow::array::StringArray>()
                         .unwrap()
                         .value(i);
-                    (k == "ossie_relationship")
-                        .then(|| {
-                            b.column(9)
-                                .as_any()
-                                .downcast_ref::<datafusion::arrow::array::StringArray>()
-                                .unwrap()
-                                .value(i)
-                                .to_string()
-                        })
+                    (k == "ossie_relationship").then(|| {
+                        b.column(9)
+                            .as_any()
+                            .downcast_ref::<datafusion::arrow::array::StringArray>()
+                            .unwrap()
+                            .value(i)
+                            .to_string()
+                    })
                 })
             })
             .collect();
         assert!(!kinds.is_empty(), "no ossie_relationship rows in catalog");
-        assert!(kinds.iter().any(|k| k.contains("orders_to_customers")),
-            "relationship row content: {kinds:#?}");
+        assert!(
+            kinds.iter().any(|k| k.contains("orders_to_customers")),
+            "relationship row content: {kinds:#?}"
+        );
     }
 
     #[tokio::test]

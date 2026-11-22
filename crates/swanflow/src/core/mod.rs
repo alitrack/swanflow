@@ -1,5 +1,3 @@
-#[cfg(test)]
-mod sql_collapse_probe;
 pub mod compiler;
 pub mod connection_config;
 pub mod datasource;
@@ -10,6 +8,8 @@ pub mod kernel;
 pub mod observer;
 pub mod repair;
 pub mod retry;
+#[cfg(test)]
+mod sql_collapse_probe;
 pub mod templating;
 
 /// Canonical in-context table name for a node's materialization.

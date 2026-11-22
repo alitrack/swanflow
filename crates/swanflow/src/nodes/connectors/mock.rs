@@ -137,7 +137,7 @@ mod tests {
     use super::*;
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
-    
+
     use futures::StreamExt;
 
     #[tokio::test]

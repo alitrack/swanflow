@@ -130,7 +130,9 @@ async fn spawn_mock() -> (String, Arc<MockState>) {
     let st = state.clone();
     tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else { break };
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
             let st = st.clone();
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
@@ -158,7 +160,10 @@ fn simple_program(name: &str, body: &str) -> FlightProgram {
 
 fn dag_wf() -> swanflow::core::graph::Workflow {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap().parent().unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
         .join("examples/5_1_fetch_store.yaml");
     swanflow::load_workflow_file(&path).unwrap()
 }
@@ -208,18 +213,31 @@ async fn second_deploy_chains_rollback_pointer() {
 
     let _m1 = deployer::deploy(
         vec![simple_program("swanflow_inline_testdag", "v1")],
-        "inline", "testdag", &flights_dir, &flights_dir,
-        Some(endpoint.clone()), Some("mock-token".into()),
-    ).await.unwrap();
+        "inline",
+        "testdag",
+        &flights_dir,
+        &flights_dir,
+        Some(endpoint.clone()),
+        Some("mock-token".into()),
+    )
+    .await
+    .unwrap();
 
     // Preserve v1 sources for the later rollback digest check.
-    let v1_source = std::fs::read_to_string(flights_dir.join("swanflow_inline_testdag.py")).unwrap();
+    let v1_source =
+        std::fs::read_to_string(flights_dir.join("swanflow_inline_testdag.py")).unwrap();
 
     let m2 = deployer::deploy(
         vec![simple_program("swanflow_inline_testdag", "v2")],
-        "inline", "testdag", &flights_dir, &flights_dir,
-        Some(endpoint.clone()), Some("mock-token".into()),
-    ).await.unwrap();
+        "inline",
+        "testdag",
+        &flights_dir,
+        &flights_dir,
+        Some(endpoint.clone()),
+        Some("mock-token".into()),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(m2.rollback.as_deref(), Some("swanflow-deploy-testdag.json"));
     assert_eq!(state.create_count.load(Ordering::SeqCst), 2);
@@ -239,7 +257,10 @@ async fn second_deploy_chains_rollback_pointer() {
                 use sha2::{Digest, Sha256};
                 let mut h = Sha256::new();
                 h.update(v1_source.as_bytes());
-                h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+                h.finalize()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
             },
         }],
         rollback: None,
@@ -247,17 +268,31 @@ async fn second_deploy_chains_rollback_pointer() {
     std::fs::write(
         flights_dir.join("history-swanflow-deploy-testdag.json"),
         serde_json::to_string_pretty(&prev).unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     // Restore v1 source on disk so the digest check passes.
     std::fs::write(flights_dir.join("swanflow_inline_testdag.py"), v1_source).unwrap();
 
     // Rollback: update_flight with v1 source.
-    let restored = deployer::rollback("testdag", &flights_dir, &flights_dir,
-        Some(endpoint), Some("mock-token".into())).await.expect("rollback ok");
-    assert!(restored.rollback.is_none(), "restored manifest is v1 (no rollback)");
+    let restored = deployer::rollback(
+        "testdag",
+        &flights_dir,
+        &flights_dir,
+        Some(endpoint),
+        Some("mock-token".into()),
+    )
+    .await
+    .expect("rollback ok");
+    assert!(
+        restored.rollback.is_none(),
+        "restored manifest is v1 (no rollback)"
+    );
     assert_eq!(state.update_count.load(Ordering::SeqCst), 1);
     let updated = state.updated.lock().unwrap();
-    assert!(updated[0].1.contains("v1"), "update_flight carries the v1 source");
+    assert!(
+        updated[0].1.contains("v1"),
+        "update_flight carries the v1 source"
+    );
 }
 
 #[tokio::test]
@@ -268,16 +303,32 @@ async fn rollback_refused_on_first_deployment() {
 
     let _m1 = deployer::deploy(
         vec![simple_program("swanflow_inline_testdag", "v1")],
-        "inline", "testdag", &flights_dir, &flights_dir,
-        Some(endpoint), Some("mock-token".into()),
-    ).await.unwrap();
+        "inline",
+        "testdag",
+        &flights_dir,
+        &flights_dir,
+        Some(endpoint),
+        Some("mock-token".into()),
+    )
+    .await
+    .unwrap();
 
     // Rollback on a manifest with rollback=null → refused, zero MCP calls.
-    let err = deployer::rollback("testdag", &flights_dir, &flights_dir,
-        Some("http://127.0.0.1:9/mcp".into()), Some("mock-token".into()))
-        .await.expect_err("must refuse");
+    let err = deployer::rollback(
+        "testdag",
+        &flights_dir,
+        &flights_dir,
+        Some("http://127.0.0.1:9/mcp".into()),
+        Some("mock-token".into()),
+    )
+    .await
+    .expect_err("must refuse");
     assert!(err.to_string().contains("no previous deployment"));
-    assert_eq!(state.update_count.load(Ordering::SeqCst), 0, "no update_flight issued");
+    assert_eq!(
+        state.update_count.load(Ordering::SeqCst),
+        0,
+        "no update_flight issued"
+    );
 }
 
 #[tokio::test]
@@ -292,13 +343,29 @@ async fn full_pipeline_example_deploys_inline_and_per_node() {
     let dir = tempfile::tempdir().unwrap();
     let flights_dir: PathBuf = dir.path().join("flights");
     let n = per_node.len();
-    let manifest = deployer::deploy(per_node, "per-node", "dag51", &flights_dir, &flights_dir,
-        Some(endpoint), Some("mock-token".into())).await.unwrap();
+    let manifest = deployer::deploy(
+        per_node,
+        "per-node",
+        "dag51",
+        &flights_dir,
+        &flights_dir,
+        Some(endpoint),
+        Some("mock-token".into()),
+    )
+    .await
+    .unwrap();
     assert_eq!(manifest.flights.len(), n);
     assert_eq!(state.create_count.load(Ordering::SeqCst) as usize, n);
     // Scheduler flight is among the created sources.
-    let names: Vec<String> = manifest.flights.iter().map(|f| f.flight_name.clone()).collect();
-    assert!(names.iter().any(|n| n.starts_with("swanflow_sched_")), "scheduler present: {names:?}");
+    let names: Vec<String> = manifest
+        .flights
+        .iter()
+        .map(|f| f.flight_name.clone())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.starts_with("swanflow_sched_")),
+        "scheduler present: {names:?}"
+    );
     // Inline compiles and would deploy as 1.
     let _ = inline;
 }

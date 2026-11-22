@@ -76,7 +76,12 @@ pub trait WasmExec: Send + Sync {
     async fn compile(&self, bytes: &[u8]) -> CoreResult<WasmModule>;
 
     /// Execute a function export from a compiled module.
-    async fn execute(&self, module: &WasmModule, function: &str, args: &[u8]) -> CoreResult<Vec<u8>>;
+    async fn execute(
+        &self,
+        module: &WasmModule,
+        function: &str,
+        args: &[u8],
+    ) -> CoreResult<Vec<u8>>;
 
     /// Check if a module has a specific function export.
     fn has_function(&self, module: &WasmModule, function: &str) -> bool;

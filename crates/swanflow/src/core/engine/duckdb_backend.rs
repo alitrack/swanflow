@@ -55,10 +55,7 @@ fn keyword_split<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
     }
 }
 
-fn walk_plan_tables(
-    plan: &datafusion::logical_expr::LogicalPlan,
-    f: &mut dyn FnMut(&str),
-) {
+fn walk_plan_tables(plan: &datafusion::logical_expr::LogicalPlan, f: &mut dyn FnMut(&str)) {
     use datafusion::logical_expr::LogicalPlan;
     if let LogicalPlan::TableScan(scan) = plan {
         f(scan.table_name.table());
@@ -75,9 +72,9 @@ impl DuckDBEngine {
         // allow_unsigned_extensions is required to LOAD locally-built (unsigned)
         // extensions such as the luajit UDF extension. Signed extensions from
         // the official/community registries are unaffected.
-        let config = Config::default().allow_unsigned_extensions().map_err(|e| {
-            datafusion::error::DataFusionError::External(Box::new(e))
-        })?;
+        let config = Config::default()
+            .allow_unsigned_extensions()
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
         let conn = Connection::open_with_flags(db_path, config)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
@@ -88,9 +85,7 @@ impl DuckDBEngine {
             for ext in exts.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                 match conn.execute_batch(&format!("LOAD '{ext}'")) {
                     Ok(()) => eprintln!("[duckdb] loaded extension: {ext}"),
-                    Err(e) => eprintln!(
-                        "[duckdb] WARNING: failed to load extension '{ext}': {e}"
-                    ),
+                    Err(e) => eprintln!("[duckdb] WARNING: failed to load extension '{ext}': {e}"),
                 }
             }
         }
@@ -241,7 +236,8 @@ impl QueryEngine for DuckDBEngine {
             TableSource::Parquet { path } => {
                 let sql = format!(
                     "CREATE OR REPLACE VIEW {} AS SELECT * FROM read_parquet('{}')",
-                    quote_ident(&name), path
+                    quote_ident(&name),
+                    path
                 );
                 self.execute_ddl(&sql).await?;
             }
@@ -249,7 +245,9 @@ impl QueryEngine for DuckDBEngine {
                 let header_str = if *has_header { "true" } else { "false" };
                 let sql = format!(
                     "CREATE OR REPLACE VIEW {} AS SELECT * FROM read_csv('{}', header={})",
-                    quote_ident(&name), path, header_str
+                    quote_ident(&name),
+                    path,
+                    header_str
                 );
                 self.execute_ddl(&sql).await?;
             }
@@ -257,7 +255,8 @@ impl QueryEngine for DuckDBEngine {
                 // Table already exists in DuckDB — register a view alias
                 let sql = format!(
                     "CREATE OR REPLACE VIEW {} AS SELECT * FROM {}",
-                    quote_ident(&name), quote_ident(identifier)
+                    quote_ident(&name),
+                    quote_ident(identifier)
                 );
                 self.execute_ddl(&sql).await?;
             }
@@ -318,9 +317,7 @@ impl QueryEngine for DuckDBEngine {
             match col_type.to_uppercase().as_str() {
                 "BOOLEAN" => DataType::Boolean,
                 "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "INT8" | "INT16"
-                | "INT32" | "INT64" | "UINT8" | "UINT16" | "UINT32" | "UINT64" => {
-                    DataType::Int64
-                }
+                | "INT32" | "INT64" | "UINT8" | "UINT16" | "UINT32" | "UINT64" => DataType::Int64,
                 "FLOAT" | "DOUBLE" | "REAL" | "DECIMAL" | "FLOAT32" | "FLOAT64" => {
                     DataType::Float64
                 }
@@ -328,8 +325,8 @@ impl QueryEngine for DuckDBEngine {
                     DataType::Timestamp(TimeUnit::Nanosecond, None)
                 }
                 "DATE" => DataType::Date32,
-                "VARCHAR" | "TEXT" | "STRING" | "BLOB" | "UUID" | "ENUM" | "UTF8"
-                | "LARGEUTF8" | "BINARY" | "LARGEBINARY" => DataType::Utf8,
+                "VARCHAR" | "TEXT" | "STRING" | "BLOB" | "UUID" | "ENUM" | "UTF8" | "LARGEUTF8"
+                | "BINARY" | "LARGEBINARY" => DataType::Utf8,
                 _ => {
                     // Unrecognized type bridge: keep the Utf8 fallback (no panic),
                     // but surface it on stderr so mis-typed data is not silent.
@@ -370,8 +367,7 @@ impl QueryEngine for DuckDBEngine {
             }
         }
 
-        let columns: Vec<ArrayRef> =
-            builders.into_iter().map(|mut b| b.finish()).collect();
+        let columns: Vec<ArrayRef> = builders.into_iter().map(|mut b| b.finish()).collect();
 
         if columns.is_empty() || columns[0].is_empty() {
             Ok(vec![])
@@ -393,12 +389,12 @@ impl QueryEngine for DuckDBEngine {
         match plan {
             LP::Projection(proj) => {
                 let input_sql = self.compile_to_sql(proj.input.as_ref())?;
-                let exprs: Vec<String> = proj
-                    .expr
-                    .iter()
-                    .map(|e| format!("{}", e))
-                    .collect();
-                Ok(format!("SELECT {} FROM ({}) AS _sub", exprs.join(", "), input_sql))
+                let exprs: Vec<String> = proj.expr.iter().map(|e| format!("{}", e)).collect();
+                Ok(format!(
+                    "SELECT {} FROM ({}) AS _sub",
+                    exprs.join(", "),
+                    input_sql
+                ))
             }
             LP::Filter(filter) => {
                 let input_sql = self.compile_to_sql(filter.input.as_ref())?;
@@ -432,11 +428,7 @@ impl QueryEngine for DuckDBEngine {
             }
             LP::Sort(sort) => {
                 let input_sql = self.compile_to_sql(sort.input.as_ref())?;
-                let order: Vec<String> = sort
-                    .expr
-                    .iter()
-                    .map(|e| format!("{}", e))
-                    .collect();
+                let order: Vec<String> = sort.expr.iter().map(|e| format!("{}", e)).collect();
                 Ok(format!(
                     "SELECT * FROM ({}) AS _sub ORDER BY {}",
                     input_sql,
@@ -466,9 +458,10 @@ impl QueryEngine for DuckDBEngine {
                 }
                 Ok(sql)
             }
-            LP::TableScan(scan) => {
-                Ok(format!("SELECT * FROM {}", quote_ident(&scan.table_name.to_string())))
-            }
+            LP::TableScan(scan) => Ok(format!(
+                "SELECT * FROM {}",
+                quote_ident(&scan.table_name.to_string())
+            )),
             LP::Subquery(_) => {
                 let inputs = plan.inputs();
                 if inputs.is_empty() {
@@ -505,10 +498,8 @@ impl QueryEngine for DuckDBEngine {
                 // disappearing.
                 if ext.node.name() == "SqlProxy" {
                     // Deferred import: nodes module is part of the same crate.
-                    if let Some(proxy) =
-                        crate::nodes::sql::SqlProxyLogical::from_extension(ext)
-                    {
-// r4 C4 (pass-2): the DuckDB staged executor registers upstream
+                    if let Some(proxy) = crate::nodes::sql::SqlProxyLogical::from_extension(ext) {
+                        // r4 C4 (pass-2): the DuckDB staged executor registers upstream
                         // outputs as node_<uuid> tables, but SqlProxy SQL
                         // references input_0..N aliases. Alias them as CTEs so
                         // the compiled result stays a SINGLE statement —
@@ -518,16 +509,14 @@ impl QueryEngine for DuckDBEngine {
                         for (i, input_plan) in proxy.inputs.iter().enumerate() {
                             let mut upstream_table: Option<String> = None;
                             walk_plan_tables(input_plan, &mut |name| {
-                                if upstream_table.is_none()
-                                    && name.starts_with("node_")
-                                {
+                                if upstream_table.is_none() && name.starts_with("node_") {
                                     upstream_table = Some(name.to_string());
                                 }
                             });
                             match upstream_table {
-                                Some(src) => ctes.push(format!(
-                                    "input_{i} AS (SELECT * FROM {src})"
-                                )),
+                                Some(src) => {
+                                    ctes.push(format!("input_{i} AS (SELECT * FROM {src})"))
+                                }
                                 None => {
                                     // Cannot recover an upstream table: fail
                                     // loudly instead of running SQL against an
@@ -540,11 +529,10 @@ impl QueryEngine for DuckDBEngine {
                                 }
                             }
                         }
-                        let inlined =
-                            crate::core::engine::planner::inline_placeholders(
-                                &proxy.query,
-                                &proxy.params,
-                            );
+                        let inlined = crate::core::engine::planner::inline_placeholders(
+                            &proxy.query,
+                            &proxy.params,
+                        );
                         if ctes.is_empty() {
                             // No inputs (source SQL node): query as-is.
                             return Ok(inlined);
@@ -557,10 +545,7 @@ impl QueryEngine for DuckDBEngine {
                         let after_with = match keyword_split(q_trim, "WITH") {
                             Some(rest) => rest,
                             None => {
-                                return Ok(format!(
-                                    "WITH {} {}",
-                                    cte_list, inlined
-                                ));
+                                return Ok(format!("WITH {} {}", cte_list, inlined));
                             }
                         };
                         // Trim before the inner check (r4 pass-5): the
@@ -569,17 +554,11 @@ impl QueryEngine for DuckDBEngine {
                         // CTEs before a dangling RECURSIVE keyword.
                         let after_with_trim = after_with.trim_start();
                         return match keyword_split(after_with_trim, "RECURSIVE") {
-                            Some(after_rec) => Ok(format!(
-                                "WITH RECURSIVE {},{}",
-                                cte_list,
-                                after_rec
-                            )),
-                            None => Ok(format!(
-                                "WITH {},{}",
-                                cte_list,
-                                after_with_trim
-                            )),
-                        }
+                            Some(after_rec) => {
+                                Ok(format!("WITH RECURSIVE {},{}", cte_list, after_rec))
+                            }
+                            None => Ok(format!("WITH {},{}", cte_list, after_with_trim)),
+                        };
                     }
                 }
                 if ext.node.name() == "MissingNodePlaceholder" {
@@ -588,8 +567,7 @@ impl QueryEngine for DuckDBEngine {
                     // defeating the fail-closed mapper contract for KNIME
                     // writer nodes (output would appear to succeed).
                     return Err(datafusion::error::DataFusionError::Plan(
-                        "missing-node placeholder cannot execute on the DuckDB backend"
-                            .to_string(),
+                        "missing-node placeholder cannot execute on the DuckDB backend".to_string(),
                     ));
                 }
                 if ext.node.inputs().len() == 1 {
@@ -790,9 +768,13 @@ impl ColumnBuilder for TimestampColumnBuilder {
         match val {
             Some(s) => {
                 // Parse common timestamp formats
-                let nanos = if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S") {
+                let nanos = if let Ok(dt) =
+                    chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
+                {
                     dt.and_utc().timestamp_nanos_opt().unwrap_or(0)
-                } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S%.f") {
+                } else if let Ok(dt) =
+                    chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S%.f")
+                {
                     dt.and_utc().timestamp_nanos_opt().unwrap_or(0)
                 } else {
                     0
@@ -982,11 +964,9 @@ mod tests {
 
             let id_arr = Int64Array::from(vec![1, 2, 3]);
             let name_arr = StringArray::from(vec!["alice", "bob", "carol"]);
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![Arc::new(id_arr), Arc::new(name_arr)],
-            )
-            .unwrap();
+            let batch =
+                RecordBatch::try_new(schema.clone(), vec![Arc::new(id_arr), Arc::new(name_arr)])
+                    .unwrap();
 
             let table = RegisteredTable {
                 name: "users".to_string(),
@@ -1025,14 +1005,10 @@ mod tests {
             ]));
 
             let id_arr = Int64Array::from(vec![1, 2, 3, 4, 5]);
-            let name_arr = StringArray::from(vec![
-                "a", "b", "c", "d", "e",
-            ]);
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![Arc::new(id_arr), Arc::new(name_arr)],
-            )
-            .unwrap();
+            let name_arr = StringArray::from(vec!["a", "b", "c", "d", "e"]);
+            let batch =
+                RecordBatch::try_new(schema.clone(), vec![Arc::new(id_arr), Arc::new(name_arr)])
+                    .unwrap();
 
             let table = RegisteredTable {
                 name: "users5".to_string(),
@@ -1165,7 +1141,6 @@ mod tests {
             assert!(engine.execute_sql("SELECT 'a;b' AS x").await.is_ok());
         });
     }
-
 }
 
 #[cfg(test)]
@@ -1189,6 +1164,9 @@ mod keyword_split_tests {
             keyword_split("RECURSIVE walk AS (SELECT 1)", "RECURSIVE"),
             Some(" walk AS (SELECT 1)")
         );
-        assert_eq!(keyword_split(" recursively AS (SELECT 1)", "RECURSIVE"), None);
+        assert_eq!(
+            keyword_split(" recursively AS (SELECT 1)", "RECURSIVE"),
+            None
+        );
     }
 }

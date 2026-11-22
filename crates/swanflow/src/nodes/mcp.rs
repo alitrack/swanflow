@@ -186,7 +186,6 @@ pub struct McpToolStream {
     done: bool,
 }
 
-
 /// Build the standard (content, error) RecordBatch from a tools/call result.
 /// Shared by McpToolStream and McpInvokeStream so the two MCP client paths
 /// (LSP Content-Length vs NDJSON stdio) cannot drift apart.

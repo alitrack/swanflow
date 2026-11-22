@@ -9,9 +9,7 @@
 use crate::core::graph::{EdgeInstance, NodeInstance, Workflow};
 use crate::nodes::NodeState;
 use anyhow::{anyhow, Result};
-use swanflow_core::repair::{
-    RepairOperator, RepairOutcome, DEFAULT_REPAIR_HOPS, MAX_REPAIR_EDGES,
-};
+use swanflow_core::repair::{RepairOperator, RepairOutcome, DEFAULT_REPAIR_HOPS, MAX_REPAIR_EDGES};
 use uuid::Uuid;
 
 /// Resolve a node reference: UUID first, then most-recent type_id match.
@@ -23,11 +21,13 @@ fn resolve_node_ref(
         return workflow.find_node_by_id(&uuid);
     }
     // type_id fallback: most recent instance (reverse iteration).
-    workflow
-        .graph
-        .node_indices()
-        .rev()
-        .find(|&idx| workflow.graph.node_weight(idx).map(|n| n.type_id == reference).unwrap_or(false))
+    workflow.graph.node_indices().rev().find(|&idx| {
+        workflow
+            .graph
+            .node_weight(idx)
+            .map(|n| n.type_id == reference)
+            .unwrap_or(false)
+    })
 }
 
 /// Apply a repair operator to a workflow.
@@ -93,7 +93,10 @@ pub fn apply_repair(
             })
         }
 
-        RepairOperator::Substitute { new_type, new_config } => {
+        RepairOperator::Substitute {
+            new_type,
+            new_config,
+        } => {
             let downstream = workflow.downstream_of(failed_idx);
             let node = workflow
                 .graph
@@ -138,16 +141,15 @@ pub fn apply_repair(
                 ));
             }
             let mut touched: Vec<Uuid> = Vec::new();
-            let record =
-                |workflow: &Workflow,
-                 idx: petgraph::stable_graph::NodeIndex,
-                 touched: &mut Vec<Uuid>| {
-                    if let Some(id) = workflow.graph.node_weight(idx).map(|n| n.id) {
-                        if !touched.contains(&id) {
-                            touched.push(id);
-                        }
+            let record = |workflow: &Workflow,
+                          idx: petgraph::stable_graph::NodeIndex,
+                          touched: &mut Vec<Uuid>| {
+                if let Some(id) = workflow.graph.node_weight(idx).map(|n| n.id) {
+                    if !touched.contains(&id) {
+                        touched.push(id);
                     }
-                };
+                }
+            };
             // Removals first (idempotent: missing edges are skipped).
             for e in remove_edges {
                 if let (Some(s), Some(t)) = (
@@ -379,7 +381,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(outcome.message.contains("removed 1 edge(s), added 1 edge(s)"));
+        assert!(outcome
+            .message
+            .contains("removed 1 edge(s), added 1 edge(s)"));
         let n0 = wf.find_node_by_id(&ids[0]).unwrap();
         let n1 = wf.find_node_by_id(&ids[1]).unwrap();
         let n2 = wf.find_node_by_id(&ids[2]).unwrap();
@@ -444,7 +448,10 @@ mod tests {
         assert_eq!(wf.graph.node_count(), 2);
         let n0 = wf.find_node_by_id(&ids[0]).unwrap();
         let n2 = wf.find_node_by_id(&ids[2]).unwrap();
-        assert!(wf.graph.find_edge(n0, n2).is_some(), "0 → 2 short-circuit edge");
+        assert!(
+            wf.graph.find_edge(n0, n2).is_some(),
+            "0 → 2 short-circuit edge"
+        );
         assert!(!petgraph::algo::is_cyclic_directed(&wf.graph));
         // affected = failed + direct downstream (node 2).
         assert!(outcome.affected_nodes.contains(&failed.to_string()));

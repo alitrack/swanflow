@@ -168,7 +168,10 @@ mod tests {
         };
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["node_id"], "n1");
-        assert_eq!(json["config_schema"]["properties"]["query"]["type"], "string");
+        assert_eq!(
+            json["config_schema"]["properties"]["query"]["type"],
+            "string"
+        );
     }
 
     #[test]

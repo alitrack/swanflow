@@ -364,9 +364,8 @@ fn to_ipc(batch: &RecordBatch) -> DFResult<Vec<u8>> {
 }
 
 fn from_ipc(bytes: &[u8]) -> DFResult<RecordBatch> {
-    let reader = StreamReader::try_new(bytes, None).map_err(|e| {
-        DataFusionError::Execution(format!("plugin returned unreadable IPC: {e}"))
-    })?;
+    let reader = StreamReader::try_new(bytes, None)
+        .map_err(|e| DataFusionError::Execution(format!("plugin returned unreadable IPC: {e}")))?;
     let mut batches = Vec::new();
     for b in reader {
         batches.push(
@@ -470,10 +469,10 @@ impl NodeBehavior for PluginTransformNode {
         // plugin is not installed" instead of surfacing mid-scan.
         let manifest = crate::core::kernel::plugin_wasm::read_plugin_manifest(&plugin_dir, &plugin)
             .map_err(|e| {
-            anyhow::anyhow!(
-                "{TYPE_ID}: plugin '{plugin}' in '{plugin_dir}' could not be read: {e}"
-            )
-        })?;
+                anyhow::anyhow!(
+                    "{TYPE_ID}: plugin '{plugin}' in '{plugin_dir}' could not be read: {e}"
+                )
+            })?;
 
         let function = config
             .get("function")
@@ -495,13 +494,7 @@ impl NodeBehavior for PluginTransformNode {
                 let fields = in_schema
                     .fields()
                     .iter()
-                    .map(|f| {
-                        Field::new(
-                            f.name(),
-                            f.data_type().clone(),
-                            f.is_nullable(),
-                        )
-                    })
+                    .map(|f| Field::new(f.name(), f.data_type().clone(), f.is_nullable()))
                     .collect::<Vec<_>>();
                 Arc::new(Schema::new(fields))
             }

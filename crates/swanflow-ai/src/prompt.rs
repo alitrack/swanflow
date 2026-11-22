@@ -110,8 +110,8 @@ impl PromptBuilder {
     ///
     /// Sections are assembled in order; empty sections are automatically skipped.
     pub fn build_fix_prompt(&self, ctx: &PromptContext) -> String {
-        let config_str = serde_json::to_string_pretty(&ctx.current_config)
-            .unwrap_or_else(|_| "{}".into());
+        let config_str =
+            serde_json::to_string_pretty(&ctx.current_config).unwrap_or_else(|_| "{}".into());
         let config_truncated = truncate(&config_str, 2000);
 
         let tools_str = if ctx.available_tools.is_empty() {
@@ -197,7 +197,10 @@ impl PromptBuilder {
         let mut lines = vec!["Expected output schema:".to_string()];
         for col in &ctx.expected_schema {
             let null_marker = if col.nullable { " (nullable)" } else { "" };
-            lines.push(format!("  - {}: {}{}", col.name, col.data_type, null_marker));
+            lines.push(format!(
+                "  - {}: {}{}",
+                col.name, col.data_type, null_marker
+            ));
         }
 
         Some(lines.join("\n"))
@@ -363,8 +366,16 @@ mod tests {
             available_tools: vec![],
             fix_instructions: "test".into(),
             expected_schema: vec![
-                ColumnInfo { name: "id".into(), data_type: "Int64".into(), nullable: false },
-                ColumnInfo { name: "name".into(), data_type: "Utf8".into(), nullable: true },
+                ColumnInfo {
+                    name: "id".into(),
+                    data_type: "Int64".into(),
+                    nullable: false,
+                },
+                ColumnInfo {
+                    name: "name".into(),
+                    data_type: "Utf8".into(),
+                    nullable: true,
+                },
             ],
             upstream_nodes: vec![],
             downstream_nodes: vec![],
@@ -412,21 +423,17 @@ mod tests {
             available_tools: vec![],
             fix_instructions: "test".into(),
             expected_schema: vec![],
-            upstream_nodes: vec![
-                UpstreamNode {
-                    node_id: "src1".into(),
-                    node_type: "FileSource".into(),
-                    port_name: "output".into(),
-                },
-            ],
-            downstream_nodes: vec![
-                DownstreamNode {
-                    node_id: "sink1".into(),
-                    node_type: "FileSink".into(),
-                    port_name: "input".into(),
-                    also_broken: true,
-                },
-            ],
+            upstream_nodes: vec![UpstreamNode {
+                node_id: "src1".into(),
+                node_type: "FileSource".into(),
+                port_name: "output".into(),
+            }],
+            downstream_nodes: vec![DownstreamNode {
+                node_id: "sink1".into(),
+                node_type: "FileSink".into(),
+                port_name: "input".into(),
+                also_broken: true,
+            }],
             domain_hints: vec![],
             fix_history: vec![],
             graph_topology: vec![],
@@ -556,8 +563,16 @@ mod tests {
             available_tools: vec!["list_columns".into(), "rename_column".into()],
             fix_instructions: "Fix the join key to match the actual schema.".into(),
             expected_schema: vec![
-                ColumnInfo { name: "id".into(), data_type: "Int64".into(), nullable: false },
-                ColumnInfo { name: "name".into(), data_type: "Utf8".into(), nullable: true },
+                ColumnInfo {
+                    name: "id".into(),
+                    data_type: "Int64".into(),
+                    nullable: false,
+                },
+                ColumnInfo {
+                    name: "name".into(),
+                    data_type: "Utf8".into(),
+                    nullable: true,
+                },
             ],
             upstream_nodes: vec![
                 UpstreamNode {
@@ -571,23 +586,19 @@ mod tests {
                     port_name: "right".into(),
                 },
             ],
-            downstream_nodes: vec![
-                DownstreamNode {
-                    node_id: "agg".into(),
-                    node_type: "Aggregate".into(),
-                    port_name: "input".into(),
-                    also_broken: false,
-                },
-            ],
+            downstream_nodes: vec![DownstreamNode {
+                node_id: "agg".into(),
+                node_type: "Aggregate".into(),
+                port_name: "input".into(),
+                also_broken: false,
+            }],
             domain_hints: vec!["e-commerce orders".into()],
-            fix_history: vec![
-                FixRecord {
-                    attempt: 1,
-                    attempted_fix: "Changed right_key to 'uid'".into(),
-                    success: false,
-                    result_error: Some("Column 'uid' not found".into()),
-                },
-            ],
+            fix_history: vec![FixRecord {
+                attempt: 1,
+                attempted_fix: "Changed right_key to 'uid'".into(),
+                success: false,
+                result_error: Some("Column 'uid' not found".into()),
+            }],
             graph_topology: vec![],
         };
 

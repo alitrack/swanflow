@@ -4,23 +4,22 @@ use swanflow_core::kernel::DbWrite;
 
 #[tokio::test]
 async fn test_e2e_all_workflows() {
-    let wfs = swanflow_knime::parse_knar("/tmp/KNIME_study.knar")
-        .expect("Failed to parse .knar");
-    
+    let wfs = swanflow_knime::parse_knar("/tmp/KNIME_study.knar").expect("Failed to parse .knar");
+
     let mapper = swanflow_knime::KnimeNodeMapper::new();
     let db = MockDb::new();
-    
+
     let mut total_wf = 0usize;
     let mut ok_wf = 0usize;
     let mut total_sql = 0usize;
     let mut ok_sql = 0usize;
     let mut total_nodes = 0usize;
     let mut mapped_nodes = 0usize;
-    
+
     for (name, knwf) in &wfs {
         total_wf += 1;
         total_nodes += knwf.nodes.len();
-        
+
         let sw_wf = match mapper.convert(knwf.clone()).await {
             Ok(w) => w,
             Err(e) => {
@@ -28,11 +27,11 @@ async fn test_e2e_all_workflows() {
                 continue;
             }
         };
-        
+
         let mut wf_ok = true;
         let mut wf_sql = 0usize;
         let mut wf_sql_ok = 0usize;
-        
+
         for idx in sw_wf.graph.node_indices() {
             let node = &sw_wf.graph[idx];
             if node.type_id != "core.missing.placeholder" && node.type_id != "core.util.unknown" {
@@ -57,15 +56,21 @@ async fn test_e2e_all_workflows() {
                 }
             }
         }
-        
-        if wf_ok { ok_wf += 1; }
+
+        if wf_ok {
+            ok_wf += 1;
+        }
     }
-    
+
     println!("Workflows:  {}/{} converted", ok_wf, total_wf);
-    println!("Nodes:      {}/{} mapped ({:.1}%)", mapped_nodes, total_nodes,
-        mapped_nodes as f64 / total_nodes as f64 * 100.0);
+    println!(
+        "Nodes:      {}/{} mapped ({:.1}%)",
+        mapped_nodes,
+        total_nodes,
+        mapped_nodes as f64 / total_nodes as f64 * 100.0
+    );
     println!("SQL:        {}/{} executed", ok_sql, total_sql);
-    
+
     assert!(ok_wf > total_wf / 2, "Less than 50% workflows converted");
     assert!(ok_sql > 0, "No SQL executed");
 }

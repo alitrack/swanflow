@@ -10,10 +10,10 @@
 //! 且结果与新版一致；不迁移则必须报错而不是静默算。" That is three properties, and
 //! the three tests below are one each.
 
-use async_trait::async_trait;
 use super::WorkflowCompiler;
 use crate::core::graph::Workflow;
 use crate::nodes::{NodeBehavior, NodeCapability, NodeErrorClass, NodeSpec, PortSpec};
+use async_trait::async_trait;
 use datafusion::logical_expr::LogicalPlan;
 use serde_json::{json, Value as JsonValue};
 use uuid::Uuid;
@@ -56,7 +56,11 @@ impl NodeBehavior for RenamedKeyNode {
         let obj = config
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("config must be an object"))?;
-        let key = if self.version >= 2 { "path" } else { "source_file" };
+        let key = if self.version >= 2 {
+            "path"
+        } else {
+            "source_file"
+        };
         if !obj.contains_key(key) {
             anyhow::bail!("missing '{key}' for v{}", self.version);
         }
@@ -76,7 +80,9 @@ impl NodeBehavior for RenamedKeyNode {
         if !self.implements_migration {
             // No override in spirit: hand it to the default, which must refuse.
             return crate::nodes::NodeBehavior::migrate_config(
-                &UnmigratedNode { version: self.version },
+                &UnmigratedNode {
+                    version: self.version,
+                },
                 config,
                 from_version,
                 to_version,
@@ -177,7 +183,11 @@ fn an_old_config_migrates_to_the_new_shape() {
         "the old key must not survive the migration: {out}"
     );
     assert_eq!(out["config_version"], json!(2), "version must be stamped");
-    assert_eq!(out["impl_version"], json!(1), "impl version must be stamped");
+    assert_eq!(
+        out["impl_version"],
+        json!(1),
+        "impl version must be stamped"
+    );
 }
 
 /// Property 1b: "结果与新版一致" — the migrated config must equal the config a

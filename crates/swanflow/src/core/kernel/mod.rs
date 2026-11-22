@@ -24,6 +24,6 @@ pub mod runtime;
 // Re-exports for backward compatibility — existing `use crate::core::kernel::*` still works.
 pub use ai::*;
 pub use core::*;
+pub use mock::*;
 pub use plugin::*;
 pub use runtime::*;
-pub use mock::*;

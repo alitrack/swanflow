@@ -35,7 +35,10 @@ fn example_analyze_export_reports_whitelist_errors_cleanly() {
         Ok(prog) => assert!(prog.source.contains("SWANFLOW_DEPLOY_OK")),
         Err(e) => {
             let msg = e.to_string();
-            assert!(msg.contains("whitelist"), "failure must be whitelist-shaped: {msg}");
+            assert!(
+                msg.contains("whitelist"),
+                "failure must be whitelist-shaped: {msg}"
+            );
         }
     }
 }

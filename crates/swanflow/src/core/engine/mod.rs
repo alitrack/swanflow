@@ -1,16 +1,16 @@
-pub mod backend;
 pub mod assets;
-pub mod provenance;
 pub mod automation;
+pub mod backend;
 pub mod cache;
 pub mod checkpoint;
 pub mod daemon;
+pub mod datafusion_backend;
+pub mod duckdb_backend;
 pub mod flow_vars;
 pub mod health;
 pub mod incremental;
+pub mod provenance;
 pub mod webhook_server;
-pub mod datafusion_backend;
-pub mod duckdb_backend;
 
 pub use backend::{EngineCapabilities, QueryEngine, QueryEngineRef, RegisteredTable, TableSource};
 pub use datafusion_backend::DataFusionEngine;
@@ -33,9 +33,9 @@ type UpstreamsByNode = std::collections::HashMap<Uuid, (String, Vec<(Uuid, Strin
 
 use crate::core::compiler::WorkflowCompiler;
 use crate::core::graph::Workflow;
-use petgraph::visit::EdgeRef;
 use crate::nodes::registry::NodeRegistry;
 use crate::nodes::{NodeDiagnostic, NodeErrorClass, NodeEvent};
+use petgraph::visit::EdgeRef;
 
 use duckdb::Connection;
 use serde::Deserialize;
@@ -217,9 +217,7 @@ fn count_checkpoint_runs(cache_dir: &str) -> (usize, usize) {
     let mut completed = 0usize;
     let mut in_progress = 0usize;
 
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT checkpoint_json FROM __execution_checkpoints",
-    ) {
+    if let Ok(mut stmt) = conn.prepare("SELECT checkpoint_json FROM __execution_checkpoints") {
         if let Ok(rows) = stmt.query_map([], |row| {
             let json: String = row.get(0)?;
             Ok(json)
@@ -308,10 +306,7 @@ impl SwanFlowEngine {
         )
         .expect("Failed to create graph nodes table");
         // Backward compat: older caches lack the name column
-        let _ = conn.execute(
-            "ALTER TABLE __graph_nodes ADD COLUMN name TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE __graph_nodes ADD COLUMN name TEXT", []);
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS __graph_edges (
@@ -332,9 +327,9 @@ impl SwanFlowEngine {
             hook: None,
             engine: None,
             engine_mode: EngineMode::DataFusion,
-            node_timeout_seconds: 3600, // default 1 hour timeout
+            node_timeout_seconds: 3600,    // default 1 hour timeout
             max_rows_per_node: 10_000_000, // default 10M rows per node
-            max_cache_size_mb: 1024, // default 1GB cache limit
+            max_cache_size_mb: 1024,       // default 1GB cache limit
             skip_fresh: std::env::var("SWANFLOW_SKIP_FRESH")
                 .map(|v| v == "1")
                 .unwrap_or(false),
@@ -410,14 +405,11 @@ impl SwanFlowEngine {
         &self,
         workflow: &Workflow,
     ) -> Result<mpsc::UnboundedReceiver<NodeEvent>> {
-        let engine = self
-            .engine
-            .as_ref()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(
-                    "DuckDB engine not configured. Use with_engine() to set one.".to_string(),
-                )
-            })?;
+        let engine = self.engine.as_ref().ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(
+                "DuckDB engine not configured. Use with_engine() to set one.".to_string(),
+            )
+        })?;
 
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -478,17 +470,16 @@ impl SwanFlowEngine {
             .graph
             .node_indices()
             .filter_map(|idx| {
-                workflow
-                    .graph
-                    .node_weight(idx)
-                    .map(|n| (
+                workflow.graph.node_weight(idx).map(|n| {
+                    (
                         n.id,
                         crate::core::templating::TemplateEngine::render_json(
                             &n.config,
                             &workflow.context,
                         )
                         .to_string(),
-                    ))
+                    )
+                })
             })
             .collect();
 
@@ -496,7 +487,8 @@ impl SwanFlowEngine {
             let cm = checkpoint::CheckpointManager::new(&duckdb_cache_dir);
 
             // Check for resumable checkpoint — skip already-completed levels
-            let resume_from = cm.find_resumable(&duckdb_wf_name)
+            let resume_from = cm
+                .find_resumable(&duckdb_wf_name)
                 .ok()
                 .flatten()
                 .and_then(|cp| cp.completed_levels.iter().max().map(|l| l + 1))
@@ -564,12 +556,13 @@ impl SwanFlowEngine {
                     let duckdb_node_id = node_id;
                     match with_node_timeout(duckdb_node_id, duckdb_timeout_secs, async {
                         engine_clone.execute_sql(&sql).await
-                    }).await {
+                    })
+                    .await
+                    {
                         Ok(batches) => {
                             if !batches.is_empty() {
                                 // Materialize result as a registered table
-                                let table_name =
-                                    crate::core::node_table_name(node_id);
+                                let table_name = crate::core::node_table_name(node_id);
                                 let schema = batches[0].schema();
                                 if let Err(e) = engine_clone
                                     .register_table(RegisteredTable {
@@ -583,10 +576,7 @@ impl SwanFlowEngine {
                                 {
                                     let _ = tx_err.send(NodeEvent::Error {
                                         node_id,
-                                        message: format!(
-                                            "Materialization failed: {}",
-                                            e
-                                        ),
+                                        message: format!("Materialization failed: {}", e),
                                     });
                                     continue;
                                 }
@@ -729,10 +719,7 @@ impl SwanFlowEngine {
         let df_wf_name = workflow.name.clone();
         // Predecessor map for staged conditional evaluation (node_id -> [pred ids]).
         // Recurses into sub_workflows so inner conditional nodes can find their preds.
-        fn collect_preds(
-            wf: &crate::core::graph::Workflow,
-            map: &mut HashMap<Uuid, Vec<Uuid>>,
-        ) {
+        fn collect_preds(wf: &crate::core::graph::Workflow, map: &mut HashMap<Uuid, Vec<Uuid>>) {
             for node_idx in wf.graph.node_indices() {
                 let node = &wf.graph[node_idx];
                 let preds: Vec<Uuid> = wf
@@ -787,31 +774,33 @@ impl SwanFlowEngine {
             .graph
             .node_indices()
             .filter_map(|idx| {
-                workflow
-                    .graph
-                    .node_weight(idx)
-                    .map(|n| (
+                workflow.graph.node_weight(idx).map(|n| {
+                    (
                         n.id,
                         crate::core::templating::TemplateEngine::render_json(
                             &n.config,
                             &workflow.context,
                         )
                         .to_string(),
-                    ))
+                    )
+                })
             })
             .collect();
 
         // Digest chain state for this run (skip-if-fresh bookkeeping):
         // node_id -> digest, filled as nodes execute or are skipped.
-        let df_digest_map = std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::<Uuid, assets::UpstreamDigest>::new(),
-        ));
+        let df_digest_map =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+                Uuid,
+                assets::UpstreamDigest,
+            >::new()));
 
         tokio::spawn(async move {
             let cm = checkpoint::CheckpointManager::new(&df_cache_dir);
 
             // Check for resumable checkpoint — skip already-completed levels
-            let resume_from = cm.find_resumable(&df_wf_name)
+            let resume_from = cm
+                .find_resumable(&df_wf_name)
                 .ok()
                 .flatten()
                 .and_then(|cp| cp.completed_levels.iter().max().map(|l| l + 1))
@@ -872,8 +861,9 @@ impl SwanFlowEngine {
                                 if let Some(preds) = map.get(&node_id) {
                                     for pid in preds {
                                         let t = crate::core::node_table_name(*pid);
-                                        if let Ok(df) =
-                                            ctx_shared.sql(&format!("SELECT * FROM \"{}\"", t)).await
+                                        if let Ok(df) = ctx_shared
+                                            .sql(&format!("SELECT * FROM \"{}\"", t))
+                                            .await
                                         {
                                             if let Ok(batches) = df.collect().await {
                                                 use datafusion::arrow::util::display::{
@@ -882,11 +872,16 @@ impl SwanFlowEngine {
                                                 let opts = FormatOptions::default();
                                                 'outer: for b in &batches {
                                                     for c in 0..b.num_columns() {
-                                                        if let Ok(fmt) =
-                                                            ArrayFormatter::try_new(b.column(c), &opts)
-                                                        {
+                                                        if let Ok(fmt) = ArrayFormatter::try_new(
+                                                            b.column(c),
+                                                            &opts,
+                                                        ) {
                                                             for r in 0..b.num_rows() {
-                                                                if fmt.value(r).to_string().contains(when.as_str()) {
+                                                                if fmt
+                                                                    .value(r)
+                                                                    .to_string()
+                                                                    .contains(when.as_str())
+                                                                {
                                                                     found = true;
                                                                     break 'outer;
                                                                 }
@@ -925,11 +920,9 @@ impl SwanFlowEngine {
                     // concatenating all predecessor cell values (data-semantics
                     // counterpart of the legacy step-context "input" variable).
                     if sp_mode == crate::core::graph::StepMode::Collect {
-                        use datafusion::arrow::util::display::{
-                            ArrayFormatter, FormatOptions,
-                        };
                         use datafusion::arrow::array::StringArray;
                         use datafusion::arrow::record_batch::RecordBatch;
+                        use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
                         let mut collected: Vec<String> = Vec::new();
                         if let Some(preds) = workflow_pred_ids.get(&node_id) {
                             for pid in preds {
@@ -946,9 +939,7 @@ impl SwanFlowEngine {
                                                     ArrayFormatter::try_new(b.column(c), &opts)
                                                 {
                                                     for r in 0..b.num_rows() {
-                                                        collected.push(
-                                                            fmt.value(r).to_string(),
-                                                        );
+                                                        collected.push(fmt.value(r).to_string());
                                                         if collected.len() > 100_000 {
                                                             break 'col_outer;
                                                         }
@@ -970,13 +961,11 @@ impl SwanFlowEngine {
                         .expect("collect batch build");
                         let table_name = crate::core::node_table_name(node_id);
                         // r4 C3: same hard-fail contract as the main staged path.
-                        let mat = ctx_shared
-                            .read_batches(vec![batch])
-                            .and_then(|df| {
-                                ctx_shared
-                                    .register_table(&table_name, df.into_view())
-                                    .map(|_| ())
-                            });
+                        let mat = ctx_shared.read_batches(vec![batch]).and_then(|df| {
+                            ctx_shared
+                                .register_table(&table_name, df.into_view())
+                                .map(|_| ())
+                        });
                         match mat {
                             Ok(()) => {
                                 let _ = tx.send(NodeEvent::Materialized {
@@ -1146,384 +1135,402 @@ impl SwanFlowEngine {
                     };
                     let mut attempt_no: usize = 0;
                     'retry_loop: loop {
-                    attempt_no += 1;
-                    let _ = attempt_no; // used in logs below via error arms
-                    match state.create_physical_plan(&logical_plan).await {
-                        Ok(physical_plan) => {
+                        attempt_no += 1;
+                        let _ = attempt_no; // used in logs below via error arms
+                        match state.create_physical_plan(&logical_plan).await {
+                            Ok(physical_plan) => {
+                                let task_ctx = ctx_shared.task_ctx();
+                                let node_id_exec = node_id;
+                                let physical_plan_clone = physical_plan.clone();
+                                match with_node_timeout(node_id_exec, node_timeout_seconds, async {
+                                    datafusion::physical_plan::collect(
+                                        physical_plan_clone,
+                                        task_ctx,
+                                    )
+                                    .await
+                                })
+                                .await
+                                {
+                                    Ok(batches) => {
+                                        if let Some(hook) = &hook_shared {
+                                            if !batches.is_empty() {
+                                                let _ = hook
+                                                    .on_data_quality(node_id, &batches[0])
+                                                    .await;
+                                            }
+                                        }
 
-                            let task_ctx = ctx_shared.task_ctx();
-                            let node_id_exec = node_id;
-                            let physical_plan_clone = physical_plan.clone();
-                            match with_node_timeout(node_id_exec, node_timeout_seconds, async {
-                                datafusion::physical_plan::collect(physical_plan_clone, task_ctx).await
-                            }).await
-                            {
-                                Ok(batches) => {
-                                    if let Some(hook) = &hook_shared {
+                                        // MANUAL MATERIALIZATION: Register as table so it's queryable
                                         if !batches.is_empty() {
-                                            let _ =
-                                                hook.on_data_quality(node_id, &batches[0]).await;
+                                            let table_name = crate::core::node_table_name(node_id);
+                                            // P1-3 fix: materialization/registration
+                                            // failure is a HARD node error. The old
+                                            // `if let Ok(..)` + `let _ =` silently
+                                            // dropped the table while the node still
+                                            // reported Executed — downstream nodes
+                                            // then failed with "table not found"
+                                            // and the run completed "successfully".
+                                            let materialized = ctx_shared
+                                                .read_batches(batches.clone())
+                                                .and_then(|df| {
+                                                    // Re-run semantics: sync_metadata_to_context
+                                                    // may have registered this node's table at
+                                                    // startup — replace it (same pattern as the
+                                                    // skip-checkpoint path below).
+                                                    let _ =
+                                                        ctx_shared.deregister_table(&table_name);
+                                                    ctx_shared
+                                                        .register_table(&table_name, df.into_view())
+                                                        .map(|_| ())
+                                                });
+                                            match materialized {
+                                                Ok(()) => {
+                                                    let _ = tx.send(NodeEvent::Materialized {
+                                                        node_id,
+                                                        table_name,
+                                                        parquet_path: "".to_string(), // In-memory for now
+                                                    });
+                                                }
+                                                Err(e) => {
+                                                    let diagnostic = NodeDiagnostic::new(
+                                                        node_id,
+                                                        node_type.clone(),
+                                                        NodeErrorClass::Execution,
+                                                        format!("Materialization failed: {}", e),
+                                                    );
+                                                    let _ = tx.send(NodeEvent::Error {
+                                                        node_id,
+                                                        message: diagnostic.to_event_message(),
+                                                    });
+                                                    // P1-2/P1-3: abort the run.
+                                                    // P2-15 fix: this is a terminal
+                                                    // outcome — exit the retry loop
+                                                    // (a bare `continue` used to
+                                                    // RE-EXECUTE the node instead).
+                                                    break 'retry_loop;
+                                                }
+                                            }
+                                        }
+
+                                        let _ = tx.send(NodeEvent::StateChanged {
+                                            node_id,
+                                            state: crate::nodes::NodeState::Executed,
+                                        });
+                                        // ADR-014 Stage 1: record materialization
+                                        // in the asset ledger (best-effort).
+                                        if let Some((cfg, ups)) = df_level_upstreams.get(&node_id) {
+                                            // v3: rendered config — same
+                                            // precomputed render the skip
+                                            // checkpoint uses (record/skip
+                                            // symmetry).
+                                            let rendered = df_rendered_configs
+                                                .get(&node_id)
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            assets::record_asset_run(
+                                                &df_cache_dir,
+                                                node_id,
+                                                &node_type,
+                                                cfg,
+                                                &rendered,
+                                                ups,
+                                            );
+                                            // Chain bookkeeping for downstream
+                                            // skip-if-fresh decisions.
+                                            let upstream_digests: Vec<(
+                                                Uuid,
+                                                assets::UpstreamDigest,
+                                            )> = ups
+                                                .iter()
+                                                .filter_map(|(uid, _uty, _ucfg)| {
+                                                    df_digest_map
+                                                        .lock()
+                                                        .ok()?
+                                                        .get(uid)
+                                                        .cloned()
+                                                        .map(|d| (*uid, d))
+                                                })
+                                                .collect();
+                                            if let Some(d) = assets::recompute_digest(
+                                                node_id,
+                                                &node_type,
+                                                cfg,
+                                                &rendered,
+                                                &upstream_digests,
+                                            ) {
+                                                if let Ok(mut m) = df_digest_map.lock() {
+                                                    m.insert(node_id, d);
+                                                }
+                                            }
+                                        }
+                                        // P2-15 fix: the SUCCESS arm must exit the
+                                        // retry loop. It previously fell through to
+                                        // the next iteration and re-executed the
+                                        // node forever (staged run never finished).
+                                        break 'retry_loop;
+                                    }
+                                    Err(e) => {
+                                        let diagnostic = NodeDiagnostic::new(
+                                            node_id,
+                                            node_type.clone(),
+                                            NodeErrorClass::Execution,
+                                            format!("Execution error: {}", e),
+                                        );
+                                        let handled = false;
+                                        if let Some(hook) = &hook_shared {
+                                            if should_invoke_self_healing(&diagnostic) {
+                                                if let Some(repair) = hook
+                                                    .on_error(
+                                                        node_id,
+                                                        &node_type,
+                                                        &json!({}),
+                                                        &diagnostic.message,
+                                                    )
+                                                    .await
+                                                {
+                                                    // P2-10: a proposed repair is ADVISORY only — we do not
+                                                    // apply it and do not re-run. Never suppress the error
+                                                    // event (the old handled=true turned loud failures into
+                                                    // silent continues).
+                                                    println!(
+                                                    "[Intelligence] proposed repair {:?} for node {} (advisory, not applied)",
+                                                    repair, node_id
+                                                );
+                                                }
+                                            }
+                                        }
+                                        if !handled {
+                                            match &error_mode {
+                                                crate::core::graph::ErrorMode::Skip => {
+                                                    println!(
+                                                    "DEBUG: node {} error swallowed (error_mode=skip)",
+                                                    node_id
+                                                );
+                                                }
+                                                // P2-15 fix: terminal arm — exit loop.
+                                                crate::core::graph::ErrorMode::Retry(max) => {
+                                                    if attempt_no < retry_max {
+                                                        let delay_ms =
+                                                        crate::core::retry::backoff_delay_ms(
+                                                            crate::core::retry::DEFAULT_BASE_DELAY_MS,
+                                                            (attempt_no - 1) as u64,
+                                                        );
+                                                        println!(
+                                                        "DEBUG: node {} failed, retrying ({}/{}), backoff {}ms",
+                                                        node_id, attempt_no, retry_max, delay_ms
+                                                    );
+                                                        tokio::time::sleep(
+                                                            std::time::Duration::from_millis(
+                                                                delay_ms,
+                                                            ),
+                                                        )
+                                                        .await;
+                                                        continue 'retry_loop;
+                                                    }
+                                                    println!(
+                                                    "DEBUG: node {} retry exhausted ({}), surfacing error",
+                                                    node_id, max
+                                                );
+                                                    let _ = tx.send(NodeEvent::Error {
+                                                        node_id,
+                                                        message: diagnostic.to_event_message(),
+                                                    });
+                                                    // P1-2: retry exhaustion is a hard failure.
+                                                }
+                                                crate::core::graph::ErrorMode::Fail => {
+                                                    let _ = tx.send(NodeEvent::Error {
+                                                        node_id,
+                                                        message: diagnostic.to_event_message(),
+                                                    });
+                                                    // P1-2: Fail policy must abort the run.
+                                                }
+                                            }
+                                            // P2-15 fix: reaching here means a
+                                            // terminal arm (Skip / exhausted / Fail)
+                                            // ran — exit the retry loop instead of
+                                            // re-executing the node forever.
+                                            break 'retry_loop;
                                         }
                                     }
+                                }
+                            }
+                            Err(e) => {
+                                // RETRY after Sync
+                                // Unified retry policy (core/retry.rs): fixed 500ms
+                                // sleep replaced by the shared exponential backoff.
+                                let retry_delay_ms = crate::core::retry::backoff_delay_ms(
+                                    crate::core::retry::DEFAULT_BASE_DELAY_MS,
+                                    0,
+                                );
+                                eprintln!("DEBUG: Level {} node {} port {} planning failed, retrying after sync (backoff {}ms)...", level, node_id, port, retry_delay_ms);
+                                sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    retry_delay_ms,
+                                ))
+                                .await;
 
-                                    // MANUAL MATERIALIZATION: Register as table so it's queryable
-                                    if !batches.is_empty() {
-                                        let table_name =
-                                            crate::core::node_table_name(node_id);
-                                        // P1-3 fix: materialization/registration
-                                        // failure is a HARD node error. The old
-                                        // `if let Ok(..)` + `let _ =` silently
-                                        // dropped the table while the node still
-                                        // reported Executed — downstream nodes
-                                        // then failed with "table not found"
-                                        // and the run completed "successfully".
-                                        let materialized = ctx_shared
-                                            .read_batches(batches.clone())
-                                            .and_then(|df| {
-                                                // Re-run semantics: sync_metadata_to_context
-                                                // may have registered this node's table at
-                                                // startup — replace it (same pattern as the
-                                                // skip-checkpoint path below).
-                                                let _ = ctx_shared
-                                                    .deregister_table(&table_name);
-                                                ctx_shared
-                                                    .register_table(&table_name, df.into_view())
-                                                    .map(|_| ())
-                                            });
-                                        match materialized {
-                                            Ok(()) => {
-                                                let _ = tx.send(NodeEvent::Materialized {
+                                let state = ctx_shared.state();
+                                let state = SessionStateBuilder::new_from_existing(state)
+                                    .with_query_planner(query_planner_clone.clone())
+                                    .build();
+
+                                match state.create_physical_plan(&logical_plan).await {
+                                    Ok(physical_plan) => {
+                                        let task_ctx = ctx_shared.task_ctx();
+                                        let retry_node_id = node_id;
+                                        let physical_plan_clone2 = physical_plan.clone();
+                                        match with_node_timeout(
+                                            retry_node_id,
+                                            node_timeout_seconds,
+                                            async {
+                                                datafusion::physical_plan::collect(
+                                                    physical_plan_clone2,
+                                                    task_ctx,
+                                                )
+                                                .await
+                                            },
+                                        )
+                                        .await
+                                        {
+                                            Ok(_batches) => {
+                                                let _ = tx.send(NodeEvent::StateChanged {
                                                     node_id,
-                                                    table_name,
-                                                    parquet_path: "".to_string(), // In-memory for now
+                                                    state: crate::nodes::NodeState::Executed,
                                                 });
+                                                // P2-15 fix: replan-succeeded arm must
+                                                // also exit the retry loop (it used to
+                                                // fall through and re-execute forever).
+                                                break 'retry_loop;
                                             }
                                             Err(e) => {
                                                 let diagnostic = NodeDiagnostic::new(
                                                     node_id,
                                                     node_type.clone(),
                                                     NodeErrorClass::Execution,
-                                                    format!("Materialization failed: {}", e),
+                                                    format!("Execution error: {}", e),
                                                 );
-                                                let _ = tx.send(NodeEvent::Error {
-                                                    node_id,
-                                                    message: diagnostic.to_event_message(),
-                                                });
-                                                // P1-2/P1-3: abort the run.
-                                                // P2-15 fix: this is a terminal
-                                                // outcome — exit the retry loop
-                                                // (a bare `continue` used to
-                                                // RE-EXECUTE the node instead).
-                                                break 'retry_loop;
-                                            }
-                                        }
-                                    }
-
-                                    let _ = tx.send(NodeEvent::StateChanged {
-                                        node_id,
-                                        state: crate::nodes::NodeState::Executed,
-                                    });
-                                    // ADR-014 Stage 1: record materialization
-                                    // in the asset ledger (best-effort).
-                                    if let Some((cfg, ups)) =
-                                        df_level_upstreams.get(&node_id)
-                                    {
-                                        // v3: rendered config — same
-                                        // precomputed render the skip
-                                        // checkpoint uses (record/skip
-                                        // symmetry).
-                                        let rendered = df_rendered_configs
-                                            .get(&node_id)
-                                            .cloned()
-                                            .unwrap_or_default();
-                                        assets::record_asset_run(
-                                            &df_cache_dir,
-                                            node_id,
-                                            &node_type,
-                                            cfg,
-                                            &rendered,
-                                            ups,
-                                        );
-                                        // Chain bookkeeping for downstream
-                                        // skip-if-fresh decisions.
-                                        let upstream_digests: Vec<(
-                                            Uuid,
-                                            assets::UpstreamDigest,
-                                        )> = ups
-                                            .iter()
-                                            .filter_map(|(uid, _uty, _ucfg)| {
-                                                df_digest_map
-                                                    .lock()
-                                                    .ok()?
-                                                    .get(uid)
-                                                    .cloned()
-                                                    .map(|d| (*uid, d))
-                                            })
-                                            .collect();
-                                        if let Some(d) = assets::recompute_digest(
-                                            node_id,
-                                            &node_type,
-                                            cfg,
-                                            &rendered,
-                                            &upstream_digests,
-                                        ) {
-                                            if let Ok(mut m) = df_digest_map.lock() {
-                                                m.insert(node_id, d);
-                                            }
-                                        }
-                                    }
-                                    // P2-15 fix: the SUCCESS arm must exit the
-                                    // retry loop. It previously fell through to
-                                    // the next iteration and re-executed the
-                                    // node forever (staged run never finished).
-                                    break 'retry_loop;
-                                }
-                                Err(e) => {
-                                    let diagnostic = NodeDiagnostic::new(
-                                        node_id,
-                                        node_type.clone(),
-                                        NodeErrorClass::Execution,
-                                        format!("Execution error: {}", e),
-                                    );
-                                    let handled = false;
-                                    if let Some(hook) = &hook_shared {
-                                        if should_invoke_self_healing(&diagnostic) {
-                                            if let Some(repair) = hook
-                                                .on_error(
-                                                    node_id,
-                                                    &node_type,
-                                                    &json!({}),
-                                                    &diagnostic.message,
-                                                )
-                                                .await
-                                            {
-                                                // P2-10: a proposed repair is ADVISORY only — we do not
-                                                // apply it and do not re-run. Never suppress the error
-                                                // event (the old handled=true turned loud failures into
-                                                // silent continues).
-                                                println!(
-                                                    "[Intelligence] proposed repair {:?} for node {} (advisory, not applied)",
-                                                    repair, node_id
-                                                );
-                                            }
-                                        }
-                                    }
-                                    if !handled {
-                                        match &error_mode {
-                                            crate::core::graph::ErrorMode::Skip => {
-                                                println!(
-                                                    "DEBUG: node {} error swallowed (error_mode=skip)",
-                                                    node_id
-                                                );
-                                            }
-                                            // P2-15 fix: terminal arm — exit loop.
-                                            crate::core::graph::ErrorMode::Retry(max) => {
-                                                if attempt_no < retry_max {
-                                                    let delay_ms =
-                                                        crate::core::retry::backoff_delay_ms(
-                                                            crate::core::retry::DEFAULT_BASE_DELAY_MS,
-                                                            (attempt_no - 1) as u64,
-                                                        );
-                                                    println!(
-                                                        "DEBUG: node {} failed, retrying ({}/{}), backoff {}ms",
-                                                        node_id, attempt_no, retry_max, delay_ms
-                                                    );
-                                                    tokio::time::sleep(
-                                                        std::time::Duration::from_millis(delay_ms),
-                                                    )
-                                                    .await;
-                                                    continue 'retry_loop;
-                                                }
-                                                println!(
-                                                    "DEBUG: node {} retry exhausted ({}), surfacing error",
-                                                    node_id, max
-                                                );
-                                                let _ = tx.send(NodeEvent::Error {
-                                                    node_id,
-                                                    message: diagnostic.to_event_message(),
-                                                });
-                                                // P1-2: retry exhaustion is a hard failure.
-                                            }
-                                            crate::core::graph::ErrorMode::Fail => {
-                                                let _ = tx.send(NodeEvent::Error {
-                                                    node_id,
-                                                    message: diagnostic.to_event_message(),
-                                                });
-                                                // P1-2: Fail policy must abort the run.
-                                            }
-                                        }
-                                        // P2-15 fix: reaching here means a
-                                        // terminal arm (Skip / exhausted / Fail)
-                                        // ran — exit the retry loop instead of
-                                        // re-executing the node forever.
-                                        break 'retry_loop;
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            // RETRY after Sync
-                            // Unified retry policy (core/retry.rs): fixed 500ms
-                            // sleep replaced by the shared exponential backoff.
-                            let retry_delay_ms = crate::core::retry::backoff_delay_ms(
-                                crate::core::retry::DEFAULT_BASE_DELAY_MS,
-                                0,
-                            );
-                            eprintln!("DEBUG: Level {} node {} port {} planning failed, retrying after sync (backoff {}ms)...", level, node_id, port, retry_delay_ms);
-                            sync_metadata_to_context(&ctx_shared, &cache_dir_clone).await;
-                            tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
-
-                            let state = ctx_shared.state();
-                            let state = SessionStateBuilder::new_from_existing(state)
-                                .with_query_planner(query_planner_clone.clone())
-                                .build();
-
-                            match state.create_physical_plan(&logical_plan).await {
-                                Ok(physical_plan) => {
-                                    let task_ctx = ctx_shared.task_ctx();
-                                    let retry_node_id = node_id;
-                                    let physical_plan_clone2 = physical_plan.clone();
-                                    match with_node_timeout(retry_node_id, node_timeout_seconds, async {
-                                        datafusion::physical_plan::collect(physical_plan_clone2, task_ctx).await
-                                    }).await
-                                    {
-                                        Ok(_batches) => {
-                                            let _ = tx.send(NodeEvent::StateChanged {
-                                                node_id,
-                                                state: crate::nodes::NodeState::Executed,
-                                            });
-                                            // P2-15 fix: replan-succeeded arm must
-                                            // also exit the retry loop (it used to
-                                            // fall through and re-execute forever).
-                                            break 'retry_loop;
-                                        }
-                                        Err(e) => {
-                                            let diagnostic = NodeDiagnostic::new(
-                                                node_id,
-                                                node_type.clone(),
-                                                NodeErrorClass::Execution,
-                                                format!("Execution error: {}", e),
-                                            );
-                                            let handled = false;
-                                            if let Some(hook) = &hook_shared {
-                                                if should_invoke_self_healing(&diagnostic) {
-                                                    if let Some(repair) = hook
-                                                        .on_error(
-                                                            node_id,
-                                                            &node_type,
-                                                            &json!({}),
-                                                            &diagnostic.message,
-                                                        )
-                                                        .await
-                                                    {
-                                                        // P2-10: advisory only — never suppress the error event.
-                                                        println!(
+                                                let handled = false;
+                                                if let Some(hook) = &hook_shared {
+                                                    if should_invoke_self_healing(&diagnostic) {
+                                                        if let Some(repair) = hook
+                                                            .on_error(
+                                                                node_id,
+                                                                &node_type,
+                                                                &json!({}),
+                                                                &diagnostic.message,
+                                                            )
+                                                            .await
+                                                        {
+                                                            // P2-10: advisory only — never suppress the error event.
+                                                            println!(
                                                             "[Intelligence] proposed repair {:?} for node {} (advisory, not applied)",
                                                             repair, node_id
                                                         );
+                                                        }
                                                     }
                                                 }
-                                            }
-                                            if !handled {
-                                                let _ = tx.send(NodeEvent::Error {
-                                                    node_id,
-                                                    message: diagnostic.to_event_message(),
-                                                });
-                                                // r4 C2: this exec-fail branch
-                                                // (initial planning failed, replan
-                                                // succeeded, execution failed) also
-                                                // hard-fails the run.
+                                                if !handled {
+                                                    let _ = tx.send(NodeEvent::Error {
+                                                        node_id,
+                                                        message: diagnostic.to_event_message(),
+                                                    });
+                                                    // r4 C2: this exec-fail branch
+                                                    // (initial planning failed, replan
+                                                    // succeeded, execution failed) also
+                                                    // hard-fails the run.
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                Err(e2) => {
-                                    let diagnostic = NodeDiagnostic::new(
-                                        node_id,
-                                        node_type.clone(),
-                                        NodeErrorClass::Planning,
-                                        format!(
-                                            "Planning error after sync: {} (Original: {})",
-                                            e2, e
-                                        ),
-                                    );
-                                    let handled = false;
-                                    if let Some(hook) = &hook_shared {
-                                        if should_invoke_self_healing(&diagnostic) {
-                                            if let Some(repair) = hook
-                                                .on_error(
-                                                    node_id,
-                                                    &node_type,
-                                                    &json!({}),
-                                                    &diagnostic.message,
-                                                )
-                                                .await
-                                            {
-                                                // P2-10: a proposed repair is ADVISORY only — we do not
-                                                // apply it and do not re-run. Never suppress the error
-                                                // event (the old handled=true turned loud failures into
-                                                // silent continues).
-                                                println!(
+                                    Err(e2) => {
+                                        let diagnostic = NodeDiagnostic::new(
+                                            node_id,
+                                            node_type.clone(),
+                                            NodeErrorClass::Planning,
+                                            format!(
+                                                "Planning error after sync: {} (Original: {})",
+                                                e2, e
+                                            ),
+                                        );
+                                        let handled = false;
+                                        if let Some(hook) = &hook_shared {
+                                            if should_invoke_self_healing(&diagnostic) {
+                                                if let Some(repair) = hook
+                                                    .on_error(
+                                                        node_id,
+                                                        &node_type,
+                                                        &json!({}),
+                                                        &diagnostic.message,
+                                                    )
+                                                    .await
+                                                {
+                                                    // P2-10: a proposed repair is ADVISORY only — we do not
+                                                    // apply it and do not re-run. Never suppress the error
+                                                    // event (the old handled=true turned loud failures into
+                                                    // silent continues).
+                                                    println!(
                                                     "[Intelligence] proposed repair {:?} for node {} (advisory, not applied)",
                                                     repair, node_id
                                                 );
+                                                }
                                             }
                                         }
-                                    }
-                                    if !handled {
-                                        match &error_mode {
-                                            crate::core::graph::ErrorMode::Skip => {
-                                                println!(
+                                        if !handled {
+                                            match &error_mode {
+                                                crate::core::graph::ErrorMode::Skip => {
+                                                    println!(
                                                     "DEBUG: node {} error swallowed (error_mode=skip)",
                                                     node_id
                                                 );
-                                            }
-                                            // P2-15 fix: terminal arm — exit loop.
-                                            crate::core::graph::ErrorMode::Retry(max) => {
-                                                if attempt_no < retry_max {
-                                                    let delay_ms =
+                                                }
+                                                // P2-15 fix: terminal arm — exit loop.
+                                                crate::core::graph::ErrorMode::Retry(max) => {
+                                                    if attempt_no < retry_max {
+                                                        let delay_ms =
                                                         crate::core::retry::backoff_delay_ms(
                                                             crate::core::retry::DEFAULT_BASE_DELAY_MS,
                                                             (attempt_no - 1) as u64,
                                                         );
-                                                    println!(
+                                                        println!(
                                                         "DEBUG: node {} failed, retrying ({}/{}), backoff {}ms",
                                                         node_id, attempt_no, retry_max, delay_ms
                                                     );
-                                                    tokio::time::sleep(
-                                                        std::time::Duration::from_millis(delay_ms),
-                                                    )
-                                                    .await;
-                                                    continue 'retry_loop;
-                                                }
-                                                println!(
+                                                        tokio::time::sleep(
+                                                            std::time::Duration::from_millis(
+                                                                delay_ms,
+                                                            ),
+                                                        )
+                                                        .await;
+                                                        continue 'retry_loop;
+                                                    }
+                                                    println!(
                                                     "DEBUG: node {} retry exhausted ({}), surfacing error",
                                                     node_id, max
                                                 );
-                                                let _ = tx.send(NodeEvent::Error {
-                                                    node_id,
-                                                    message: diagnostic.to_event_message(),
-                                                });
-                                                // P1-2: retry exhaustion is a hard failure.
+                                                    let _ = tx.send(NodeEvent::Error {
+                                                        node_id,
+                                                        message: diagnostic.to_event_message(),
+                                                    });
+                                                    // P1-2: retry exhaustion is a hard failure.
+                                                }
+                                                crate::core::graph::ErrorMode::Fail => {
+                                                    let _ = tx.send(NodeEvent::Error {
+                                                        node_id,
+                                                        message: diagnostic.to_event_message(),
+                                                    });
+                                                    // P1-2: Fail policy must abort the run.
+                                                }
                                             }
-                                            crate::core::graph::ErrorMode::Fail => {
-                                                let _ = tx.send(NodeEvent::Error {
-                                                    node_id,
-                                                    message: diagnostic.to_event_message(),
-                                                });
-                                                // P1-2: Fail policy must abort the run.
-                                            }
+                                            // P2-15 fix: reaching here means a
+                                            // terminal arm (Skip / exhausted / Fail)
+                                            // ran — exit the retry loop instead of
+                                            // re-executing the node forever.
+                                            break 'retry_loop;
                                         }
-                                        // P2-15 fix: reaching here means a
-                                        // terminal arm (Skip / exhausted / Fail)
-                                        // ran — exit the retry loop instead of
-                                        // re-executing the node forever.
-                                        break 'retry_loop;
                                     }
                                 }
                             }
                         }
-                    }
                     } // end 'retry_loop (P2-15)
                 }
 
@@ -1558,7 +1565,8 @@ impl SwanFlowEngine {
             if run_hard_failed {
                 let _ = tx.send(NodeEvent::Error {
                     node_id: Uuid::nil(),
-                    message: "workflow run aborted: node failure (ErrorMode::Fail/retry-exhausted)".to_string(),
+                    message: "workflow run aborted: node failure (ErrorMode::Fail/retry-exhausted)"
+                        .to_string(),
                 });
             } else {
                 let _ = cm.save_checkpoint(&checkpoint::EngineCheckpoint {
@@ -1696,8 +1704,7 @@ impl SwanFlowEngine {
                             node_id: node.id,
                             state: crate::nodes::NodeState::Running,
                         });
-                        step_context
-                            .insert("iteration".to_string(), serde_json::json!(iter + 1));
+                        step_context.insert("iteration".to_string(), serde_json::json!(iter + 1));
 
                         // Clone engine pieces for sub-workflow execution
                         let sub_engine = SwanFlowEngine {
@@ -1753,18 +1760,18 @@ impl SwanFlowEngine {
                 } else {
                     // Execute based on mode
                     Self::execute_node_with_mode(
-                    &node,
-                    &node_map,
-                    &workflow,
-                    node_idx,
-                    &mut step_context,
-                    &ctx_shared,
-                    &cache_dir,
-                    &registry_clone,
-                    &tx,
-                    &hook_shared,
-                )
-                .await
+                        &node,
+                        &node_map,
+                        &workflow,
+                        node_idx,
+                        &mut step_context,
+                        &ctx_shared,
+                        &cache_dir,
+                        &registry_clone,
+                        &tx,
+                        &hook_shared,
+                    )
+                    .await
                 };
 
                 let _ = tx.send(NodeEvent::StateChanged {
@@ -1879,10 +1886,7 @@ impl SwanFlowEngine {
                 // P2-8: scan ALL rows, matching the staged executor's
                 // conditional semantics (the old LIMIT 1 made the branch
                 // result depend on which executor ran the workflow).
-                if let Ok(df) = ctx
-                    .sql(&format!("SELECT * FROM \"{}\"", table_name))
-                    .await
-                {
+                if let Ok(df) = ctx.sql(&format!("SELECT * FROM \"{}\"", table_name)).await {
                     if let Ok(batches) = df.collect().await {
                         for batch in &batches {
                             use datafusion::arrow::util::display::ArrayFormatter;
@@ -2028,10 +2032,7 @@ impl SwanFlowEngine {
                     crate::core::graph::ErrorMode::Fail => {
                         let _ = tx.send(NodeEvent::Error {
                             node_id: node.id,
-                            message: format!(
-                                "fan-out parent failed, aborting run: {}",
-                                parent_err
-                            ),
+                            message: format!("fan-out parent failed, aborting run: {}", parent_err),
                         });
                         return Err(parent_err);
                     }
@@ -2335,8 +2336,8 @@ impl SwanFlowEngine {
 
         // 3a. Apply declarative middleware stack (borrowed from Forge's
         // middleware compiler, research #2026081102 — see ADR-012).
-        let middleware_stack =
-            crate::nodes::middleware::compile_middleware_stack(&rendered_config).map_err(|e| {
+        let middleware_stack = crate::nodes::middleware::compile_middleware_stack(&rendered_config)
+            .map_err(|e| {
                 datafusion::error::DataFusionError::Plan(format!(
                     "Middleware compilation failed for {}: {}",
                     node.id, e
@@ -2467,9 +2468,7 @@ fn classify_child_outcome(
         // Retry policy reaching classification means retries were
         // exhausted → falls back to Fail (matches single-node path).
         (crate::core::graph::ErrorMode::Retry(_), Err(e))
-        | (crate::core::graph::ErrorMode::Fail, Err(e)) => {
-            ChildOutcome::HardError(e.to_string())
-        }
+        | (crate::core::graph::ErrorMode::Fail, Err(e)) => ChildOutcome::HardError(e.to_string()),
         (crate::core::graph::ErrorMode::Skip, Err(e)) => {
             ChildOutcome::ContinueWithError(format!("Error: {}", e))
         }
@@ -2528,8 +2527,8 @@ pub fn reorder_for_variable_deps(
     use petgraph::stable_graph::NodeIndex;
     use petgraph::visit::EdgeRef;
     use petgraph::Direction;
-    use std::collections::{BinaryHeap, HashMap, HashSet};
     use std::cmp::Reverse;
+    use std::collections::{BinaryHeap, HashMap, HashSet};
 
     // Producers: variable name -> producing node.
     let mut producers: HashMap<String, NodeIndex> = HashMap::new();
@@ -2550,7 +2549,10 @@ pub fn reorder_for_variable_deps(
         }
         let mut refs = HashSet::new();
         crate::core::templating::TemplateEngine::extract_variable_refs(&n.config, &mut refs);
-        let reqs = refs.iter().filter_map(|r| producers.get(r).copied()).collect::<HashSet<_>>();
+        let reqs = refs
+            .iter()
+            .filter_map(|r| producers.get(r).copied())
+            .collect::<HashSet<_>>();
         if !reqs.is_empty() {
             required_by.insert(*i, reqs);
         }
@@ -2562,8 +2564,11 @@ pub fn reorder_for_variable_deps(
 
     // Kahn over explicit edges + implicit variable edges, ties broken by
     // base topological rank (stable re-ordering).
-    let base_rank: HashMap<NodeIndex, usize> =
-        base_order.iter().enumerate().map(|(r, i)| (*i, r)).collect();
+    let base_rank: HashMap<NodeIndex, usize> = base_order
+        .iter()
+        .enumerate()
+        .map(|(r, i)| (*i, r))
+        .collect();
     let mut in_degree: HashMap<NodeIndex, usize> = base_order
         .iter()
         .map(|i| {
@@ -2627,11 +2632,7 @@ mod tests {
 
     #[test]
     fn ok_result_is_ok_for_all_policies() {
-        for mode in [
-            ErrorMode::Fail,
-            ErrorMode::Skip,
-            ErrorMode::Retry(3),
-        ] {
+        for mode in [ErrorMode::Fail, ErrorMode::Skip, ErrorMode::Retry(3)] {
             assert_eq!(
                 classify_child_outcome(&mode, Ok("data".to_string()), false),
                 ChildOutcome::Ok("data".to_string())
@@ -2671,8 +2672,7 @@ mod tests {
 
     #[test]
     fn aggregate_ok_and_skip_push_outputs_emit_error_event() {
-        let (tx, mut rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::nodes::NodeEvent>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::nodes::NodeEvent>();
         let mut outputs = Vec::new();
         let mut hard_errors = Vec::new();
         let id_ok = uuid::Uuid::new_v4();
@@ -2697,13 +2697,14 @@ mod tests {
         assert!(hard_errors.is_empty());
         // Skip failure must still be observable via the event bus.
         let evt = rx.try_recv().expect("error event for skipped child");
-        assert!(matches!(evt, crate::nodes::NodeEvent::Error { node_id, .. } if node_id == id_skip));
+        assert!(
+            matches!(evt, crate::nodes::NodeEvent::Error { node_id, .. } if node_id == id_skip)
+        );
     }
 
     #[test]
     fn aggregate_hard_error_collects_and_emits() {
-        let (tx, mut rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::nodes::NodeEvent>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::nodes::NodeEvent>();
         let mut outputs = Vec::new();
         let mut hard_errors = Vec::new();
         let id_fail = uuid::Uuid::new_v4();
@@ -2719,7 +2720,9 @@ mod tests {
         assert!(outputs.is_empty());
         assert_eq!(hard_errors, vec!["boom"]);
         let evt = rx.try_recv().expect("error event for failed child");
-        assert!(matches!(evt, crate::nodes::NodeEvent::Error { node_id, .. } if node_id == id_fail));
+        assert!(
+            matches!(evt, crate::nodes::NodeEvent::Error { node_id, .. } if node_id == id_fail)
+        );
     }
 
     // --- variable-management 3.1: implicit variable dependencies ---
@@ -2728,7 +2731,12 @@ mod tests {
     use crate::nodes::NodeState;
 
     fn vnode(cfg: serde_json::Value, output_var: Option<&str>) -> NodeInstance {
-        let mut n = NodeInstance::new(uuid::Uuid::new_v4(), "core.sql", cfg, NodeState::Unconfigured);
+        let mut n = NodeInstance::new(
+            uuid::Uuid::new_v4(),
+            "core.sql",
+            cfg,
+            NodeState::Unconfigured,
+        );
         n.output_var = output_var.map(|s| s.to_string());
         n
     }
@@ -2738,7 +2746,10 @@ mod tests {
     }
 
     fn pos(order: &[petgraph::stable_graph::NodeIndex], wf: &Workflow, id: uuid::Uuid) -> usize {
-        order.iter().position(|i| wf.graph.node_weight(*i).unwrap().id == id).unwrap()
+        order
+            .iter()
+            .position(|i| wf.graph.node_weight(*i).unwrap().id == id)
+            .unwrap()
     }
 
     #[test]
@@ -2784,9 +2795,25 @@ mod tests {
         let n3 = vnode(serde_json::json!({"sql": "SELECT 3"}), None);
         let i1 = wf.add_node(n1);
         let i2 = wf.add_node(n2);
-        wf.add_edge(i1, i2, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+        wf.add_edge(
+            i1,
+            i2,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
         let i3 = wf.add_node(n3);
-        wf.add_edge(i2, i3, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+        wf.add_edge(
+            i2,
+            i3,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
         let base = base_order_of(&wf);
         let order = reorder_for_variable_deps(&wf, base.clone());
         assert_eq!(order, base, "no consumer of v exists -> order unchanged");
@@ -2802,7 +2829,15 @@ mod tests {
         let b = vnode(serde_json::json!({"sql": "SELECT '{{v}}'"}), None);
         let a_i = wf.add_node(a);
         let b_i = wf.add_node(b);
-        wf.add_edge(b_i, a_i, EdgeInstance { source_port: 0, target_port: 0 }).unwrap();
+        wf.add_edge(
+            b_i,
+            a_i,
+            EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
+        )
+        .unwrap();
         let base = base_order_of(&wf);
         let order = reorder_for_variable_deps(&wf, base.clone());
         assert_eq!(order, base, "implicit cycle -> base order preserved");

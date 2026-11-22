@@ -5,12 +5,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use arrow::array::StringViewArray;
 use calamine::{open_workbook, Data, Reader, Xlsx};
 use datafusion::arrow::array::{
     Array, ArrayRef, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
     StringBuilder, UInt32Array, UInt64Array,
 };
-use arrow::array::StringViewArray;
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
@@ -392,9 +392,10 @@ impl UserDefinedLogicalNodeCore for ExcelSinkLogical {
         // so a mis-wired sink fails at plan time (bail in propose_plan) instead
         // of crashing the process.
         static EMPTY: std::sync::OnceLock<DFSchemaRef> = std::sync::OnceLock::new();
-        self.inputs.first().map(|p| p.schema()).unwrap_or_else(|| {
-            EMPTY.get_or_init(|| Arc::new(DFSchema::empty()))
-        })
+        self.inputs
+            .first()
+            .map(|p| p.schema())
+            .unwrap_or_else(|| EMPTY.get_or_init(|| Arc::new(DFSchema::empty())))
     }
     fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
         vec![]
@@ -511,7 +512,9 @@ impl ExecutionPlan for ExcelSinkExec {
         let mut streams = Vec::new();
         for input in &self.inputs {
             let input: Arc<dyn ExecutionPlan> = Arc::new(
-                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input.clone()),
+                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(
+                    input.clone(),
+                ),
             );
             streams.push(input.execute(partition, context.clone())?);
         }
@@ -607,10 +610,9 @@ impl Stream for ExcelWritingStream {
                 for b in batches {
                     combined = Some(match combined {
                         None => b,
-                        Some(acc) => datafusion::arrow::compute::concat_batches(
-                            &b.schema(),
-                            &[acc, b],
-                        )?,
+                        Some(acc) => {
+                            datafusion::arrow::compute::concat_batches(&b.schema(), &[acc, b])?
+                        }
                     });
                 }
                 if let Some(batch) = combined {
@@ -873,26 +875,28 @@ impl ExcelWritingStream {
                                 // encoded strings: the old StringArray-only downcast
                                 // silently wrote "" for Utf8View columns (e.g. the
                                 // output of substr()/string functions in DataFusion).
-                                let val: Option<String> =
-                                    if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
-                                        (!a.is_null(row_idx)).then(|| a.value(row_idx).to_string())
-                                    } else if let Some(a) = array
-                                        .as_any()
-                                        .downcast_ref::<datafusion::arrow::array::LargeStringArray>()
-                                    {
-                                        (!a.is_null(row_idx)).then(|| a.value(row_idx).to_string())
-                                    } else if let Some(a) = array
-                                        .as_any()
-                                        .downcast_ref::<datafusion::arrow::array::StringViewArray>()
-                                    {
-                                        (!a.is_null(row_idx)).then(|| a.value(row_idx).to_string())
-                                    } else {
-                                        let scalar = datafusion::arrow::util::display::array_value_to_string(
+                                let val: Option<String> = if let Some(a) =
+                                    array.as_any().downcast_ref::<StringArray>()
+                                {
+                                    (!a.is_null(row_idx)).then(|| a.value(row_idx).to_string())
+                                } else if let Some(a) = array
+                                    .as_any()
+                                    .downcast_ref::<datafusion::arrow::array::LargeStringArray>(
+                                ) {
+                                    (!a.is_null(row_idx)).then(|| a.value(row_idx).to_string())
+                                } else if let Some(a) = array
+                                    .as_any()
+                                    .downcast_ref::<datafusion::arrow::array::StringViewArray>(
+                                ) {
+                                    (!a.is_null(row_idx)).then(|| a.value(row_idx).to_string())
+                                } else {
+                                    let scalar =
+                                        datafusion::arrow::util::display::array_value_to_string(
                                             array, row_idx,
                                         )
                                         .ok();
-                                        scalar.filter(|_| !array.is_null(row_idx))
-                                    };
+                                    scalar.filter(|_| !array.is_null(row_idx))
+                                };
                                 let val = val.unwrap_or_default();
                                 if let Some(fmt) = cell_format {
                                     worksheet
@@ -914,12 +918,10 @@ impl ExcelWritingStream {
                             // P2-13: cell write failures fail the export.
                             // Warn-and-continue produced a "successful"
                             // workbook with missing data.
-                            return Err(datafusion::error::DataFusionError::Execution(
-                                format!(
-                                    "failed to write cell ({}, {}): {}",
-                                    row_offset, col_idx, e
-                                ),
-                            ));
+                            return Err(datafusion::error::DataFusionError::Execution(format!(
+                                "failed to write cell ({}, {}): {}",
+                                row_offset, col_idx, e
+                            )));
                         }
                     }
                     row_offset += 1;
@@ -956,20 +958,18 @@ impl ExcelWritingStream {
                         // Resolve target column range first (shared by all rule
                         // kinds): named column -> single col; absent -> all cols.
                         let (first_col, last_col) = match rule_json["column"].as_str() {
-                            Some(col_name) => match schema
-                                .fields()
-                                .iter()
-                                .position(|f| f.name() == col_name)
-                            {
-                                Some(idx) => (idx as u16, idx as u16),
-                                None => {
-                                    tracing::warn!(
+                            Some(col_name) => {
+                                match schema.fields().iter().position(|f| f.name() == col_name) {
+                                    Some(idx) => (idx as u16, idx as u16),
+                                    None => {
+                                        tracing::warn!(
                                         "Conditional format: unknown column '{}', skipping rule",
                                         col_name
                                     );
-                                    continue;
+                                        continue;
+                                    }
                                 }
-                            },
+                            }
                             None => (0, (n_cols.saturating_sub(1)) as u16),
                         };
 
@@ -1124,7 +1124,9 @@ impl ExecutionPlan for ExcelTemplateExec {
         let mut streams = Vec::new();
         for input in &self.inputs {
             let input: Arc<dyn ExecutionPlan> = Arc::new(
-                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input.clone()),
+                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(
+                    input.clone(),
+                ),
             );
             streams.push(input.execute(partition, context.clone())?);
         }
@@ -1234,7 +1236,10 @@ impl ExcelTemplateWritingStream {
         let worksheet = workbook_writer.add_worksheet();
         if let Err(e) = worksheet.set_name(&self.sheet) {
             // P2-13: cell/header write failures fail the export.
-            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "excel write failed: {}",
+                e
+            )));
         }
 
         // Copy template content (simplified)
@@ -1244,25 +1249,37 @@ impl ExcelTemplateWritingStream {
                     Data::String(s) => {
                         if let Err(e) = worksheet.write(r as u32, c as u16, s) {
                             // P2-13: cell/header write failures fail the export.
-                            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+                            return Err(datafusion::error::DataFusionError::Execution(format!(
+                                "excel write failed: {}",
+                                e
+                            )));
                         }
                     }
                     Data::Float(f) => {
                         if let Err(e) = worksheet.write(r as u32, c as u16, *f) {
                             // P2-13: cell/header write failures fail the export.
-                            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+                            return Err(datafusion::error::DataFusionError::Execution(format!(
+                                "excel write failed: {}",
+                                e
+                            )));
                         }
                     }
                     Data::Int(i) => {
                         if let Err(e) = worksheet.write(r as u32, c as u16, *i as f64) {
                             // P2-13: cell/header write failures fail the export.
-                            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+                            return Err(datafusion::error::DataFusionError::Execution(format!(
+                                "excel write failed: {}",
+                                e
+                            )));
                         }
                     }
                     Data::Bool(b) => {
                         if let Err(e) = worksheet.write(r as u32, c as u16, *b) {
                             // P2-13: cell/header write failures fail the export.
-                            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+                            return Err(datafusion::error::DataFusionError::Execution(format!(
+                                "excel write failed: {}",
+                                e
+                            )));
                         }
                     }
                     _ => {}
@@ -1290,7 +1307,10 @@ impl ExcelTemplateWritingStream {
                         };
                         if let Err(e) = worksheet.write(*r, *c, val) {
                             // P2-13: cell/header write failures fail the export.
-                            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+                            return Err(datafusion::error::DataFusionError::Execution(format!(
+                                "excel write failed: {}",
+                                e
+                            )));
                         }
                     }
                 }
@@ -1330,7 +1350,11 @@ impl ExcelTemplateWritingStream {
                                 DataType::Int64 => {
                                     if let Some(a) = array.as_any().downcast_ref::<Int64Array>() {
                                         worksheet
-                                            .write(current_row, col_start + c as u16, a.value(r) as f64)
+                                            .write(
+                                                current_row,
+                                                col_start + c as u16,
+                                                a.value(r) as f64,
+                                            )
                                             .ok();
                                     }
                                 }
@@ -1434,7 +1458,9 @@ impl ExecutionPlan for ExcelReportExec {
         let mut streams = Vec::new();
         for input in &self.inputs {
             let input: Arc<dyn ExecutionPlan> = Arc::new(
-                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(input.clone()),
+                datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(
+                    input.clone(),
+                ),
             );
             streams.push(input.execute(partition, context.clone())?);
         }
@@ -1515,7 +1541,10 @@ impl ExcelReportWritingStream {
         let worksheet = workbook.add_worksheet();
         if let Err(e) = worksheet.set_name("Data") {
             // P2-13: cell/header write failures fail the export.
-            return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "excel write failed: {}",
+                e
+            )));
         }
 
         let mut row_offset = 0;
@@ -1523,7 +1552,10 @@ impl ExcelReportWritingStream {
         for (col_idx, field) in schema.fields().iter().enumerate() {
             if let Err(e) = worksheet.write(0, col_idx as u16, field.name()) {
                 // P2-13: cell/header write failures fail the export.
-                return Err(datafusion::error::DataFusionError::Execution(format!("excel write failed: {}", e)));
+                return Err(datafusion::error::DataFusionError::Execution(format!(
+                    "excel write failed: {}",
+                    e
+                )));
             }
         }
         row_offset += 1;
@@ -1543,67 +1575,79 @@ impl ExcelReportWritingStream {
                     // explicitly (its data is intact, not null).
                     match array.data_type() {
                         DataType::Int64 => {
-                            let a = array
-                                .as_any()
-                                .downcast_ref::<Int64Array>()
-                                .unwrap();
-                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64);
+                            let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
+                            let _ = worksheet.write(
+                                row_offset as u32,
+                                col_idx as u16,
+                                a.value(row_idx) as f64,
+                            );
                         }
                         DataType::Int32 => {
-                            let a = array
-                                .as_any()
-                                .downcast_ref::<Int32Array>()
-                                .unwrap();
-                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64);
+                            let a = array.as_any().downcast_ref::<Int32Array>().unwrap();
+                            let _ = worksheet.write(
+                                row_offset as u32,
+                                col_idx as u16,
+                                a.value(row_idx) as f64,
+                            );
                         }
                         DataType::UInt32 => {
-                            let a = array
-                                .as_any()
-                                .downcast_ref::<UInt32Array>()
-                                .unwrap();
-                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64);
+                            let a = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+                            let _ = worksheet.write(
+                                row_offset as u32,
+                                col_idx as u16,
+                                a.value(row_idx) as f64,
+                            );
                         }
                         DataType::UInt64 => {
-                            let a = array
-                                .as_any()
-                                .downcast_ref::<UInt64Array>()
-                                .unwrap();
-                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64);
+                            let a = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+                            let _ = worksheet.write(
+                                row_offset as u32,
+                                col_idx as u16,
+                                a.value(row_idx) as f64,
+                            );
                         }
                         DataType::Float64 => {
-                            let a = array
-                                .as_any()
-                                .downcast_ref::<Float64Array>()
-                                .unwrap();
-                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx));
+                            let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
+                            let _ = worksheet.write(
+                                row_offset as u32,
+                                col_idx as u16,
+                                a.value(row_idx),
+                            );
                         }
                         DataType::Float32 => {
-                            let a = array
-                                .as_any()
-                                .downcast_ref::<Float32Array>()
-                                .unwrap();
-                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx) as f64);
+                            let a = array.as_any().downcast_ref::<Float32Array>().unwrap();
+                            let _ = worksheet.write(
+                                row_offset as u32,
+                                col_idx as u16,
+                                a.value(row_idx) as f64,
+                            );
                         }
                         DataType::Boolean => {
                             let a = array
                                 .as_any()
                                 .downcast_ref::<arrow::array::BooleanArray>()
                                 .unwrap();
-                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx));
+                            let _ = worksheet.write(
+                                row_offset as u32,
+                                col_idx as u16,
+                                a.value(row_idx),
+                            );
                         }
                         DataType::Utf8 | DataType::LargeUtf8 => {
-                            let a = array
-                                .as_any()
-                                .downcast_ref::<StringArray>()
-                                .unwrap();
-                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx));
+                            let a = array.as_any().downcast_ref::<StringArray>().unwrap();
+                            let _ = worksheet.write(
+                                row_offset as u32,
+                                col_idx as u16,
+                                a.value(row_idx),
+                            );
                         }
                         DataType::Utf8View => {
-                            let a = array
-                                .as_any()
-                                .downcast_ref::<StringViewArray>()
-                                .unwrap();
-                            let _ = worksheet.write(row_offset as u32, col_idx as u16, a.value(row_idx));
+                            let a = array.as_any().downcast_ref::<StringViewArray>().unwrap();
+                            let _ = worksheet.write(
+                                row_offset as u32,
+                                col_idx as u16,
+                                a.value(row_idx),
+                            );
                         }
                         _ => {
                             // Best-effort string: typed StringArray first,
@@ -1696,7 +1740,9 @@ fn render_cell(
 #[cfg(test)]
 mod cell_render_tests {
     use super::*;
-    use datafusion::arrow::array::{ArrayRef, BooleanArray, Int32Array, Int64Array, StringViewArray};
+    use datafusion::arrow::array::{
+        ArrayRef, BooleanArray, Int32Array, Int64Array, StringViewArray,
+    };
     use std::sync::Arc;
 
     /// Every type here is one the old `_ => downcast::<StringArray>()` arm
@@ -1725,9 +1771,9 @@ mod cell_render_tests {
 
 #[cfg(test)]
 mod conditional_format_tests {
-    use serde_json::json;
     use super::*;
     use rust_xlsxwriter::Workbook;
+    use serde_json::json;
 
     // ── Pure parse logic (no IO) ─────────────────────────────────────────
 

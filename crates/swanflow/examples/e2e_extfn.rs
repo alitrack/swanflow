@@ -23,7 +23,10 @@ fn main() {
 
     // list_specs() is the same surface the MCP server's list_nodes exposes.
     let specs = registry.list_specs();
-    let ext: Vec<_> = specs.iter().filter(|s| s.type_id.starts_with("ext.")).collect();
+    let ext: Vec<_> = specs
+        .iter()
+        .filter(|s| s.type_id.starts_with("ext."))
+        .collect();
 
     println!("total node types : {}", specs.len());
     println!("ext.* node types : {}", ext.len());
@@ -39,11 +42,16 @@ fn main() {
         match registry.get_node(&s.type_id) {
             Ok(node) => {
                 let got = node.spec();
-                println!("probe get_node({}) -> type_id={} (round-trip ok)",
-                    s.type_id, got.type_id);
+                println!(
+                    "probe get_node({}) -> type_id={} (round-trip ok)",
+                    s.type_id, got.type_id
+                );
             }
             Err(e) => {
-                eprintln!("probe get_node({}) -> Err({e}) (listed but not gettable!)", s.type_id);
+                eprintln!(
+                    "probe get_node({}) -> Err({e}) (listed but not gettable!)",
+                    s.type_id
+                );
                 std::process::exit(2);
             }
         }

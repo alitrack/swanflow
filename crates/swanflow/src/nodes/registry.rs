@@ -31,26 +31,24 @@ impl NodeRegistry {
 
     /// Retrieve a node implementation by its type identifier.
     pub fn get_node(&self, type_id: &str) -> Result<Arc<dyn NodeBehavior>> {
-        self.nodes
-            .get(type_id)
-            .cloned()
-            .ok_or_else(|| {
-                // Distinguish a typo'd id from a plugin that simply is not in
-                // this build: same failure, different remedy.
-                if let Some((_, plugin)) =
-                    PLUGIN_PREFIXES.iter().find(|(prefix, _)| type_id.starts_with(prefix))
-                {
-                    anyhow!(
-                        "Node type '{}' belongs to the '{}' plugin, which is not installed \
+        self.nodes.get(type_id).cloned().ok_or_else(|| {
+            // Distinguish a typo'd id from a plugin that simply is not in
+            // this build: same failure, different remedy.
+            if let Some((_, plugin)) = PLUGIN_PREFIXES
+                .iter()
+                .find(|(prefix, _)| type_id.starts_with(prefix))
+            {
+                anyhow!(
+                    "Node type '{}' belongs to the '{}' plugin, which is not installed \
                          in this build (build with --features {} to get it)",
-                        type_id,
-                        plugin,
-                        plugin
-                    )
-                } else {
-                    anyhow!("Node type '{}' not found in registry", type_id)
-                }
-            })
+                    type_id,
+                    plugin,
+                    plugin
+                )
+            } else {
+                anyhow!("Node type '{}' not found in registry", type_id)
+            }
+        })
     }
 
     /// List all registered node specifications.
@@ -103,14 +101,15 @@ impl NodeRegistry {
         use crate::nodes::io::{
             CsvReadNode, DbConnectorNode, DuckDBReadNode, DuckDBWriteNode, ExcelReadNode,
             ExcelReportNode, ExcelSheetNamesNode, ExcelTemplateNode, ExcelWriteNode,
-            GraphIndexWriterNode, HttpFetchNode, OssieExportNode, OssieReadNode,
-            ParquetReadNode, SemanticExtractNode,
-            SemanticFkInferNode, UniversalReadNode,
+            GraphIndexWriterNode, HttpFetchNode, OssieExportNode, OssieReadNode, ParquetReadNode,
+            SemanticExtractNode, SemanticFkInferNode, UniversalReadNode,
         };
         use crate::nodes::io::{CsvWriteNode, ParquetWriteNode};
         use crate::nodes::luajit::LuaJitNode;
         use crate::nodes::mcp::McpToolNode;
 
+        #[cfg(feature = "wasm")]
+        use crate::nodes::plugin_transform::PluginTransformNode;
         use crate::nodes::relational::{
             CastNode, DistinctNode, JoinNode, LimitNode, SortNode, UnionNode,
         };
@@ -123,8 +122,6 @@ impl NodeRegistry {
             PivotNode, ProfilerNode, ProjectNode, SemanticCleanerNode, TableSchemaValidatorNode,
             TableToVariableNode, VariableCreatorNode, WindowNode,
         };
-        #[cfg(feature = "wasm")]
-        use crate::nodes::plugin_transform::PluginTransformNode;
         #[cfg(feature = "wasm")]
         use crate::nodes::wasm::WasmNode;
 
@@ -221,7 +218,10 @@ impl NodeRegistry {
             use swanflow_core::Plugin as _;
             let plugin = swanflow_plugin_quality::QualityPlugin;
             let nodes = plugin.node_types();
-            self.load_plugin_nodes(plugin.name(), crate::nodes::core_bridge::CoreNodeAdapter::wrap_all(nodes));
+            self.load_plugin_nodes(
+                plugin.name(),
+                crate::nodes::core_bridge::CoreNodeAdapter::wrap_all(nodes),
+            );
         }
         self.register_node(Arc::new(SemanticCleanerNode));
         self.register_node(Arc::new(AiRouterNode));
@@ -290,9 +290,9 @@ impl NodeRegistry {
                     self.register_node(Arc::new(EntityExtractorNode {
                         provider: provider.clone(),
                     }));
-                    self.register_node(Arc::new(
-                        crate::nodes::io::SemanticAnnotateNode { provider },
-                    ));
+                    self.register_node(Arc::new(crate::nodes::io::SemanticAnnotateNode {
+                        provider,
+                    }));
                 }
                 Err(e) => eprintln!("[DEBUG] Failed to create OpenAiProvider: {}", e),
             }
@@ -307,7 +307,9 @@ impl NodeRegistry {
             self.register_node(Arc::new(EntityExtractorNode {
                 provider: provider.clone(),
             }));
-            self.register_node(Arc::new(crate::nodes::io::SemanticAnnotateNode { provider }));
+            self.register_node(Arc::new(crate::nodes::io::SemanticAnnotateNode {
+                provider,
+            }));
         } else {
             eprintln!("[DEBUG] No LLM_MODEL or OPENAI_API_KEY found, EntityExtractor skip");
         }
@@ -340,7 +342,10 @@ mod shell_marker_tests {
     const SHELL_PREFIX: &str = "[SHELL NODE — no runtime behavior] ";
 
     #[test]
-    #[cfg_attr(not(feature = "python"), ignore = "python_udf node absent without the python feature")]
+    #[cfg_attr(
+        not(feature = "python"),
+        ignore = "python_udf node absent without the python feature"
+    )]
     fn shell_node_descriptions_carry_marker() {
         let registry = NodeRegistry::default();
         let shells = [
@@ -391,10 +396,7 @@ mod shell_marker_tests {
         let deprecated = [
             ("core.ai.checkpoint_resume_controller", "CheckpointManager"),
             ("core.ai.run_state_store", "engine"),
-            (
-                "core.ai.agent_loop_orchestrator",
-                "research_loop",
-            ),
+            ("core.ai.agent_loop_orchestrator", "research_loop"),
             ("core.ai.tool_executor", "mcp_invoke"),
         ];
         for (type_id, hint) in deprecated {

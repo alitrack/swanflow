@@ -66,10 +66,7 @@ impl TemplateEngine {
     /// Single-pass ${context.key} expansion: scans the input once; only
     /// placeholders present in the original text are replaced. Inserted
     /// values are copied verbatim and never rescanned (P2-11).
-    fn expand_context_placeholders(
-        input: &str,
-        context: &HashMap<String, JsonValue>,
-    ) -> String {
+    fn expand_context_placeholders(input: &str, context: &HashMap<String, JsonValue>) -> String {
         let marker = "${context.";
         let mut out = String::with_capacity(input.len());
         let mut rest = input;
@@ -185,7 +182,9 @@ impl TemplateEngine {
                             if !key.is_empty()
                                 && !key.contains('}')
                                 && !key.contains(' ')
-                                && key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                                && key
+                                    .chars()
+                                    .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
                             {
                                 // {{a.b}} style: take the full dotted path as the key
                                 // (mustache resolution in this engine is literal on the key).
@@ -216,7 +215,9 @@ impl TemplateEngine {
                         if let Some(end) = rest.find('}') {
                             let key = &rest[..end];
                             if !key.is_empty()
-                                && key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                                && key
+                                    .chars()
+                                    .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
                             {
                                 out.insert(key.to_string());
                             }
@@ -370,7 +371,10 @@ mod tests {
             "nested": ["{{other}}", "${context.limit}", "no placeholder here"]
         });
         TemplateEngine::extract_variable_refs(&input, &mut refs);
-        assert!(refs.contains("dept"), "context-style ref must be found: {refs:?}");
+        assert!(
+            refs.contains("dept"),
+            "context-style ref must be found: {refs:?}"
+        );
         assert!(refs.contains("tag"), "mustache ref must be found: {refs:?}");
         assert!(refs.contains("other"));
         assert!(refs.contains("limit"));
@@ -393,7 +397,10 @@ mod tests {
             refs.contains("timeout_sec"),
             "%%var:default%% ref must yield the var name before ':': {refs:?}"
         );
-        assert!(!refs.contains("3600"), "default value is not a ref: {refs:?}");
+        assert!(
+            !refs.contains("3600"),
+            "default value is not a ref: {refs:?}"
+        );
     }
 
     #[test]

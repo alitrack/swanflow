@@ -140,10 +140,7 @@ async fn sync_metadata(ctx: &SessionContext, cache_dir: &str) {
             .expect("prepare flow_metadata");
         let rows = stmt
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                ))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .expect("query flow_metadata");
         rows.flatten().collect()
@@ -161,18 +158,10 @@ async fn sync_metadata(ctx: &SessionContext, cache_dir: &str) {
 /// per-level metadata sync, then per-node create_physical_plan + collect),
 /// minus the P2-15 retry loop that hangs this path on the current commit.
 /// Returns the collected RecordBatches for every requested target node.
-async fn run_staged(
-    workflow: &Workflow,
-    targets: &[Uuid],
-) -> HashMap<Uuid, Vec<RecordBatch>> {
-    let cache_dir = format!(
-        "target/sql_group_by_cache_{}",
-        Uuid::new_v4().simple()
-    );
-    let engine = SwanFlowEngine::with_cache_dir(
-        Arc::new(NodeRegistry::default()),
-        cache_dir.clone(),
-    );
+async fn run_staged(workflow: &Workflow, targets: &[Uuid]) -> HashMap<Uuid, Vec<RecordBatch>> {
+    let cache_dir = format!("target/sql_group_by_cache_{}", Uuid::new_v4().simple());
+    let engine =
+        SwanFlowEngine::with_cache_dir(Arc::new(NodeRegistry::default()), cache_dir.clone());
 
     let (tx, _rx) = mpsc::unbounded_channel();
 
@@ -190,65 +179,59 @@ async fn run_staged(
     // Overall guard: if any stage ever re-enters a hang (like the P2-15
     // loop does in the engine), the whole driver must fail loudly instead
     // of blocking the test harness forever.
-    tokio::time::timeout(
-        Duration::from_secs(240),
-        async {
-            for level in stages {
-                // 1. Initial sync for this level (engine/mod.rs:843)
-                sync_metadata(engine.ctx.as_ref(), &engine.cache_dir).await;
+    tokio::time::timeout(Duration::from_secs(240), async {
+        for level in stages {
+            // 1. Initial sync for this level (engine/mod.rs:843)
+            sync_metadata(engine.ctx.as_ref(), &engine.cache_dir).await;
 
-                // 2. Per-node execution (engine/mod.rs:854-1265, minus the
-                //    infinite P2-15 retry loop).
-                for stage_plan in level {
-                    let planner = SwanFlowPlanner {
-                        event_tx: mpsc::unbounded_channel().0,
-                        ctx: engine.ctx.clone(),
-                        cache_dir: engine.cache_dir.clone(),
-                    };
-                    let physical_planner = Arc::new(
-                        DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
-                            planner,
-                        )]),
+            // 2. Per-node execution (engine/mod.rs:854-1265, minus the
+            //    infinite P2-15 retry loop).
+            for stage_plan in level {
+                let planner = SwanFlowPlanner {
+                    event_tx: mpsc::unbounded_channel().0,
+                    ctx: engine.ctx.clone(),
+                    cache_dir: engine.cache_dir.clone(),
+                };
+                let physical_planner =
+                    Arc::new(DefaultPhysicalPlanner::with_extension_planners(vec![
+                        Arc::new(planner),
+                    ]));
+                let state = SessionStateBuilder::new_from_existing(engine.ctx.state())
+                    .with_query_planner(Arc::new(SwanFlowQueryPlanner { physical_planner }))
+                    .build();
+
+                let physical_plan = state
+                    .create_physical_plan(&stage_plan.plan)
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "create_physical_plan failed for node {} ({}): {e}",
+                            stage_plan.node_id, stage_plan.node_type
+                        )
+                    });
+
+                let batches = collect(physical_plan, engine.ctx.task_ctx())
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "collect failed for node {} ({}): {e}",
+                            stage_plan.node_id, stage_plan.node_type
+                        )
+                    });
+
+                if targets.contains(&stage_plan.node_id) {
+                    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+                    assert!(
+                        total > 0,
+                        "node {} ({}) produced 0 rows",
+                        stage_plan.node_id,
+                        stage_plan.node_type
                     );
-                    let state = SessionStateBuilder::new_from_existing(engine.ctx.state())
-                        .with_query_planner(Arc::new(SwanFlowQueryPlanner {
-                            physical_planner,
-                        }))
-                        .build();
-
-                    let physical_plan = state
-                        .create_physical_plan(&stage_plan.plan)
-                        .await
-                        .unwrap_or_else(|e| {
-                            panic!(
-                                "create_physical_plan failed for node {} ({}): {e}",
-                                stage_plan.node_id, stage_plan.node_type
-                            )
-                        });
-
-                    let batches = collect(physical_plan, engine.ctx.task_ctx())
-                        .await
-                        .unwrap_or_else(|e| {
-                            panic!(
-                                "collect failed for node {} ({}): {e}",
-                                stage_plan.node_id, stage_plan.node_type
-                            )
-                        });
-
-                    if targets.contains(&stage_plan.node_id) {
-                        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-                        assert!(
-                            total > 0,
-                            "node {} ({}) produced 0 rows",
-                            stage_plan.node_id,
-                            stage_plan.node_type
-                        );
-                        results.insert(stage_plan.node_id, batches);
-                    }
+                    results.insert(stage_plan.node_id, batches);
                 }
             }
-        },
-    )
+        }
+    })
     .await
     .unwrap_or_else(|_| {
         panic!(
@@ -302,7 +285,9 @@ fn group_rows(batches: &[RecordBatch]) -> Vec<(String, i64)> {
 /// the red signal tasks.md A3 asks for.
 fn assert_grouped(rows: &[(String, i64)], expected: &[(&str, i64)], label: &str) {
     let collapsed = rows.len() <= 1
-        && rows.iter().any(|(k, _)| k.is_empty() || k.eq_ignore_ascii_case("null"));
+        && rows
+            .iter()
+            .any(|(k, _)| k.is_empty() || k.eq_ignore_ascii_case("null"));
     assert!(
         !collapsed,
         "[{label}] GROUP BY COLLAPSE DETECTED: {rows:?} \
@@ -358,7 +343,11 @@ async fn shape2_multistage_filter_before_groupby() {
 
     let results = run_staged(&wf, &[sql]).await;
     let rows = group_rows(&results[&sql]);
-    assert_grouped(&rows, &EXPECT_SMALL, "shape2 multi-stage (filter before SqlProxy)");
+    assert_grouped(
+        &rows,
+        &EXPECT_SMALL,
+        "shape2 multi-stage (filter before SqlProxy)",
+    );
 }
 
 // ── shape 3: P1-6 fan-out — two SqlProxy nodes share one upstream ─────────
@@ -436,11 +425,7 @@ async fn shape5_parquet_utf8_source() {
     let src = Uuid::new_v4();
     let sql = Uuid::new_v4();
     let mut wf = Workflow::new("sql-groupby-shape5");
-    let i_src = wf.add_node(node(
-        src,
-        "core.io.parquet_read",
-        json!({ "path": path }),
-    ));
+    let i_src = wf.add_node(node(src, "core.io.parquet_read", json!({ "path": path })));
     let i_sql = wf.add_node(groupby_node(sql));
     wf.add_edge(i_src, i_sql, edge()).unwrap();
 
@@ -466,8 +451,16 @@ async fn shape6_big_1000_rows_50_keys() {
     let rows = group_rows(&results[&sql]);
 
     let total: i64 = rows.iter().map(|(_, n)| *n).sum();
-    assert_eq!(rows.len(), 50, "expected 50 groups, got {} ({rows:?})", rows.len());
-    assert_eq!(total, 1000, "row count must be preserved (1000), got {total}");
+    assert_eq!(
+        rows.len(),
+        50,
+        "expected 50 groups, got {} ({rows:?})",
+        rows.len()
+    );
+    assert_eq!(
+        total, 1000,
+        "row count must be preserved (1000), got {total}"
+    );
     assert!(
         rows.iter().all(|(_, n)| *n == 20),
         "every key must have exactly 20 rows: {rows:?}"

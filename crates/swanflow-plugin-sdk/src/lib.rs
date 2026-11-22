@@ -22,8 +22,8 @@
 pub use swanflow_core::Plugin;
 
 pub use swanflow_core::{
-    NodeBehavior, NodeCapability, NodeCategory, NodeSpec, PortSpec,
-    TypedNodeBehavior, DesignerMetadata, InferredMetadata,
+    DesignerMetadata, InferredMetadata, NodeBehavior, NodeCapability, NodeCategory, NodeSpec,
+    PortSpec, TypedNodeBehavior,
 };
 
 /// Metadata about a loaded plugin.

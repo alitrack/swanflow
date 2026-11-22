@@ -255,9 +255,10 @@ pub fn import_folder(dir: &Path) -> anyhow::Result<ImportReport> {
     for t in &report.tasks {
         for out in &t.outputs {
             if let Some(prev) = producer.insert(out.clone(), t.name.clone()) {
-                report
-                    .warnings
-                    .push(format!("duplicate @outputs {} ({} vs {})", out, prev, t.name));
+                report.warnings.push(format!(
+                    "duplicate @outputs {} ({} vs {})",
+                    out, prev, t.name
+                ));
             }
         }
     }
@@ -279,9 +280,7 @@ pub fn import_folder(dir: &Path) -> anyhow::Result<ImportReport> {
         inferred.sort();
         inferred.dedup();
         if !inferred.is_empty() {
-            report
-                .inferred_inputs
-                .insert(t.name.clone(), inferred);
+            report.inferred_inputs.insert(t.name.clone(), inferred);
         }
     }
 
@@ -319,7 +318,10 @@ mod tests {
         assert_eq!(t.name, "clean_users");
         assert_eq!(t.outputs, vec!["analytics.clean_users"]);
         assert!(t.sql.starts_with("CREATE OR REPLACE TABLE"));
-        assert!(t.skipped_directives.iter().any(|d| d.starts_with("@retries")));
+        assert!(t
+            .skipped_directives
+            .iter()
+            .any(|d| d.starts_with("@retries")));
     }
 
     #[test]
@@ -388,10 +390,7 @@ mod tests {
         )
         .unwrap();
         let report = import_folder(&dir).unwrap();
-        assert!(report
-            .warnings
-            .iter()
-            .any(|w| w.contains("ghost")));
+        assert!(report.warnings.iter().any(|w| w.contains("ghost")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

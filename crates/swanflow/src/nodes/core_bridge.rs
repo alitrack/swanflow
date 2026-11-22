@@ -84,7 +84,9 @@ impl CoreNodeAdapter {
     }
 
     /// Wrap a whole plugin's node list.
-    pub fn wrap_all(nodes: Vec<Box<dyn swanflow_core::NodeBehavior>>) -> Vec<Arc<dyn NodeBehavior>> {
+    pub fn wrap_all(
+        nodes: Vec<Box<dyn swanflow_core::NodeBehavior>>,
+    ) -> Vec<Arc<dyn NodeBehavior>> {
         nodes
             .into_iter()
             .map(|n| Arc::new(Self::new(n)) as Arc<dyn NodeBehavior>)

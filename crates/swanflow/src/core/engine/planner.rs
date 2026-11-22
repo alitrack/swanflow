@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::json;
 use datafusion::common::{DFSchema, ScalarValue};
 use datafusion::error::Result;
 use datafusion::execution::context::{QueryPlanner, SessionState};
@@ -9,12 +8,14 @@ use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
+use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::core::datasource::{
-    ClickHouseScanExec, ClickHouseScanLogical, DuckDBScanExec, DuckDBScanLogical, DuckDBWriteSinkExec,
-    DuckDBWriteSinkLogical, ExcelReportExec, ExcelReportSinkLogical, ExcelScanExec,
-    ExcelScanLogical, ExcelSinkExec, ExcelSinkLogical, ExcelTemplateExec, ExcelTemplateSinkLogical,
+    ClickHouseScanExec, ClickHouseScanLogical, DuckDBScanExec, DuckDBScanLogical,
+    DuckDBWriteSinkExec, DuckDBWriteSinkLogical, ExcelReportExec, ExcelReportSinkLogical,
+    ExcelScanExec, ExcelScanLogical, ExcelSinkExec, ExcelSinkLogical, ExcelTemplateExec,
+    ExcelTemplateSinkLogical,
 };
 use crate::core::engine::sync_metadata_to_context;
 use crate::core::observer::{
@@ -101,15 +102,13 @@ impl ExtensionPlanner for SwanFlowPlanner {
             .as_any()
             .downcast_ref::<crate::nodes::ai::privacy::PiiLogical>()
         {
-            return Ok(Some(Arc::new(
-                crate::nodes::ai::privacy::PiiExec::new(
-                    physical_inputs[0].clone(),
-                    pii.column.clone(),
-                    pii.mode.clone(),
-                    pii.detect_config.clone(),
-                    pii.mask_config.clone(),
-                ),
-            )));
+            return Ok(Some(Arc::new(crate::nodes::ai::privacy::PiiExec::new(
+                physical_inputs[0].clone(),
+                pii.column.clone(),
+                pii.mode.clone(),
+                pii.detect_config.clone(),
+                pii.mask_config.clone(),
+            ))));
         }
         if let Some(entity_port) = node
             .as_any()
@@ -216,14 +215,16 @@ impl ExtensionPlanner for SwanFlowPlanner {
             .as_any()
             .downcast_ref::<crate::nodes::ai::verification::FactVerifyLogical>()
         {
-            return Ok(Some(Arc::new(crate::nodes::ai::verification::FactVerifyExec::new(
-                f32::from_bits(fv.threshold_bits),
-                fv.require_evidence,
-                "claim".to_string(),
-                "evidence".to_string(),
-                Arc::new(fv.schema.as_arrow().clone()),
-                physical_inputs[0].clone(),
-            ))));
+            return Ok(Some(Arc::new(
+                crate::nodes::ai::verification::FactVerifyExec::new(
+                    f32::from_bits(fv.threshold_bits),
+                    fv.require_evidence,
+                    "claim".to_string(),
+                    "evidence".to_string(),
+                    Arc::new(fv.schema.as_arrow().clone()),
+                    physical_inputs[0].clone(),
+                ),
+            )));
         }
         // core.ai.mcp_tool: the logical node was registered and planned by
         // McpToolNode::propose_plan but never lowered here — every workflow
@@ -234,8 +235,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
             .as_any()
             .downcast_ref::<crate::nodes::mcp::McpToolLogical>()
         {
-            let tool_args =
-                serde_json::from_str(&mcp.tool_args).unwrap_or(serde_json::Value::Null);
+            let tool_args = serde_json::from_str(&mcp.tool_args).unwrap_or(serde_json::Value::Null);
             return Ok(Some(Arc::new(crate::nodes::mcp::McpToolExec::new(
                 mcp.server_command.clone(),
                 mcp.server_args.clone(),
@@ -426,8 +426,7 @@ impl ExtensionPlanner for SwanFlowPlanner {
             sync_metadata_to_context(&scratch, &self.cache_dir).await;
             for (i, input_plan) in proxy.inputs.iter().enumerate() {
                 let table_name = format!("input_{}", i);
-                let df =
-                    datafusion::prelude::DataFrame::new(scratch.state(), input_plan.clone());
+                let df = datafusion::prelude::DataFrame::new(scratch.state(), input_plan.clone());
                 scratch
                     .register_table(&table_name, df.into_view())
                     .map_err(|e| {
@@ -451,13 +450,15 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 .create_physical_plan(&logical_plan, &scratch.state())
                 .await?;
 
-
             // Check if schema matches logical proxy schema
             let logical_schema = proxy.schema.clone();
             let physical_plan = self.align_schemas(physical_plan, logical_schema.as_ref())?;
             return Ok(Some(physical_plan));
         }
-        if let Some(ducksql) = node.as_any().downcast_ref::<crate::nodes::sql_duckdb::DuckSqlLogical>() {
+        if let Some(ducksql) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::sql_duckdb::DuckSqlLogical>()
+        {
             // physical_inputs are already the physical children of this node
             // (engine resolves LogicalPlan::inputs() before calling us).
             // DuckSqlExec::new wraps each in CoalescePartitionsExec itself.
@@ -466,17 +467,13 @@ impl ExtensionPlanner for SwanFlowPlanner {
             // single (empty) stream instead of panicking on [0].
             let (primary, rest): (Arc<dyn ExecutionPlan>, Vec<Arc<dyn ExecutionPlan>>) =
                 if physical_inputs.is_empty() {
-                    let empty = std::sync::Arc::new(
-                        datafusion::physical_plan::empty::EmptyExec::new(Arc::new(
-                            ducksql.schema.as_arrow().clone(),
-                        )),
-                    ) as Arc<dyn ExecutionPlan>;
+                    let empty =
+                        std::sync::Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+                            Arc::new(ducksql.schema.as_arrow().clone()),
+                        )) as Arc<dyn ExecutionPlan>;
                     (empty, Vec::new())
                 } else {
-                    (
-                        physical_inputs[0].clone(),
-                        physical_inputs[1..].to_vec(),
-                    )
+                    (physical_inputs[0].clone(), physical_inputs[1..].to_vec())
                 };
             let exec = crate::nodes::sql_duckdb::DuckSqlExec::new(
                 ducksql.query.clone(),
@@ -520,12 +517,14 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 ))
             })?;
             let fresh = datafusion::prelude::SessionContext::new();
-            fresh.register_table("pivot_result", Arc::new(mem)).map_err(|e| {
-                datafusion::error::DataFusionError::Plan(format!(
-                    "Failed to register pivot_result: {}",
-                    e
-                ))
-            })?;
+            fresh
+                .register_table("pivot_result", Arc::new(mem))
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Plan(format!(
+                        "Failed to register pivot_result: {}",
+                        e
+                    ))
+                })?;
             let df = fresh.sql("SELECT * FROM pivot_result").await?;
             let plan = df.into_unoptimized_plan();
             return Ok(Some(
@@ -546,9 +545,8 @@ impl ExtensionPlanner for SwanFlowPlanner {
             // reports (probed/declared override), or DataFusion rejects it as a
             // mismatched schema.
             if let Some(df_schema) = &python.schema_override {
-                let arrow_schema = datafusion::arrow::datatypes::SchemaRef::new(
-                    df_schema.as_arrow().clone(),
-                );
+                let arrow_schema =
+                    datafusion::arrow::datatypes::SchemaRef::new(df_schema.as_arrow().clone());
                 return Ok(Some(Arc::new(PythonExec::with_schema(
                     python.script.clone(),
                     physical_inputs[0].clone(),
@@ -716,7 +714,6 @@ pub fn inline_placeholders(query: &str, params: &[ScalarValue]) -> String {
     out
 }
 
-
 /// Schema-discovery entry point used by nodes::sql (SqlProxyLogical build).
 /// Same inlining as physical planning, so discovered schema == executed SQL.
 pub fn inline_placeholders_for_schema(query: &str, params: &[ScalarValue]) -> String {
@@ -744,10 +741,7 @@ mod inline_placeholder_tests {
             ScalarValue::Int64(Some(11)),
         ];
         let out = inline_placeholders(query, &params);
-        assert_eq!(
-            out,
-            "SELECT * FROM t WHERE a = 'ONE' AND b = 10 AND c = 11"
-        );
+        assert_eq!(out, "SELECT * FROM t WHERE a = 'ONE' AND b = 10 AND c = 11");
     }
 
     #[test]
@@ -766,23 +760,26 @@ mod inline_placeholder_tests {
     fn non_ascii_haystack_does_not_panic() {
         // P1-1 regression: the old byte-index scanner panicked on any
         // non-ASCII char once a replacement had shifted the indices.
-        let query = "SELECT \u{4e2d}\u{6587}\u{6ce8}\u{91ca} FROM t WHERE a = $1 AND \u{540d}\u{79f0} = $2";
+        let query =
+            "SELECT \u{4e2d}\u{6587}\u{6ce8}\u{91ca} FROM t WHERE a = $1 AND \u{540d}\u{79f0} = $2";
         let params = vec![
             ScalarValue::Int64(Some(1)),
             ScalarValue::Utf8(Some("\u{5317}\u{4eac}".to_string())),
         ];
         let out = inline_placeholders(&query, &params);
         assert!(out.contains("= 1"), "param 1 inlined: {}", out);
-        assert!(out.contains("'\u{5317}\u{4eac}'"), "param 2 inlined: {}", out);
+        assert!(
+            out.contains("'\u{5317}\u{4eac}'"),
+            "param 2 inlined: {}",
+            out
+        );
     }
 
     #[test]
     fn mixed_single_and_double_digit_placeholders() {
         // P1-1 regression: $1 must not clobber the prefix of $10/$11.
         let query = "SELECT * FROM t WHERE a = $1 AND b = $10 AND c = $11";
-        let params: Vec<ScalarValue> = (1..=11)
-            .map(|i| ScalarValue::Int64(Some(i)))
-            .collect();
+        let params: Vec<ScalarValue> = (1..=11).map(|i| ScalarValue::Int64(Some(i))).collect();
         let out = inline_placeholders(&query, &params);
         assert_eq!(out, "SELECT * FROM t WHERE a = 1 AND b = 10 AND c = 11");
     }
@@ -790,9 +787,7 @@ mod inline_placeholder_tests {
     #[test]
     fn schema_discovery_entry_matches_physical_inlining() {
         let query = "SELECT $1 AS v, $10 AS w FROM t";
-        let params: Vec<ScalarValue> = (1..=10)
-            .map(|i| ScalarValue::Int64(Some(i)))
-            .collect();
+        let params: Vec<ScalarValue> = (1..=10).map(|i| ScalarValue::Int64(Some(i))).collect();
         assert_eq!(
             inline_placeholders_for_schema(query, &params),
             inline_placeholders(query, &params)

@@ -85,10 +85,12 @@ impl CacheManager {
                 let path = entry.path();
                 if path.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if !name.ends_with(".duckdb") && !name.ends_with(".db")
-                        && std::fs::remove_file(&path).is_ok() {
-                            removed += 1;
-                        }
+                    if !name.ends_with(".duckdb")
+                        && !name.ends_with(".db")
+                        && std::fs::remove_file(&path).is_ok()
+                    {
+                        removed += 1;
+                    }
                 }
             }
         }
@@ -154,14 +156,24 @@ mod tests {
         let (_tmp, cm) = setup_temp_cache();
 
         // Create files that exceed the 1MB limit
-        std::fs::write(format!("{}/file_a.parquet", cm.cache_dir), &vec![0u8; 700 * 1024])
-            .expect("write A 700KB");
-        std::fs::write(format!("{}/file_b.parquet", cm.cache_dir), &vec![0u8; 500 * 1024])
-            .expect("write B 500KB");
+        std::fs::write(
+            format!("{}/file_a.parquet", cm.cache_dir),
+            &vec![0u8; 700 * 1024],
+        )
+        .expect("write A 700KB");
+        std::fs::write(
+            format!("{}/file_b.parquet", cm.cache_dir),
+            &vec![0u8; 500 * 1024],
+        )
+        .expect("write B 500KB");
 
         // Total: ~1.2 MB. Max: 1 MB. Eviction should remove at least 1 file.
         let removed = cm.evict();
-        assert!(removed >= 1, "should remove at least 1 file, got {}", removed);
+        assert!(
+            removed >= 1,
+            "should remove at least 1 file, got {}",
+            removed
+        );
 
         let remaining_size = cm.total_size();
         assert!(

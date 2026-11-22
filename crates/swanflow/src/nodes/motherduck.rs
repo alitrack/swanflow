@@ -79,15 +79,15 @@ impl FlightConfig {
         let flight_id = config["flight_id"].as_str().map(|s| s.to_string());
         let flight_name = config["flight_name"].as_str().map(|s| s.to_string());
         if flight_id.is_none() && flight_name.is_none() {
-            return Err(anyhow!(
-                "either flight_id or flight_name must be provided"
-            ));
+            return Err(anyhow!("either flight_id or flight_name must be provided"));
         }
         let mut cfg_map = serde_json::Map::new();
         if let Some(obj) = config["config"].as_object() {
             for (k, v) in obj {
                 let s = v.as_str().ok_or_else(|| {
-                    anyhow!("flight config key '{k}' must be a string value (MotherDuck requirement)")
+                    anyhow!(
+                        "flight config key '{k}' must be a string value (MotherDuck requirement)"
+                    )
                 })?;
                 cfg_map.insert(k.clone(), JsonValue::String(s.to_string()));
             }
@@ -136,7 +136,11 @@ impl FlightConfig {
         };
         let mut hasher = Sha256::new();
         hasher.update(basis.as_bytes());
-        hasher.update(serde_json::to_string(&self.config).unwrap_or_default().as_bytes());
+        hasher.update(
+            serde_json::to_string(&self.config)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
         let digest = hasher.finalize();
         digest[..8]
             .iter()
@@ -150,7 +154,10 @@ impl FlightConfig {
             None => HttpMcpClient::token_from_env()?,
         };
         Ok(HttpMcpConfig {
-            endpoint: self.endpoint.clone().unwrap_or_else(|| "https://api.motherduck.com/mcp".into()),
+            endpoint: self
+                .endpoint
+                .clone()
+                .unwrap_or_else(|| "https://api.motherduck.com/mcp".into()),
             token,
             ..HttpMcpConfig::default()
         })
@@ -198,7 +205,11 @@ pub fn ledger_append(dir: &std::path::Path, row: &LedgerRow) {
     let line = serde_json::to_string(row).unwrap_or_default();
     let path = dir.join(format!("motherduck_ledger_{}.jsonl", row.run_key));
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -447,10 +458,7 @@ async fn execute_flight(cfg: FlightConfig, schema: SchemaRef) -> Result<RecordBa
         Some(id) => id.clone(),
         None => {
             let result = client
-                .call_tool(
-                    "list_flights",
-                    serde_json::json!({}),
-                )
+                .call_tool("list_flights", serde_json::json!({}))
                 .await?;
             let text = result["content"][0]["text"]
                 .as_str()
@@ -479,9 +487,14 @@ async fn execute_flight(cfg: FlightConfig, schema: SchemaRef) -> Result<RecordBa
     let mut run_config = cfg.config.clone();
     run_config.insert("RUN_KEY".to_string(), JsonValue::String(run_key.clone()));
     let mut args = serde_json::Map::new();
-    args.insert("flight_id".to_string(), JsonValue::String(flight_id.clone()));
+    args.insert(
+        "flight_id".to_string(),
+        JsonValue::String(flight_id.clone()),
+    );
     args.insert("config".to_string(), JsonValue::Object(run_config));
-    let run_result = client.call_tool("run_flight", JsonValue::Object(args)).await?;
+    let run_result = client
+        .call_tool("run_flight", JsonValue::Object(args))
+        .await?;
     let run_text = run_result["content"][0]["text"]
         .as_str()
         .ok_or_else(|| anyhow!("run_flight returned no text content"))?;
@@ -536,16 +549,17 @@ async fn execute_flight(cfg: FlightConfig, schema: SchemaRef) -> Result<RecordBa
         if tokio::time::Instant::now() >= deadline {
             if cfg.cancel_on_timeout {
                 let _ = client
-                    .call_tool(
-                        "cancel_flight_run",
-                        serde_json::json!({ "run_id": run_id }),
-                    )
+                    .call_tool("cancel_flight_run", serde_json::json!({ "run_id": run_id }))
                     .await;
             }
             anyhow::bail!(
                 "MotherDuck Flight run {run_id} (flight {flight_id}) timed out after {}s{}",
                 cfg.timeout_secs,
-                if cfg.cancel_on_timeout { " and was cancelled" } else { "" }
+                if cfg.cancel_on_timeout {
+                    " and was cancelled"
+                } else {
+                    ""
+                }
             );
         }
 
@@ -553,24 +567,23 @@ async fn execute_flight(cfg: FlightConfig, schema: SchemaRef) -> Result<RecordBa
         interval = (interval * 2).min(max_interval);
 
         let status_result = client
-            .call_tool(
-                "get_flight_run",
-                serde_json::json!({ "run_id": run_id }),
-            )
+            .call_tool("get_flight_run", serde_json::json!({ "run_id": run_id }))
             .await?;
         let status_text = status_result["content"][0]["text"]
             .as_str()
             .ok_or_else(|| anyhow!("get_flight_run returned no text content"))?;
         let run_state: JsonValue = serde_json::from_str(status_text)
             .map_err(|e| anyhow!("parsing get_flight_run result: {e}"))?;
-        let status = run_state["status"].as_str().unwrap_or("UNKNOWN").to_string();
+        let status = run_state["status"]
+            .as_str()
+            .unwrap_or("UNKNOWN")
+            .to_string();
 
         match status.as_str() {
             "SUCCEEDED" | "FAILED" | "CANCELLED" => {
                 let exit_code = run_state["exit_code"].as_i64().map(|c| c as i32);
                 let logs_tail = fetch_logs_tail(&mut client, &run_id).await;
-                let duration_ms =
-                    Some(started.elapsed().as_millis() as i64);
+                let duration_ms = Some(started.elapsed().as_millis() as i64);
 
                 let terminal_row = LedgerRow {
                     run_key,
@@ -637,10 +650,7 @@ async fn fetch_logs_tail(client: &mut HttpMcpClient, run_id: &str) -> String {
 /// Test seam: run the full state machine outside DataFusion. Production
 /// entry is the `FlightStream` poll path; tests call this directly.
 #[doc(hidden)]
-pub async fn execute_flight_for_tests(
-    cfg: FlightConfig,
-    schema: SchemaRef,
-) -> Result<RecordBatch> {
+pub async fn execute_flight_for_tests(cfg: FlightConfig, schema: SchemaRef) -> Result<RecordBatch> {
     execute_flight(cfg, schema).await
 }
 

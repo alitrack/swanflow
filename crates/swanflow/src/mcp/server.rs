@@ -58,9 +58,7 @@ const RESERVED_TOOLS: &[&str] = &[
 ];
 
 fn registered_workflows_path() -> std::path::PathBuf {
-    let mut p = std::path::PathBuf::from(
-        std::env::var("HOME").unwrap_or_else(|_| ".".to_string()),
-    );
+    let mut p = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
     p.push(".swanflow");
     p.push("registered_workflows.json");
     p
@@ -68,11 +66,7 @@ fn registered_workflows_path() -> std::path::PathBuf {
 
 /// Read node materializations back as JSON rows via an isolated in-memory
 /// DuckDB connection (does not touch the engine's DataFusion session).
-fn read_node_outputs(
-    cache_dir: &str,
-    output_specs: &[String],
-    max_rows: u64,
-) -> serde_json::Value {
+fn read_node_outputs(cache_dir: &str, output_specs: &[String], max_rows: u64) -> serde_json::Value {
     let metadata_path = format!("{}/metadata.duckdb", cache_dir);
     let conn = match duckdb::Connection::open(&metadata_path) {
         Ok(c) => c,
@@ -189,7 +183,11 @@ fn arrow_value_to_json(
     }
     match col.data_type() {
         DataType::Utf8 => {
-            json!(col.as_any().downcast_ref::<StringArray>().unwrap().value(row))
+            json!(col
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(row))
         }
         DataType::LargeUtf8 => json!(col
             .as_any()
@@ -206,11 +204,7 @@ fn arrow_value_to_json(
             .downcast_ref::<BooleanArray>()
             .unwrap()
             .value(row)),
-        DataType::Int8 => json!(col
-            .as_any()
-            .downcast_ref::<Int8Array>()
-            .unwrap()
-            .value(row)),
+        DataType::Int8 => json!(col.as_any().downcast_ref::<Int8Array>().unwrap().value(row)),
         DataType::Int16 => json!(col
             .as_any()
             .downcast_ref::<Int16Array>()
@@ -262,8 +256,7 @@ fn arrow_value_to_json(
 
 impl McpServer {
     pub fn new(engine: SwanFlowEngine, registry: Arc<NodeRegistry>) -> Self {
-        let registered = Self::load_registry()
-            .unwrap_or_default();
+        let registered = Self::load_registry().unwrap_or_default();
         Self {
             engine,
             registry,
@@ -309,8 +302,8 @@ impl McpServer {
             extern "C" {
                 fn dup(oldfd: i32) -> i32;
             }
-            use std::os::unix::io::FromRawFd;
             use std::io::Write as _;
+            use std::os::unix::io::FromRawFd;
             std::io::stdout().flush().ok();
             let saved_fd = unsafe { dup(1) };
             if saved_fd < 0 {
@@ -334,12 +327,14 @@ impl McpServer {
         }
     }
 
-    async fn serve_loop<R, W>(&self, transport: &mut ContentLengthTransport<R, W>) -> anyhow::Result<()>
+    async fn serve_loop<R, W>(
+        &self,
+        transport: &mut ContentLengthTransport<R, W>,
+    ) -> anyhow::Result<()>
     where
         R: tokio::io::AsyncRead + Unpin,
         W: tokio::io::AsyncWrite + Unpin,
     {
-
         loop {
             let request = match transport.read_request().await {
                 Ok(req) => req,
@@ -587,7 +582,9 @@ impl McpServer {
                     })
                     .unwrap_or_default();
 
-                let result = self.execute_with_params(yaml_str, params, output_nodes).await?;
+                let result = self
+                    .execute_with_params(yaml_str, params, output_nodes)
+                    .await?;
                 Ok(vec![json!({
                     "type": "text",
                     "text": serde_json::to_string(&result)?
@@ -823,8 +820,7 @@ impl McpServer {
     /// not raw SQL execution.
     fn guard_sql(sql: &str) -> anyhow::Result<()> {
         static FORBIDDEN: &[&str] = &[
-            "INSERT", "UPDATE", "DELETE", "DROP", "ALTER",
-            "CREATE", "TRUNCATE", "REPLACE", "MERGE",
+            "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "REPLACE", "MERGE",
         ];
 
         let upper = sql.trim().to_uppercase();
@@ -970,10 +966,7 @@ mod workflow_as_api_tests {
         let tool = wf.to_tool();
         assert_eq!(tool.name, "graph_query");
         assert!(tool.description.as_deref().unwrap().contains("graph_query"));
-        assert_eq!(
-            tool.input_schema["type"].as_str().unwrap(),
-            "object"
-        );
+        assert_eq!(tool.input_schema["type"].as_str().unwrap(), "object");
     }
 }
 
@@ -990,10 +983,10 @@ mod guard_sql_tests {
 
     #[test]
     fn allows_select_with_where_and_join() {
-        assert!(McpServer::guard_sql(
-            "SELECT a.x, b.y FROM a JOIN b ON a.id = b.id WHERE a.z = 1"
-        )
-        .is_ok());
+        assert!(
+            McpServer::guard_sql("SELECT a.x, b.y FROM a JOIN b ON a.id = b.id WHERE a.z = 1")
+                .is_ok()
+        );
     }
 
     #[test]

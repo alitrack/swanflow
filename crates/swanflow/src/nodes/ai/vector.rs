@@ -129,7 +129,9 @@ async fn embed_texts(endpoint: &EmbedEndpoint, texts: &[String]) -> Result<Vec<V
     by_index
         .into_iter()
         .zip(texts.iter())
-        .map(|(v, t)| v.ok_or_else(|| anyhow!("embeddings response missing vector for input {t:?}")))
+        .map(|(v, t)| {
+            v.ok_or_else(|| anyhow!("embeddings response missing vector for input {t:?}"))
+        })
         .collect()
 }
 
@@ -145,19 +147,25 @@ fn extract_utf8_column(
         None => schema
             .fields()
             .iter()
-            .position(|f| matches!(f.data_type(), DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View))
-            .ok_or_else(|| DataFusionError::Execution(
-                "ai.embedder input has no string column to embed".to_string(),
-            ))?,
+            .position(|f| {
+                matches!(
+                    f.data_type(),
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                )
+            })
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "ai.embedder input has no string column to embed".to_string(),
+                )
+            })?,
     };
     let col = batch.column(idx);
     // Utf8View defense (family bug #10/#16a): cast to Utf8 before downcast.
-    let col = if matches!(
-        col.data_type(),
-        DataType::Utf8View | DataType::LargeUtf8
-    ) {
+    let col = if matches!(col.data_type(), DataType::Utf8View | DataType::LargeUtf8) {
         Arc::new(cast(col, &DataType::Utf8).map_err(|e| {
-            DataFusionError::Execution(format!("failed to cast embedding input column to Utf8: {e}"))
+            DataFusionError::Execution(format!(
+                "failed to cast embedding input column to Utf8: {e}"
+            ))
         })?)
     } else {
         col.clone()
@@ -166,7 +174,10 @@ fn extract_utf8_column(
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| DataFusionError::Execution("embedding input column is not Utf8".into()))?;
-    Ok((idx, (0..arr.len()).map(|i| arr.value(i).to_string()).collect()))
+    Ok((
+        idx,
+        (0..arr.len()).map(|i| arr.value(i).to_string()).collect(),
+    ))
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -179,7 +190,11 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
         nb += b[i] * b[i];
     }
     let denom = na.sqrt() * nb.sqrt();
-    if denom > 0.0 { dot / denom } else { 0.0 }
+    if denom > 0.0 {
+        dot / denom
+    } else {
+        0.0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +271,11 @@ impl NodeBehavior for EmbedderNode {
         Ok(())
     }
 
-    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
             return Err(anyhow!("ai.embedder requires one input"));
         }
@@ -371,7 +390,13 @@ impl EmbedderExec {
             datafusion::physical_plan::execution_plan::EmissionType::Incremental,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
         );
-        Self { input, endpoint, column, batch_size: batch_size.max(1), cache }
+        Self {
+            input,
+            endpoint,
+            column,
+            batch_size: batch_size.max(1),
+            cache,
+        }
     }
 }
 
@@ -511,7 +536,10 @@ async fn embed_all_batches(
         texts.extend(col_texts);
     }
     let total = texts.len();
-    eprintln!("  [EMBED] {total} texts -> {} ({})", endpoint.model, endpoint.base_url);
+    eprintln!(
+        "  [EMBED] {total} texts -> {} ({})",
+        endpoint.model, endpoint.base_url
+    );
     let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(total);
     for chunk_start in (0..total).step_by(batch_size) {
         let chunk_end = (chunk_start + batch_size).min(total);
@@ -559,7 +587,9 @@ impl NodeBehavior for VectorSearchNode {
         NodeSpec {
             type_id: "ai.vector_search".to_string(),
             display_name: "Vector Search".to_string(),
-            description: "Embed the query with the same endpoint and rank corpus rows by cosine similarity.".to_string(),
+            description:
+                "Embed the query with the same endpoint and rank corpus rows by cosine similarity."
+                    .to_string(),
             input_ports: vec![PortSpec {
                 id: 0,
                 name: "corpus".into(),
@@ -586,7 +616,12 @@ impl NodeBehavior for VectorSearchNode {
 
     fn validate(&self, config: &JsonValue) -> Result<()> {
         resolve_endpoint(config)?;
-        if config["query"].as_str().map(str::trim).filter(|s| !s.is_empty()).is_none() {
+        if config["query"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+        {
             return Err(anyhow!("ai.vector_search requires a non-empty 'query'"));
         }
         if let Some(k) = config["top_k"].as_u64() {
@@ -599,9 +634,15 @@ impl NodeBehavior for VectorSearchNode {
         Ok(())
     }
 
-    async fn propose_plan(&self, inputs: Vec<LogicalPlan>, config: &JsonValue) -> Result<Vec<LogicalPlan>> {
+    async fn propose_plan(
+        &self,
+        inputs: Vec<LogicalPlan>,
+        config: &JsonValue,
+    ) -> Result<Vec<LogicalPlan>> {
         if inputs.is_empty() {
-            return Err(anyhow!("ai.vector_search requires one input (embedded corpus)"));
+            return Err(anyhow!(
+                "ai.vector_search requires one input (embedded corpus)"
+            ));
         }
         let endpoint = resolve_endpoint(config)?;
         let query = config["query"]
@@ -676,7 +717,11 @@ impl UserDefinedLogicalNodeCore for VectorSearchLogical {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "VectorSearch(query={:?}, top_k={})", self.query, self.top_k)
+        write!(
+            f,
+            "VectorSearch(query={:?}, top_k={})",
+            self.query, self.top_k
+        )
     }
     fn with_exprs_and_inputs(
         &self,
@@ -720,7 +765,13 @@ impl VectorSearchExec {
             datafusion::physical_plan::execution_plan::EmissionType::Incremental,
             datafusion::physical_plan::execution_plan::Boundedness::Bounded,
         );
-        Self { input, endpoint, query, top_k: top_k.max(1), cache }
+        Self {
+            input,
+            endpoint,
+            query,
+            top_k: top_k.max(1),
+            cache,
+        }
     }
 }
 
@@ -860,7 +911,8 @@ async fn vector_search_all(
         let schema = batch.schema();
         let sid_idx = schema.index_of("source_id").map_err(|_| {
             DataFusionError::Execution(
-                "ai.vector_search input must come from ai.embedder (missing source_id column)".into(),
+                "ai.vector_search input must come from ai.embedder (missing source_id column)"
+                    .into(),
             )
         })?;
         let text_idx = schema.index_of("text").map_err(|_| {
@@ -870,18 +922,20 @@ async fn vector_search_all(
         })?;
         let emb_idx = schema.index_of("embedding").map_err(|_| {
             DataFusionError::Execution(
-                "ai.vector_search input must come from ai.embedder (missing embedding column)".into(),
+                "ai.vector_search input must come from ai.embedder (missing embedding column)"
+                    .into(),
             )
         })?;
         for idx in [sid_idx, text_idx, emb_idx] {
             let col = batch.column(idx);
-            let col = if matches!(col.data_type(), DataType::Utf8View | DataType::LargeUtf8) {
-                Arc::new(cast(col, &DataType::Utf8).map_err(|e| {
-                    DataFusionError::Execution(format!("cast to Utf8 failed: {e}"))
-                })?)
-            } else {
-                col.clone()
-            };
+            let col =
+                if matches!(col.data_type(), DataType::Utf8View | DataType::LargeUtf8) {
+                    Arc::new(cast(col, &DataType::Utf8).map_err(|e| {
+                        DataFusionError::Execution(format!("cast to Utf8 failed: {e}"))
+                    })?)
+                } else {
+                    col.clone()
+                };
             let arr = col
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -891,12 +945,11 @@ async fn vector_search_all(
                     x if x == sid_idx => source_ids.push(arr.value(i).to_string()),
                     x if x == text_idx => texts.push(arr.value(i).to_string()),
                     _ => {
-                        let parsed: Vec<f32> = serde_json::from_str(arr.value(i))
-                            .map_err(|e| {
-                                DataFusionError::Execution(format!(
-                                    "embedding column is not valid JSON array: {e}"
-                                ))
-                            })?;
+                        let parsed: Vec<f32> = serde_json::from_str(arr.value(i)).map_err(|e| {
+                            DataFusionError::Execution(format!(
+                                "embedding column is not valid JSON array: {e}"
+                            ))
+                        })?;
                         vectors.push(parsed);
                     }
                 }
@@ -1004,7 +1057,9 @@ mod tests {
     #[test]
     fn test_vector_search_requires_query() {
         let node = VectorSearchNode;
-        assert!(node.validate(&serde_json::json!({ "query": "  " })).is_err());
+        assert!(node
+            .validate(&serde_json::json!({ "query": "  " }))
+            .is_err());
         assert!(node.validate(&serde_json::json!({})).is_err());
         assert!(node
             .validate(&serde_json::json!({ "query": "胸痛", "top_k": 5 }))
@@ -1017,8 +1072,14 @@ mod tests {
     #[test]
     fn test_embedder_batch_size_validation() {
         let node = EmbedderNode;
-        assert!(node.validate(&serde_json::json!({ "batch_size": 0 })).is_err());
-        assert!(node.validate(&serde_json::json!({ "batch_size": "x" })).is_err());
-        assert!(node.validate(&serde_json::json!({ "batch_size": 8 })).is_ok());
+        assert!(node
+            .validate(&serde_json::json!({ "batch_size": 0 }))
+            .is_err());
+        assert!(node
+            .validate(&serde_json::json!({ "batch_size": "x" }))
+            .is_err());
+        assert!(node
+            .validate(&serde_json::json!({ "batch_size": 8 }))
+            .is_ok());
     }
 }

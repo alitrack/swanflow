@@ -22,9 +22,13 @@ pub enum Approval {
 }
 
 /// Words (lower-cased) that count as an explicit affirmative.
-const AFFIRMATIVE: &[&str] = &["y", "yes", "approve", "approved", "ok", "okay", "go", "1", "true"];
+const AFFIRMATIVE: &[&str] = &[
+    "y", "yes", "approve", "approved", "ok", "okay", "go", "1", "true",
+];
 /// Words (lower-cased) that count as an explicit negative.
-const NEGATIVE: &[&str] = &["n", "no", "reject", "rejected", "cancel", "deny", "abort", "0", "false"];
+const NEGATIVE: &[&str] = &[
+    "n", "no", "reject", "rejected", "cancel", "deny", "abort", "0", "false",
+];
 
 /// Render a compact, human-readable summary of a workflow for review.
 ///
@@ -114,11 +118,12 @@ pub struct ApprovalGate {
     auto_approve: bool,
 }
 
-
 impl ApprovalGate {
     /// A gate that always requires an explicit human "yes".
     pub fn new() -> Self {
-        Self { auto_approve: false }
+        Self {
+            auto_approve: false,
+        }
     }
 
     /// A gate that approves without prompting (for `--yes` / automation).
@@ -151,10 +156,7 @@ impl ApprovalGate {
         let mut line = String::new();
         // read_line returns Ok(0) on EOF with an empty line -> conservative reject.
         let _ = input.read_line(&mut line);
-        Ok(matches!(
-            parse_approval(&line),
-            Some(Approval::Approved)
-        ))
+        Ok(matches!(parse_approval(&line), Some(Approval::Approved)))
     }
 }
 
@@ -174,27 +176,30 @@ mod tests {
 
     fn sample_workflow() -> Workflow {
         let mut wf = Workflow::new("hotl-demo");
-        let a = wf.graph.add_node(node(
-            "core.io.csv_read",
-            json!({"path": "users.csv"}),
-        ));
-        let b = wf.graph.add_node(node(
-            "core.transform.filter",
-            json!({"expr": "age > 18"}),
-        ));
-        let c = wf.graph.add_node(node(
-            "core.io.excel_write",
-            json!({"path": "out.xlsx"}),
-        ));
+        let a = wf
+            .graph
+            .add_node(node("core.io.csv_read", json!({"path": "users.csv"})));
+        let b = wf
+            .graph
+            .add_node(node("core.transform.filter", json!({"expr": "age > 18"})));
+        let c = wf
+            .graph
+            .add_node(node("core.io.excel_write", json!({"path": "out.xlsx"})));
         wf.graph.add_edge(
             a,
             b,
-            crate::core::graph::EdgeInstance { source_port: 0, target_port: 0 },
+            crate::core::graph::EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
         );
         wf.graph.add_edge(
             b,
             c,
-            crate::core::graph::EdgeInstance { source_port: 0, target_port: 0 },
+            crate::core::graph::EdgeInstance {
+                source_port: 0,
+                target_port: 0,
+            },
         );
         wf
     }
@@ -235,15 +240,25 @@ mod tests {
 
     #[test]
     fn parse_affirmative_variants() {
-        for word in ["y", "yes", "YES", "  Y  ", "approve", "ok", "go", "1", "true"] {
-            assert_eq!(parse_approval(word), Some(Approval::Approved), "word: {word}");
+        for word in [
+            "y", "yes", "YES", "  Y  ", "approve", "ok", "go", "1", "true",
+        ] {
+            assert_eq!(
+                parse_approval(word),
+                Some(Approval::Approved),
+                "word: {word}"
+            );
         }
     }
 
     #[test]
     fn parse_negative_variants() {
         for word in ["n", "no", "NO", "reject", "cancel", "0", "false"] {
-            assert_eq!(parse_approval(word), Some(Approval::Rejected), "word: {word}");
+            assert_eq!(
+                parse_approval(word),
+                Some(Approval::Rejected),
+                "word: {word}"
+            );
         }
     }
 

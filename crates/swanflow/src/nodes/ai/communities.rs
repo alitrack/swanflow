@@ -28,9 +28,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use datafusion::arrow::array::{
-    Array, Int64Builder, RecordBatch, StringBuilder, StringArray,
-};
+use datafusion::arrow::array::{Array, Int64Builder, RecordBatch, StringArray, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DFSchema, DataFusionError};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
@@ -38,7 +36,9 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+};
 use futures::Stream;
 use leiden_rs::{GraphDataBuilder, Leiden, LeidenConfig, Partition};
 use serde_json::Value as JsonValue;
@@ -93,9 +93,7 @@ impl CommunityBatchesConfig {
             None => Self::DEFAULT_MAX_COMMUNITY_SIZE,
             Some(v) => {
                 let n = v.as_u64().ok_or_else(|| {
-                    anyhow!(
-                        "community_batches: max_community_size must be a non-negative integer"
-                    )
+                    anyhow!("community_batches: max_community_size must be a non-negative integer")
                 })?;
                 if n == 0 {
                     return Err(anyhow!(
@@ -108,9 +106,9 @@ impl CommunityBatchesConfig {
 
         let seed = match config.get("seed") {
             None => Self::DEFAULT_SEED,
-            Some(v) => v.as_u64().ok_or_else(|| {
-                anyhow!("community_batches: seed must be a non-negative integer")
-            })?,
+            Some(v) => v
+                .as_u64()
+                .ok_or_else(|| anyhow!("community_batches: seed must be a non-negative integer"))?,
         };
 
         if let Some(v) = config.get("singletons") {
@@ -128,9 +126,7 @@ impl CommunityBatchesConfig {
 
         if let Some(v) = config.get("input_column") {
             if v.as_str().is_none() {
-                return Err(anyhow!(
-                    "community_batches: input_column must be a string"
-                ));
+                return Err(anyhow!("community_batches: input_column must be a string"));
             }
         }
         let input_column = config["input_column"].as_str().map(|s| s.to_string());
@@ -201,7 +197,9 @@ fn split_edge(s: &str) -> Result<(String, String)> {
     }
     let (a, b) = (parts[0].trim(), parts[1].trim());
     if a.is_empty() || b.is_empty() {
-        return Err(anyhow!("community_batches: edge '{s}' has an empty endpoint"));
+        return Err(anyhow!(
+            "community_batches: edge '{s}' has an empty endpoint"
+        ));
     }
     Ok((a.to_string(), b.to_string()))
 }
@@ -297,7 +295,9 @@ pub fn compute_batches(
         return Ok(Vec::new());
     }
     if config.max_community_size == 0 {
-        return Err(anyhow!("community_batches: max_community_size must be >= 1"));
+        return Err(anyhow!(
+            "community_batches: max_community_size must be >= 1"
+        ));
     }
     let membership = run_leiden_membership(node_ids.len(), edge_pairs, config.seed)?;
     Ok(compute_batches_from_membership(node_ids, &membership, config)?.0)
@@ -319,7 +319,9 @@ pub fn compute_batches_from_membership(
         return Ok((Vec::new(), 0));
     }
     if config.max_community_size == 0 {
-        return Err(anyhow!("community_batches: max_community_size must be >= 1"));
+        return Err(anyhow!(
+            "community_batches: max_community_size must be >= 1"
+        ));
     }
     let mut partition = Partition::from_membership(membership.to_vec());
     partition.renumber();
@@ -401,20 +403,15 @@ pub fn process_communities(
             })?,
             None => 0,
         };
-        let col = datafusion::arrow::compute::cast(batch.column(idx), &DataType::Utf8)
-            .map_err(|e| {
+        let col =
+            datafusion::arrow::compute::cast(batch.column(idx), &DataType::Utf8).map_err(|e| {
                 DataFusionError::Execution(format!(
                     "community_batches: cannot cast input column {idx} to Utf8: {e}"
                 ))
             })?;
-        let ids = col
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| {
-                DataFusionError::Execution(
-                    "community_batches: input column is not string-like".into(),
-                )
-            })?;
+        let ids = col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+            DataFusionError::Execution("community_batches: input column is not string-like".into())
+        })?;
         for i in 0..ids.len() {
             stats.input_rows += 1;
             if ids.is_null(i) {
@@ -442,20 +439,16 @@ pub fn process_communities(
         if a == b {
             continue; // self-loop: no community signal
         }
-        let ia = *index_of
-            .get(a.as_str())
-            .ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "community_batches: edge endpoint '{a}' is not in the node list"
-                ))
-            })?;
-        let ib = *index_of
-            .get(b.as_str())
-            .ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "community_batches: edge endpoint '{b}' is not in the node list"
-                ))
-            })?;
+        let ia = *index_of.get(a.as_str()).ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "community_batches: edge endpoint '{a}' is not in the node list"
+            ))
+        })?;
+        let ib = *index_of.get(b.as_str()).ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "community_batches: edge endpoint '{b}' is not in the node list"
+            ))
+        })?;
         edge_pairs.insert(if ia < ib { (ia, ib) } else { (ib, ia) });
     }
     let edges: Vec<(usize, usize)> = edge_pairs.into_iter().collect();
@@ -465,9 +458,8 @@ pub fn process_communities(
     let membership = run_leiden_membership(node_ids.len(), &edges, config.seed)
         .map_err(|e| DataFusionError::Execution(format!("community_batches: {e}")))?;
     let (community_batches, num_communities) =
-        compute_batches_from_membership(&node_ids, &membership, config).map_err(
-            |e| DataFusionError::Execution(format!("community_batches: {e}")),
-        )?;
+        compute_batches_from_membership(&node_ids, &membership, config)
+            .map_err(|e| DataFusionError::Execution(format!("community_batches: {e}")))?;
     stats.batches = community_batches.len();
     stats.communities = num_communities;
 
@@ -477,8 +469,7 @@ pub fn process_communities(
     let mut members_b = StringBuilder::new();
     let mut size_b = Int64Builder::with_capacity(community_batches.len());
     for b in &community_batches {
-        let members_json = serde_json::to_string(&b.members)
-            .unwrap_or_else(|_| "[]".to_string());
+        let members_json = serde_json::to_string(&b.members).unwrap_or_else(|_| "[]".to_string());
         bid_b.append_value(&b.batch_id);
         comm_b.append_value(&b.community);
         members_b.append_value(&members_json);
@@ -582,7 +573,9 @@ impl NodeBehavior for CommunityBatchesNode {
             return Err(anyhow!("Community Batches requires one input plan"));
         }
         let config = CommunityBatchesConfig::from_config(config)?;
-        let out_schema = Arc::new(DFSchema::try_from(community_batches_schema().as_ref().clone())?);
+        let out_schema = Arc::new(DFSchema::try_from(
+            community_batches_schema().as_ref().clone(),
+        )?);
         Ok(vec![LogicalPlan::Extension(Extension {
             node: Arc::new(CommunityBatchesLogical {
                 config,
@@ -643,14 +636,9 @@ impl UserDefinedLogicalNodeCore for CommunityBatchesLogical {
         _exprs: Vec<datafusion::logical_expr::Expr>,
         inputs: Vec<LogicalPlan>,
     ) -> Result<Self, DataFusionError> {
-        let input = inputs
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                DataFusionError::Internal(
-                    "CommunityBatches requires its input".into(),
-                )
-            })?;
+        let input = inputs.into_iter().next().ok_or_else(|| {
+            DataFusionError::Internal("CommunityBatches requires its input".into())
+        })?;
         Ok(Self {
             input: Arc::new(input),
             ..self.clone()
@@ -729,9 +717,7 @@ impl ExecutionPlan for CommunityBatchesExec {
             self.config.clone(),
             self.schema.clone(),
             children.into_iter().next().ok_or_else(|| {
-                DataFusionError::Internal(
-                    "CommunityBatchesExec requires its input child".into(),
-                )
+                DataFusionError::Internal("CommunityBatchesExec requires its input child".into())
             })?,
         )))
     }
@@ -801,11 +787,8 @@ impl Stream for CommunityBatchesStream {
                 }
                 Poll::Ready(None) => {
                     self.done = true;
-                    let result = process_communities(
-                        &self.buffered,
-                        &self.config,
-                        self.schema.clone(),
-                    );
+                    let result =
+                        process_communities(&self.buffered, &self.config, self.schema.clone());
                     match result {
                         Ok((out, stats)) => {
                             self.report_diagnostic(Some(&stats));
@@ -892,12 +875,7 @@ mod community_batches_tests {
     #[test]
     fn two_triangles_two_communities_of_three() {
         let cfg = default_config();
-        let out = resolve(
-            &["a", "b", "c", "d", "e", "f"],
-            two_triangle_edges(),
-            &cfg,
-        )
-        .unwrap();
+        let out = resolve(&["a", "b", "c", "d", "e", "f"], two_triangle_edges(), &cfg).unwrap();
         assert_eq!(out.len(), 2, "two triangles -> 2 batches: {out:?}");
         assert_eq!(out[0].batch_id, "c0b0");
         assert_eq!(out[0].community, "0");
@@ -944,7 +922,11 @@ mod community_batches_tests {
             &cfg,
         )
         .unwrap();
-        assert_eq!(out.len(), 2, "size-3 community with max 2 -> 2 sub-batches: {out:?}");
+        assert_eq!(
+            out.len(),
+            2,
+            "size-3 community with max 2 -> 2 sub-batches: {out:?}"
+        );
         assert_eq!(out[0].batch_id, "c0b0");
         assert_eq!(out[0].members, vec!["x", "y"]);
         assert_eq!(out[1].batch_id, "c0b1");
@@ -957,7 +939,15 @@ mod community_batches_tests {
     fn deterministic_identical_membership_across_runs() {
         let cfg = default_config();
         let ids = ["a", "b", "c", "d", "e", "f"];
-        let pairs = [(0usize, 1usize), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5), (2, 3)];
+        let pairs = [
+            (0usize, 1usize),
+            (0, 2),
+            (1, 2),
+            (3, 4),
+            (3, 5),
+            (4, 5),
+            (2, 3),
+        ];
         let m1 = run_leiden_membership(6, &pairs, cfg.seed).unwrap();
         let m2 = run_leiden_membership(6, &pairs, cfg.seed).unwrap();
         assert_eq!(m1, m2, "seeded leiden must be run-to-run stable");
@@ -1080,8 +1070,14 @@ mod community_batches_tests {
             (serde_json::json!({ "edges": ["abc"] }), "exactly 'a|b'"),
             (serde_json::json!({ "edges": ["a|"] }), "empty endpoint"),
             (serde_json::json!({ "edges": [42] }), "'a|b' strings"),
-            (serde_json::json!({ "edges": { "a": "b" } }), "arrays of neighbor"),
-            (serde_json::json!({ "edges": { "a": ["b", 1] } }), "neighbor strings"),
+            (
+                serde_json::json!({ "edges": { "a": "b" } }),
+                "arrays of neighbor",
+            ),
+            (
+                serde_json::json!({ "edges": { "a": ["b", 1] } }),
+                "neighbor strings",
+            ),
             (serde_json::json!({ "edges": "a|b" }), "array of 'a|b'"),
         ] {
             let err = CommunityBatchesConfig::from_config(&cfg)
@@ -1117,15 +1113,12 @@ mod community_batches_tests {
         )
         .unwrap();
 
-        let cfg: CommunityBatchesConfig = CommunityBatchesConfig::from_config(
-            &serde_json::json!({
-                "input_column": "node",
-                "edges": { "a": ["b", "c"], "b": ["c"], "c": ["d"], "d": ["e", "f"], "e": ["f"] }
-            }),
-        )
+        let cfg: CommunityBatchesConfig = CommunityBatchesConfig::from_config(&serde_json::json!({
+            "input_column": "node",
+            "edges": { "a": ["b", "c"], "b": ["c"], "c": ["d"], "d": ["e", "f"], "e": ["f"] }
+        }))
         .unwrap();
-        let (out, stats) = process_communities(&[batch], &cfg, community_batches_schema())
-            .unwrap();
+        let (out, stats) = process_communities(&[batch], &cfg, community_batches_schema()).unwrap();
         assert_eq!(stats.nodes, 6, "duplicate node ids dedup");
         assert_eq!(stats.edges, 7);
         assert_eq!(out.num_rows(), 2, "two triangles -> 2 rows: {out:?}");
@@ -1162,17 +1155,10 @@ mod community_batches_tests {
         let mut node_b = StringBuilder::new();
         node_b.append_value("a");
         node_b.append_value("b");
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "node",
-            DataType::Utf8,
-            true,
-        )]));
-        let batch =
-            RecordBatch::try_new(schema, vec![Arc::new(node_b.finish())]).unwrap();
-        let cfg: CommunityBatchesConfig = CommunityBatchesConfig::from_config(
-            &serde_json::json!({ "edges": ["a|z"] }),
-        )
-        .unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("node", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(node_b.finish())]).unwrap();
+        let cfg: CommunityBatchesConfig =
+            CommunityBatchesConfig::from_config(&serde_json::json!({ "edges": ["a|z"] })).unwrap();
         let err = process_communities(&[batch], &cfg, community_batches_schema())
             .unwrap_err()
             .to_string();
@@ -1186,16 +1172,14 @@ mod community_batches_tests {
         let mut node_b = StringBuilder::new();
         node_b.append_value("a");
         node_b.append_null();
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "node",
-            DataType::Utf8,
-            true,
-        )]));
-        let batch =
-            RecordBatch::try_new(schema, vec![Arc::new(node_b.finish())]).unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("node", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(node_b.finish())]).unwrap();
         let err = process_communities(&[batch], &default_config(), community_batches_schema())
             .unwrap_err()
             .to_string();
-        assert!(err.contains("null"), "null identifier must fail loudly: {err}");
+        assert!(
+            err.contains("null"),
+            "null identifier must fail loudly: {err}"
+        );
     }
 }

@@ -24,7 +24,6 @@ pub enum StepMode {
     Loop,
 }
 
-
 /// Error handling mode for a workflow node/step.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
@@ -38,7 +37,6 @@ pub enum ErrorMode {
     #[serde(rename = "retry")]
     Retry(u32),
 }
-
 
 /// An instance of a node in a workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -22,7 +22,13 @@ fn make_xlsx(path: &str, rows: Vec<Vec<&str>>) {
         .collect::<Vec<_>>()
         .join(";");
     let st = std::process::Command::new("python3")
-        .args(["-c", &format!("import openpyxl; wb=openpyxl.Workbook(); ws=wb.active; {}; wb.save('{}')", rows_lit, path)])
+        .args([
+            "-c",
+            &format!(
+                "import openpyxl; wb=openpyxl.Workbook(); ws=wb.active; {}; wb.save('{}')",
+                rows_lit, path
+            ),
+        ])
         .status()
         .unwrap();
     assert!(st.success(), "fixture creation failed");
@@ -33,7 +39,10 @@ fn make_xlsx(path: &str, rows: Vec<Vec<&str>>) {
 #[tokio::test]
 async fn excel_read_infers_real_header_schema() {
     let path = "/tmp/swanflow_test_header.xlsx";
-    make_xlsx(path, vec![vec!["城市", "数量"], vec!["杭州", "10"], vec!["成都", "20"]]);
+    make_xlsx(
+        path,
+        vec![vec!["城市", "数量"], vec!["杭州", "10"], vec!["成都", "20"]],
+    );
 
     let node = ExcelReadNode;
     let meta = node
@@ -49,7 +58,11 @@ async fn excel_read_infers_real_header_schema() {
         .collect();
     assert_eq!(names, vec!["城市", "数量"], "must read real header names");
     assert!(
-        schema.as_arrow().fields().iter().all(|f| f.data_type() == &DataType::Utf8),
+        schema
+            .as_arrow()
+            .fields()
+            .iter()
+            .all(|f| f.data_type() == &DataType::Utf8),
         "excel columns infer as Utf8 (calamine); numeric needs explicit CAST downstream"
     );
 }
@@ -73,7 +86,11 @@ async fn excel_read_proposes_real_schema_plan() {
         .iter()
         .map(|f| f.name().to_string())
         .collect();
-    assert_eq!(names, vec!["city", "amount"], "logical plan must carry real header schema");
+    assert_eq!(
+        names,
+        vec!["city", "amount"],
+        "logical plan must carry real header schema"
+    );
 }
 
 /// Bug 16a: Utf8View columns must cast to Utf8 preserving values — the old

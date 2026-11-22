@@ -207,8 +207,8 @@ impl SwanFlowConnection {
         if !dir.exists() {
             return Ok(configs);
         }
-        let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)?
-            .collect::<std::result::Result<_, _>>()?;
+        let mut entries: Vec<std::fs::DirEntry> =
+            std::fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;
         entries.sort_by_key(|e| e.path());
         for entry in entries {
             let path = entry.path();
@@ -437,7 +437,6 @@ mod tests {
         assert_eq!(loaded.build_url().unwrap(), cfg.build_url().unwrap());
     }
 }
-
 
 /// Percent-encode the userinfo-relevant characters of a URL component
 /// (P2-4): unreserved chars pass through; everything else is %XX-escaped.

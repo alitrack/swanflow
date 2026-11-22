@@ -71,11 +71,7 @@ impl ExtFnNode {
     /// * `scalar` mode: pass each column in `config.columns` as the function's
     ///   first argument, preserving the input row:
     ///   `SELECT * FROM (SELECT <input cols>, <fn>(col, args) AS col ... FROM input_0)`
-    pub fn build_query(
-        &self,
-        input_cols: &[String],
-        config: &JsonValue,
-    ) -> Result<String> {
+    pub fn build_query(&self, input_cols: &[String], config: &JsonValue) -> Result<String> {
         let f = &self.def.function;
         let args_sql = args_to_sql(config.get("args"))?;
         let mode = mode_of(config, self.is_generator());
@@ -224,7 +220,13 @@ impl NodeBehavior for ExtFnNode {
     ) -> Result<Vec<LogicalPlan>> {
         let input_cols: Vec<String> = inputs
             .first()
-            .map(|p| p.schema().fields().iter().map(|f| f.name().clone()).collect())
+            .map(|p| {
+                p.schema()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .collect()
+            })
             .unwrap_or_default();
         let query = self.build_query(&input_cols, config)?;
 
@@ -339,7 +341,9 @@ pub fn extension_ref(name: &str) -> String {
 /// Version directories are sorted descending so the newest match wins.
 fn find_local_extension(name: &str) -> Option<String> {
     let home = std::env::var("HOME").ok()?;
-    let root = std::path::Path::new(&home).join(".duckdb").join("extensions");
+    let root = std::path::Path::new(&home)
+        .join(".duckdb")
+        .join("extensions");
     let mut versions: Vec<std::path::PathBuf> = std::fs::read_dir(&root)
         .ok()?
         .filter_map(|e| e.ok())
@@ -443,9 +447,7 @@ ORDER BY extension_name, function_name";
         // config — the silent fallback is read-write, restoring exactly
         // the lock contention this open mode exists to eliminate.
         // Fail closed (no ext nodes, diagnostic) instead.
-        let ro_config = match duckdb::Config::default()
-            .access_mode(duckdb::AccessMode::ReadOnly)
-        {
+        let ro_config = match duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[extfn] read-only config rejected for {db_path}: {e}");
@@ -521,9 +523,7 @@ ORDER BY extension_name, function_name";
     // duplicate type_id reaching `register_node` would be a *silent* HashMap
     // overwrite, so never allow one through regardless of what the catalog holds.
     let mut seen = std::collections::HashSet::new();
-    out.retain(|n| {
-        seen.insert(ExtFnNode::type_id_for(&n.def.extension, &n.def.function))
-    });
+    out.retain(|n| seen.insert(ExtFnNode::type_id_for(&n.def.extension, &n.def.function)));
 
     out
 }
@@ -596,7 +596,9 @@ mod tests {
     fn test_build_query_scalar_mode_requires_columns() {
         let n = node("spatial", "st_area", "scalar");
         // Default mode for a scalar function is scalar -> must demand columns.
-        assert!(n.build_query(&["geom".to_string()], &serde_json::json!({})).is_err());
+        assert!(n
+            .build_query(&["geom".to_string()], &serde_json::json!({}))
+            .is_err());
         let q = n
             .build_query(
                 &["id".to_string(), "geom".to_string()],
@@ -622,7 +624,10 @@ mod tests {
                 &serde_json::json!({"columns": ["we\"ird"]}),
             )
             .unwrap();
-        assert!(q.contains("st_area(\"we\"\"ird\") AS \"we\"\"ird__extfn\""), "{q}");
+        assert!(
+            q.contains("st_area(\"we\"\"ird\") AS \"we\"\"ird__extfn\""),
+            "{q}"
+        );
     }
 
     #[test]
@@ -649,7 +654,10 @@ mod tests {
                 &serde_json::json!({"columns": ["geom"], "args": ["EPSG:4326"]}),
             )
             .unwrap();
-        assert!(q.contains("st_transform(\"geom\", 'EPSG:4326') AS \"geom__extfn\""), "{q}");
+        assert!(
+            q.contains("st_transform(\"geom\", 'EPSG:4326') AS \"geom__extfn\""),
+            "{q}"
+        );
     }
 
     #[test]

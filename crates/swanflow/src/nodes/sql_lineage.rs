@@ -133,7 +133,9 @@ pub fn extract_lineage(sql: &str) -> SqlLineage {
 fn collect_cte_names(stmt: &Statement, c: &mut Collector) {
     // WITH clauses hang off Query.bodies / TableFactor derived tables; the
     // robust generic way is to walk every Cte node in the AST.
-    let mut cte_visitor = CteNameVisitor { names: &mut c.cte_names };
+    let mut cte_visitor = CteNameVisitor {
+        names: &mut c.cte_names,
+    };
     let _ = stmt.visit(&mut cte_visitor);
 }
 
@@ -261,10 +263,12 @@ mod tests {
 
     #[test]
     fn join_and_schema_qualified() {
-        let l = extract_lineage(
-            "SELECT * FROM main.orders o JOIN public.customers c ON o.cid = c.id",
+        let l =
+            extract_lineage("SELECT * FROM main.orders o JOIN public.customers c ON o.cid = c.id");
+        assert_eq!(
+            l.reads,
+            vec!["main.orders".to_string(), "public.customers".to_string()]
         );
-        assert_eq!(l.reads, vec!["main.orders".to_string(), "public.customers".to_string()]);
     }
 
     #[test]
@@ -278,9 +282,7 @@ mod tests {
 
     #[test]
     fn nested_cte_shadowing() {
-        let l = extract_lineage(
-            "WITH t AS (SELECT * FROM raw_a) SELECT * FROM t",
-        );
+        let l = extract_lineage("WITH t AS (SELECT * FROM raw_a) SELECT * FROM t");
         assert_eq!(l.reads, vec!["raw_a".to_string()]);
     }
 
@@ -295,9 +297,7 @@ mod tests {
 
     #[test]
     fn ctas_records_write_and_read() {
-        let l = extract_lineage(
-            "CREATE TABLE summary AS SELECT * FROM staging_orders",
-        );
+        let l = extract_lineage("CREATE TABLE summary AS SELECT * FROM staging_orders");
         assert_eq!(l.reads, vec!["staging_orders".to_string()]);
         assert_eq!(l.writes, vec!["summary".to_string()]);
     }
@@ -312,9 +312,7 @@ mod tests {
 
     #[test]
     fn table_function_path_recorded() {
-        let l = extract_lineage(
-            "SELECT count(*) FROM read_parquet('data/lake/orders/*.parquet')",
-        );
+        let l = extract_lineage("SELECT count(*) FROM read_parquet('data/lake/orders/*.parquet')");
         assert_eq!(l.reads, vec!["data/lake/orders/*.parquet".to_string()]);
     }
 
@@ -340,9 +338,7 @@ mod tests {
 
     #[test]
     fn multiple_statements() {
-        let l = extract_lineage(
-            "SELECT * FROM a; INSERT INTO b SELECT * FROM c;",
-        );
+        let l = extract_lineage("SELECT * FROM a; INSERT INTO b SELECT * FROM c;");
         assert_eq!(l.reads, vec!["a".to_string(), "c".to_string()]);
         assert_eq!(l.writes, vec!["b".to_string()]);
     }

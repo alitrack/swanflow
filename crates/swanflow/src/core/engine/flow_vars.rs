@@ -97,10 +97,7 @@ fn resolve_string(s: &str, context: &std::collections::HashMap<String, JsonValue
 }
 
 /// Resolve a single variable reference like `"var_name"` or `"var_name:default_value"`.
-fn resolve_variable(
-    inner: &str,
-    context: &std::collections::HashMap<String, JsonValue>,
-) -> String {
+fn resolve_variable(inner: &str, context: &std::collections::HashMap<String, JsonValue>) -> String {
     if let Some(colon_pos) = inner.find(':') {
         let var_name = &inner[..colon_pos];
         let default_val = &inner[colon_pos + 1..];

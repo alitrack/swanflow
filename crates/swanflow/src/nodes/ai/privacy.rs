@@ -7,22 +7,22 @@ use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::LogicalPlan;
-use datafusion::physical_plan::{
-    coalesce_partitions::CoalescePartitionsExec, DisplayAs, DisplayFormatType,
-    ExecutionPlan, PlanProperties,
-};
 use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::{
+    coalesce_partitions::CoalescePartitionsExec, DisplayAs, DisplayFormatType, ExecutionPlan,
+    PlanProperties,
+};
 use futures::stream::Stream;
 use futures::StreamExt;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::any::Any;
+use std::collections::HashSet;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-use std::collections::HashSet;
 
 use crate::nodes::{NodeBehavior, NodeSpec, PortSpec};
 
@@ -274,9 +274,9 @@ impl NodeBehavior for PiiDetectorNode {
             detect_config: config.clone(),
             mask_config: serde_json::json!({}),
         });
-        Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
-            node,
-        })])
+        Ok(vec![LogicalPlan::Extension(
+            datafusion::logical_expr::Extension { node },
+        )])
     }
 }
 
@@ -313,7 +313,9 @@ impl fmt::Debug for PiiLogical {
 
 impl PartialEq for PiiLogical {
     fn eq(&self, other: &Self) -> bool {
-        if self.column != other.column { return false; }
+        if self.column != other.column {
+            return false;
+        }
         match (&self.mode, &other.mode) {
             (PiiMode::Detect, PiiMode::Detect) => true,
             (PiiMode::Mask, PiiMode::Mask) => true,
@@ -342,8 +344,16 @@ impl PartialOrd for PiiLogical {
 impl Ord for PiiLogical {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.column.cmp(&other.column).then_with(|| {
-            let a = match &self.mode { PiiMode::Detect => 0, PiiMode::Mask => 1, PiiMode::Gate(..) => 2 };
-            let b = match &other.mode { PiiMode::Detect => 0, PiiMode::Mask => 1, PiiMode::Gate(..) => 2 };
+            let a = match &self.mode {
+                PiiMode::Detect => 0,
+                PiiMode::Mask => 1,
+                PiiMode::Gate(..) => 2,
+            };
+            let b = match &other.mode {
+                PiiMode::Detect => 0,
+                PiiMode::Mask => 1,
+                PiiMode::Gate(..) => 2,
+            };
             a.cmp(&b)
         })
     }
@@ -395,7 +405,11 @@ impl datafusion::logical_expr::UserDefinedLogicalNodeCore for PiiLogical {
         vec![]
     }
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "PiiLogical(column={}, mode={:?})", self.column, self.mode)
+        write!(
+            f,
+            "PiiLogical(column={}, mode={:?})",
+            self.column, self.mode
+        )
     }
     fn with_exprs_and_inputs(
         &self,
@@ -545,12 +559,11 @@ impl NodeBehavior for PiiMaskerNode {
             detect_config: config.clone(),
             mask_config: config.clone(),
         });
-        Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
-            node,
-        })])
+        Ok(vec![LogicalPlan::Extension(
+            datafusion::logical_expr::Extension { node },
+        )])
     }
 }
-
 
 fn pii_mode_schema(mode: &PiiMode) -> SchemaRef {
     match mode {
@@ -591,8 +604,7 @@ impl PiiExec {
         detect_config: JsonValue,
         mask_config: JsonValue,
     ) -> Self {
-        let input: Arc<dyn ExecutionPlan> =
-            Arc::new(CoalescePartitionsExec::new(input));
+        let input: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(input));
         let schema = pii_mode_schema(&mode);
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema),
@@ -679,7 +691,6 @@ enum PiiStreamState {
     Done,
 }
 
-
 struct PiiStream {
     input: SendableRecordBatchStream,
     column: String,
@@ -696,10 +707,7 @@ impl Stream for PiiStream {
             PiiStreamState::PollingInput => match self.input.poll_next_unpin(cx) {
                 Poll::Ready(Some(Ok(batch))) => {
                     // resolve column index by name (fallback: first column)
-                    let idx = batch
-                        .schema()
-                        .index_of(self.column.as_str())
-                        .unwrap_or(0);
+                    let idx = batch.schema().index_of(self.column.as_str()).unwrap_or(0);
                     let col = batch.column(idx);
                     let texts = col.as_any().downcast_ref::<StringArray>();
                     let texts = match texts {
@@ -707,9 +715,8 @@ impl Stream for PiiStream {
                         None => {
                             // cast non-string columns to string via display
                             let n = batch.num_rows();
-                            let owned: Vec<String> = (0..n)
-                                .map(|i| arrow_scalar_to_string(col, i))
-                                .collect();
+                            let owned: Vec<String> =
+                                (0..n).map(|i| arrow_scalar_to_string(col, i)).collect();
                             &StringArray::from(owned)
                         }
                     };
@@ -730,22 +737,30 @@ impl Stream for PiiStream {
                         text_b.append_value(text);
                         match &self.mode {
                             PiiMode::Detect => {
-                                let det = detector.detect_pii(text, &self.detect_config)
+                                let det = detector
+                                    .detect_pii(text, &self.detect_config)
                                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
                                 count_b.append_value(det.matches.len() as u32);
-                                mjson_b.append_value(serde_json::to_string(&det.matches).unwrap_or_default());
+                                mjson_b.append_value(
+                                    serde_json::to_string(&det.matches).unwrap_or_default(),
+                                );
                             }
                             PiiMode::Mask => {
-                                let m = masker.mask_pii(text, &self.mask_config)
+                                let m = masker
+                                    .mask_pii(text, &self.mask_config)
                                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
                                 masked_b.append_value(m.masked_text);
-                                rjson_b.append_value(serde_json::to_string(&m.replacements).unwrap_or_default());
+                                rjson_b.append_value(
+                                    serde_json::to_string(&m.replacements).unwrap_or_default(),
+                                );
                             }
                             PiiMode::Gate(action, cfg) => {
-                                let det = detector.detect_pii(text, &self.detect_config)
+                                let det = detector
+                                    .detect_pii(text, &self.detect_config)
                                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
                                 let gate = PolicyPrivacyGateNode;
-                                let decision = gate.evaluate_policy(action, !det.matches.is_empty(), cfg)
+                                let decision = gate
+                                    .evaluate_policy(action, !det.matches.is_empty(), cfg)
                                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
                                 haspii_b.append_value(!det.matches.is_empty() as u32);
                                 allow_b.append_value(decision.allow as u32);
@@ -946,9 +961,9 @@ impl NodeBehavior for PolicyPrivacyGateNode {
             detect_config: cfg.clone(),
             mask_config: serde_json::json!({}),
         });
-        Ok(vec![LogicalPlan::Extension(datafusion::logical_expr::Extension {
-            node,
-        })])
+        Ok(vec![LogicalPlan::Extension(
+            datafusion::logical_expr::Extension { node },
+        )])
     }
 }
 
