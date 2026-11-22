@@ -1144,11 +1144,9 @@ fn distinct_string_values(batches: &[RecordBatch], column: &str) -> Result<Vec<S
                     .as_any()
                     .downcast_ref::<datafusion::arrow::array::StringArray>()
                     .unwrap();
-                for v in arr {
-                    if let Some(s) = v {
-                        if seen.insert(s.to_string()) {
-                            out.push(s.to_string());
-                        }
+                for s in arr.into_iter().flatten() {
+                    if seen.insert(s.to_string()) {
+                        out.push(s.to_string());
                     }
                 }
             }

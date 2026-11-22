@@ -676,7 +676,9 @@ async fn sensor_tick(
     // snapshot carries the entry's (workflow id, generation) — re-checked
     // before executing so an unregister / re-watch that happened while we
     // were busy drops the stale run instead of executing it.
-    let mut to_run: Vec<(uuid::Uuid, u64, Workflow, Vec<Uuid>, Vec<String>)> = Vec::new();
+    // (workflow id, generation, workflow, node ids, webhook paths consumed)
+    type QueuedRun = (uuid::Uuid, u64, Workflow, Vec<Uuid>, Vec<String>);
+    let mut to_run: Vec<QueuedRun> = Vec::new();
     {
         let mut w = watched.lock().await;
         for ww in w.iter_mut() {
@@ -1628,21 +1630,18 @@ async fn submit_workflow(
                 let mut nodes_done = 0usize;
                 let mut nodes_error = 0usize;
                 while let Some(event) = rx.recv().await {
-                    match &event {
-                        NodeEvent::StateChanged { node_id, state } => {
-                            let state_str = node_state_to_string(state);
-                            state_clone
-                                .blocking_lock()
-                                .node_states
-                                .insert(*node_id, state_str);
-                            if matches!(state, NodeState::Executed) {
-                                nodes_done += 1;
-                            }
-                            if matches!(state, NodeState::Error(_)) {
-                                nodes_error += 1;
-                            }
+                    if let NodeEvent::StateChanged { node_id, state } = &event {
+                        let state_str = node_state_to_string(state);
+                        state_clone
+                            .blocking_lock()
+                            .node_states
+                            .insert(*node_id, state_str);
+                        if matches!(state, NodeState::Executed) {
+                            nodes_done += 1;
                         }
-                        _ => {}
+                        if matches!(state, NodeState::Error(_)) {
+                            nodes_error += 1;
+                        }
                     }
                     // Update run state
                     let mut st = state_clone.blocking_lock();

@@ -955,7 +955,7 @@ impl NodeBehavior for UniversalReadNode {
                     if !path.exists() {
                         return Err(anyhow!("Path does not exist: {}", path.display()));
                     }
-                    let abs_path = std::fs::canonicalize(&path)?;
+                    let abs_path = std::fs::canonicalize(path)?;
                     let table_url = ListingTableUrl::parse(abs_path.to_str().unwrap())?;
 
                     let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
@@ -1243,11 +1243,11 @@ impl NodeBehavior for DbConnectorNode {
         if config
             .get("query")
             .and_then(|v| v.as_str())
-            .map_or(true, |s| s.is_empty())
+            .is_none_or(|s| s.is_empty())
             && config
                 .get("table")
                 .and_then(|v| v.as_str())
-                .map_or(true, |s| s.is_empty())
+                .is_none_or(|s| s.is_empty())
         {
             return Err(anyhow!("Either 'query' or 'table' must be provided"));
         }
@@ -1335,7 +1335,7 @@ impl NodeBehavior for DbConnectorNode {
                 };
                 let connector = ClickHouseConnector::connect(conn_config).await?;
                 let schema = connector
-                    .get_schema(&effective_query.trim_start_matches("SELECT * FROM "))
+                    .get_schema(effective_query.trim_start_matches("SELECT * FROM "))
                     .await?;
                 let df_schema = Arc::new(datafusion::common::DFSchema::try_from(schema.clone())?);
 

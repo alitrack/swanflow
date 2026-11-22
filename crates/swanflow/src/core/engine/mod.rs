@@ -27,6 +27,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{self};
 use uuid::Uuid;
 
+/// node_id -> (this node's config, upstream (node, column, value) tuples).
+/// Named because the inline form appears twice and reads as noise.
+type UpstreamsByNode = std::collections::HashMap<Uuid, (String, Vec<(Uuid, String, String)>)>;
+
 use crate::core::compiler::WorkflowCompiler;
 use crate::core::graph::Workflow;
 use petgraph::visit::EdgeRef;
@@ -444,10 +448,7 @@ impl SwanFlowEngine {
 
         // ADR-014 Stage 1: node_id -> (self config, upstream tuples) for
         // asset digest computation at run-record time.
-        let duckdb_level_upstreams: std::collections::HashMap<
-            Uuid,
-            (String, Vec<(Uuid, String, String)>),
-        > = workflow
+        let duckdb_level_upstreams: UpstreamsByNode = workflow
             .graph
             .node_indices()
             .map(|idx| {
@@ -754,10 +755,7 @@ impl SwanFlowEngine {
 
         // ADR-014 Stage 1: node_id -> (self config, upstream tuples) for
         // asset digest computation at run-record time.
-        let df_level_upstreams: std::collections::HashMap<
-            Uuid,
-            (String, Vec<(Uuid, String, String)>),
-        > = workflow
+        let df_level_upstreams: UpstreamsByNode = workflow
             .graph
             .node_indices()
             .map(|idx| {
@@ -1668,7 +1666,7 @@ impl SwanFlowEngine {
             let mut step_context: std::collections::HashMap<String, serde_json::Value> =
                 workflow.context.clone();
 
-            for (_i, &node_idx) in sorted_indices.iter().enumerate() {
+            for &node_idx in sorted_indices.iter() {
                 let node = match workflow.graph.node_weight(node_idx) {
                     Some(n) => n.clone(),
                     None => continue,
@@ -1680,10 +1678,15 @@ impl SwanFlowEngine {
                 }
 
                 // Handle loop nodes by iterating their sub-workflow
-                let result = if node.mode == crate::core::graph::StepMode::Loop
-                    && node.sub_workflow.is_some()
-                {
-                    let sub_wf = node.sub_workflow.as_ref().unwrap();
+                // Bind instead of check-then-unwrap: `is_some()` plus
+                // `unwrap()` stated the same fact twice, and the unwrap could
+                // only be safe because of the line above it.
+                let sub_wf_opt = if node.mode == crate::core::graph::StepMode::Loop {
+                    node.sub_workflow.as_ref()
+                } else {
+                    None
+                };
+                let result = if let Some(sub_wf) = sub_wf_opt {
                     let max_iter = node.max_iterations.max(1);
                     let mut all_events = Vec::new();
                     let mut last_err: Option<String> = None;
@@ -2144,7 +2147,7 @@ impl SwanFlowEngine {
                         aggregate_child_outcome(
                             &mut outputs,
                             &mut hard_errors,
-                            &tx,
+                            tx,
                             child_id,
                             outcome,
                         );

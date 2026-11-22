@@ -1,8 +1,8 @@
 //! Materialization ledger (ADR-014 Stage 1).
 //!
 //! DuckDB-backed ledger tracking what has been materialized and *why it
-//! might be stale*: an `upstream_digest` (node config + upstream digests
-//! + input table fingerprints) recorded on every successful run. A later
+//! might be stale*: an `upstream_digest` (node config + upstream digests +
+//! input table fingerprints) recorded on every successful run. A later
 //! run with a matching digest may skip re-materializing; a mismatch (or
 //! missing row) means stale.
 //!
@@ -251,7 +251,7 @@ pub fn compute_digest(
     // phantom-stale digest (rendered output is always valid JSON).
     let canon_rendered = canonicalize_json_str(rendered_config);
     let upd = |h: &mut Sha256, b: &[u8]| {
-        h.update(&(b.len() as u64).to_le_bytes());
+        h.update((b.len() as u64).to_le_bytes());
         h.update(b);
     };
     upd(&mut h, node_id.as_bytes());

@@ -3,8 +3,8 @@
 //! Organized into sub-modules:
 //!
 //! - `core`     — DbRead, DbWrite, FsRead, HttpFetch, KeyStore, Clock, BlobStore,
-//!                ShellExec, ProcessManager, Logger, Notification, Cache,
-//!                Telemetry, EventBus, SchemaRegistry, AuthProvider
+//!   ShellExec, ProcessManager, Logger, Notification, Cache,
+//!   Telemetry, EventBus, SchemaRegistry, AuthProvider
 //! - `ai`       — LLMInfer, Embedding, Tokenize, Moderation
 //! - `runtime`  — CancellationToken, Timeout, Progress
 //! - `plugin`   — PluginHost, WasmExec

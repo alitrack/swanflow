@@ -285,7 +285,7 @@ OUTPUT FORMAT — respond with a JSON object:
     /// `ConfigWizard::extract_json_from_response` helper, which does naive
     /// brace counting and truncates responses whose strings contain braces
     /// or fences (e.g. a thought mentioning "```").
-    fn extract_top_level_json<'a>(completion: &'a str) -> Option<&'a str> {
+    fn extract_top_level_json(completion: &str) -> Option<&str> {
         // Pick the opening bracket: prefer a leading `[` or `{`; otherwise
         // use whichever of `{`/`[` appears first in the text.
         let open: char = if completion.trim_start().starts_with('[') {
@@ -484,7 +484,7 @@ OUTPUT FORMAT — respond with a JSON object:
         };
 
         let cat = category.unwrap_or("udf");
-        let dir = root.join("libs").join(&clean_cat);
+        let dir = root.join("libs").join(clean_cat);
         // Defense in depth: even after sanitization, verify the resolved
         // write location is strictly inside the libs root before writing a
         // file that the luajit extension can later load and execute.
@@ -604,7 +604,7 @@ Description: {}
             let first_line = cleaned[..first_nl].trim().to_lowercase();
             if first_line == "yaml" || first_line == "yml" {
                 cleaned[first_nl..]
-                    .trim_start_matches(|c: char| c == '\n' || c == '\r')
+                    .trim_start_matches(['\n', '\r'])
             } else {
                 cleaned
             }
@@ -662,7 +662,7 @@ Description: {}
         }
 
         // Phase 3: add edges. Resolve source/target by UUID first, then type_id.
-        fn find_node_pos<'a>(flat_nodes: &'a [FlatNode], key: &str) -> Option<usize> {
+        fn find_node_pos(flat_nodes: &[FlatNode], key: &str) -> Option<usize> {
             flat_nodes.iter().position(|d| d.uuid == key || d.type_id == key)
         }
 

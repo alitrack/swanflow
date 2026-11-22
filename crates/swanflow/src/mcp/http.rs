@@ -46,8 +46,7 @@ impl SseParser {
         let mut out = Vec::new();
         self.buffer.push_str(chunk);
         // Split on newlines, but keep a trailing partial line in the buffer.
-        loop {
-            let Some(nl) = self.buffer.find('\n') else { break };
+        while let Some(nl) = self.buffer.find('\n') {
             let mut line = self.buffer[..nl].to_string();
             self.buffer.drain(..=nl);
             if line.ends_with('\r') {

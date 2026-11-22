@@ -197,30 +197,27 @@ impl<'a> sqlparser::ast::Visitor for ReadWriteVisitor<'a> {
     type Break = ();
 
     fn pre_visit_table_factor(&mut self, table: &TableFactor) -> ControlFlow<()> {
-        match table {
-            TableFactor::Table { name, args, .. } => {
-                let fname = object_name_to_string(name).to_lowercase();
-                // Table function with path argument -> record the literal.
-                if let Some(tfa) = args {
-                    if PATH_FUNCTION_NAMES.contains(&fname.as_str()) {
-                        if let Some(first) = tfa.args.first() {
-                            let rendered = format!("{}", first);
-                            let trimmed = rendered.trim();
-                            if trimmed.starts_with('\'') || trimmed.starts_with('"') {
-                                let path = trimmed.trim_matches(|ch| ch == '\'' || ch == '"');
-                                if !path.is_empty() {
-                                    self.collector.reads.insert(path.to_string());
-                                    return ControlFlow::Continue(());
-                                }
+        if let TableFactor::Table { name, args, .. } = table {
+            let fname = object_name_to_string(name).to_lowercase();
+            // Table function with path argument -> record the literal.
+            if let Some(tfa) = args {
+                if PATH_FUNCTION_NAMES.contains(&fname.as_str()) {
+                    if let Some(first) = tfa.args.first() {
+                        let rendered = format!("{}", first);
+                        let trimmed = rendered.trim();
+                        if trimmed.starts_with('\'') || trimmed.starts_with('"') {
+                            let path = trimmed.trim_matches(|ch| ch == '\'' || ch == '"');
+                            if !path.is_empty() {
+                                self.collector.reads.insert(path.to_string());
+                                return ControlFlow::Continue(());
                             }
                         }
                     }
-                    // Other table functions: skip (unknown semantics).
-                    return ControlFlow::Continue(());
                 }
-                self.collector.record_read(&object_name_to_string(name));
+                // Other table functions: skip (unknown semantics).
+                return ControlFlow::Continue(());
             }
-            _ => {}
+            self.collector.record_read(&object_name_to_string(name));
         }
         ControlFlow::Continue(())
     }

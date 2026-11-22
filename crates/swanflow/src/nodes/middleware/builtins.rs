@@ -9,7 +9,6 @@ use super::PlanMiddleware;
 
 /// ── column_select ────────────────────────────────────────────────────────
 /// Project only the listed columns.
-
 pub struct ColumnSelectMiddleware {
     columns: Vec<String>,
 }
@@ -48,7 +47,7 @@ pub fn column_select_schema() -> JsonValue {
 
 impl PlanMiddleware for ColumnSelectMiddleware {
     fn apply(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
-        let exprs: Vec<_> = self.columns.iter().map(|c| col(c)).collect();
+        let exprs: Vec<_> = self.columns.iter().map(col).collect();
         LogicalPlanBuilder::from(plan.clone())
             .project(exprs)
             .and_then(|b| b.build())
@@ -58,7 +57,6 @@ impl PlanMiddleware for ColumnSelectMiddleware {
 
 /// ── row_limit ────────────────────────────────────────────────────────────
 /// Cap the number of rows per input.
-
 pub struct RowLimitMiddleware {
     limit: usize,
 }
@@ -94,7 +92,6 @@ impl PlanMiddleware for RowLimitMiddleware {
 
 /// ── column_rename ─────────────────────────────────────────────────────────
 /// Rename a column (pure schema operation).
-
 pub struct ColumnRenameMiddleware {
     from: String,
     to: String,

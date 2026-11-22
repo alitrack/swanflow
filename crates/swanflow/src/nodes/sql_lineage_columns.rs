@@ -204,15 +204,14 @@ impl sqlparser::ast::Visitor for ColumnRefVisitor {
             Expr::Identifier(ident) => {
                 self.refs.push((None, ident.value.clone()));
             }
-            Expr::CompoundIdentifier(parts) => {
-                if parts.len() >= 2 {
+            Expr::CompoundIdentifier(parts)
+                if parts.len() >= 2 => {
                     let qual: Vec<&str> = parts[..parts.len() - 1]
                         .iter()
                         .map(|i| i.value.as_str())
                         .collect();
                     self.refs.push((Some(qual.join(".")), parts.last().unwrap().value.clone()));
                 }
-            }
             _ => {}
         }
         std::ops::ControlFlow::Continue(())

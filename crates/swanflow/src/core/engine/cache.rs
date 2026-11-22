@@ -85,11 +85,10 @@ impl CacheManager {
                 let path = entry.path();
                 if path.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if !name.ends_with(".duckdb") && !name.ends_with(".db") {
-                        if std::fs::remove_file(&path).is_ok() {
+                    if !name.ends_with(".duckdb") && !name.ends_with(".db")
+                        && std::fs::remove_file(&path).is_ok() {
                             removed += 1;
                         }
-                    }
                 }
             }
         }

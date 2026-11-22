@@ -144,9 +144,12 @@ impl CheckpointManager {
                 let json: String = row.get(0)?;
                 let cp: EngineCheckpoint = serde_json::from_str(&json)?;
                 // Only return if NOT completed
-                if cp.completed_at.is_some() {
-                    Ok(None)
-                } else if cp.digest_version != crate::core::engine::assets::DIGEST_VERSION {
+                // Both conditions mean "this checkpoint is not reusable": a
+                // completed run, or one written by a different digest scheme.
+                // Collapsed into one arm — the two branches were identical.
+                if cp.completed_at.is_some()
+                    || cp.digest_version != crate::core::engine::assets::DIGEST_VERSION
+                {
                     Ok(None)
                 } else {
                     Ok(Some(cp))

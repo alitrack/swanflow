@@ -506,7 +506,7 @@ impl NodeBehavior for CsvWriteNode {
         }
         reject_existing_dir(&path)?;
         if let Some(d) = cfg::optional_string(config, "delimiter") {
-            if d.as_bytes().len() != 1 {
+            if d.len() != 1 {
                 return Err(anyhow!(
                     "CSV Writer 'delimiter' must be exactly one byte, got {d:?}"
                 ));

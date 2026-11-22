@@ -366,14 +366,14 @@ impl QueryEngine for DuckDBEngine {
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?
         {
             for (i, builder) in builders.iter_mut().enumerate() {
-                builder.append_from_duckdb(&row, i)?;
+                builder.append_from_duckdb(row, i)?;
             }
         }
 
         let columns: Vec<ArrayRef> =
             builders.into_iter().map(|mut b| b.finish()).collect();
 
-        if columns.is_empty() || columns[0].len() == 0 {
+        if columns.is_empty() || columns[0].is_empty() {
             Ok(vec![])
         } else {
             let batch = RecordBatch::try_new(schema, columns)
@@ -595,7 +595,7 @@ impl QueryEngine for DuckDBEngine {
                 if ext.node.inputs().len() == 1 {
                     // Wrapper nodes (MaterializerLogical, StateProbeLogical,
                     // etc.) transparently forward to their single input.
-                    self.compile_to_sql(&ext.node.inputs()[0])
+                    self.compile_to_sql(ext.node.inputs()[0])
                 } else {
                     Err(datafusion::error::DataFusionError::NotImplemented(format!(
                         "SQL compilation for extension node '{}' with {} inputs",

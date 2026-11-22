@@ -108,16 +108,12 @@ pub fn parse_approval(input: &str) -> Option<Approval> {
 }
 
 /// An interactive (or scripted) approval gate.
+#[derive(Default)]
 pub struct ApprovalGate {
     /// When true, skip the prompt and approve immediately (CI / `--yes`).
     auto_approve: bool,
 }
 
-impl Default for ApprovalGate {
-    fn default() -> Self {
-        Self { auto_approve: false }
-    }
-}
 
 impl ApprovalGate {
     /// A gate that always requires an explicit human "yes".

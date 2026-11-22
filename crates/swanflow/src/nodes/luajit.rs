@@ -502,9 +502,7 @@ pub fn luajit_libs_from_index(index_path: &str) -> Vec<LuaJitLibNode> {
             _ => None,
         };
         let description = if name == "linalg" {
-            format!(
-                "LuaJIT linalg lib (GPU-capable matmul/SVD/eigh/inv/lu/chol/qr — set args; backend: auto/gpu/cpu)"
-            )
+            "LuaJIT linalg lib (GPU-capable matmul/SVD/eigh/inv/lu/chol/qr — set args; backend: auto/gpu/cpu)".to_string()
         } else {
             match action_args {
                 Some(_) => format!(

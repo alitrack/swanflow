@@ -9,8 +9,10 @@ use uuid::Uuid;
 /// Execution mode for a workflow node/step.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum StepMode {
     #[serde(rename = "sequential")]
+    #[default]
     Sequential,
     #[serde(rename = "fan_out")]
     FanOut,
@@ -22,17 +24,14 @@ pub enum StepMode {
     Loop,
 }
 
-impl Default for StepMode {
-    fn default() -> Self {
-        Self::Sequential
-    }
-}
 
 /// Error handling mode for a workflow node/step.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum ErrorMode {
     #[serde(rename = "fail")]
+    #[default]
     Fail,
     #[serde(rename = "skip")]
     Skip,
@@ -40,11 +39,6 @@ pub enum ErrorMode {
     Retry(u32),
 }
 
-impl Default for ErrorMode {
-    fn default() -> Self {
-        Self::Fail
-    }
-}
 
 /// An instance of a node in a workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]

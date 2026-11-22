@@ -229,7 +229,7 @@ impl CronExpr {
         if now_min > last_eval && self.matches(&now_min) {
             return true;
         }
-        self.next_after(last_eval).map_or(false, |f| f <= now)
+        self.next_after(last_eval).is_some_and(|f| f <= now)
     }
 }
 
@@ -433,6 +433,7 @@ fn unquote(s: &str) -> String {
 /// - no `..` segment (traversal)
 /// - no query/fragment (`?`/`#`) — matching is on the path only
 /// - no whitespace or control chars
+///
 /// Returns the canonical (unquoted) path.
 pub fn parse_webhook_path(s: &str) -> Result<String, String> {
     let t = unquote(s);

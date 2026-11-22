@@ -103,7 +103,7 @@ pub fn sanitize_llm_text(raw: &str) -> String {
         },
     };
     // Closing fence = the last "```" in the body (best effort).
-    let end = body.rfind("```").map_or(body.len(), |p| p);
+    let end = body.rfind("```").unwrap_or(body.len());
     body[..end].trim().to_string()
 }
 
@@ -375,7 +375,7 @@ pub fn process_batch(
             row_drops.join("; ")
         };
         for item in &row_passes {
-            item_b.append_value(&item.to_string());
+            item_b.append_value(item.to_string());
             rejected_b.append_value(&rejected_cell);
         }
     }

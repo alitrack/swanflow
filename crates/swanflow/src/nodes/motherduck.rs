@@ -210,8 +210,8 @@ pub fn ledger_find_success(dir: &std::path::Path, run_key: &str) -> Option<Ledge
     content
         .lines()
         .filter_map(|l| serde_json::from_str::<LedgerRow>(l).ok())
-        .filter(|r| r.status == "SUCCEEDED")
-        .last()
+        .rev()
+        .find(|r| r.status == "SUCCEEDED")
 }
 
 // ---------------------------------------------------------------------------

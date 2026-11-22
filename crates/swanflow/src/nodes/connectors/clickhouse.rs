@@ -345,7 +345,7 @@ fn urlencoding(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.' | b'~' => {
                 result.push(byte as char);
             }
-            b' ' => result.push_str("+"),
+            b' ' => result.push('+'),
             _ => {
                 result.push_str(&format!("%{:02X}", byte));
             }

@@ -299,9 +299,9 @@ fn is_safe_ident(name: &str) -> bool {
 ///
 /// * missing / null -> empty (call with no extra arguments)
 /// * string         -> spliced verbatim (matches DuckFlow's raw-SQL `args`).
-///                     ⚠️ deliberate escape hatch for power users — node
-///                     config is authored by the workflow author, same trust
-///                     domain as hand-written SQL elsewhere in the graph.
+///   ⚠️ deliberate escape hatch for power users — node
+///   config is authored by the workflow author, same trust
+///   domain as hand-written SQL elsewhere in the graph.
 /// * array          -> positional literals, comma-joined
 /// * object         -> single DuckDB struct literal (`{'op':'run'}`)
 fn args_to_sql(args: Option<&JsonValue>) -> Result<String> {

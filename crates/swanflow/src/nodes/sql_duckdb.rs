@@ -491,7 +491,7 @@ async fn run_duckdb_query(
     if cast_batches.is_empty() {
         return Ok(RecordBatch::new_empty(schema));
     }
-    Ok(concat_batches_safe(&cast_batches, schema)?)
+    concat_batches_safe(&cast_batches, schema)
 }
 
 fn concat_batches_safe(
@@ -511,9 +511,9 @@ fn concat_batches_safe(
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
         columns.push(combined);
     }
-    Ok(RecordBatch::try_new(schema, columns).map_err(|e| {
+    RecordBatch::try_new(schema, columns).map_err(|e| {
         datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
-    })?)
+    })
 }
 
 fn ext_err(e: impl std::error::Error + Send + Sync + 'static) -> datafusion::error::DataFusionError {
@@ -630,8 +630,8 @@ impl NodeBehavior for DuckSqlNode {
                 // payload smuggling, mid-statement) stays banned.
                 let all_loads_local = q.split(';').all(|stmt| {
                     let s = stmt.trim().to_lowercase();
-                    if s.starts_with("load ") {
-                        let path = s["load ".len()..].trim();
+                    if let Some(rest) = s.strip_prefix("load ") {
+                        let path = rest.trim();
                         path.starts_with('\'') && path.ends_with(".duckdb_extension'")
                     } else {
                         !s.contains("load ")

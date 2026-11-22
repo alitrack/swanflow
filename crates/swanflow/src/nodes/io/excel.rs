@@ -205,11 +205,11 @@ impl NodeBehavior for ExcelReadNode {
         let fields: Vec<Field> = if has_header {
             header_row
                 .iter()
-                .map(|c: &Data| Field::new(&c.to_string(), DataType::Utf8, true))
+                .map(|c: &Data| Field::new(c.to_string(), DataType::Utf8, true))
                 .collect()
         } else {
             (0..header_row.len())
-                .map(|i| Field::new(&format!("column_{}", i), DataType::Utf8, true))
+                .map(|i| Field::new(format!("column_{}", i), DataType::Utf8, true))
                 .collect()
         };
         let real_schema = Arc::new(DFSchema::try_from(Arc::new(Schema::new(fields)))?);

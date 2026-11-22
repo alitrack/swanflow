@@ -101,10 +101,10 @@ impl AdapterExecutionEvent {
             },
             NodeEvent::Materialized { .. } => {
                 // materialization events are not forwarded through the adapter protocol
-                return Self::Progress {
+                Self::Progress {
                     node_id: String::new(),
                     percentage: 100.0,
-                };
+                }
             }
         }
     }

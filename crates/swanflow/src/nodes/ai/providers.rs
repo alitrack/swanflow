@@ -120,7 +120,7 @@ impl LlmProvider for OpenAiProvider {
         eprintln!(
             "  [LLM] finish_reason={:?} usage={}",
             body["choices"][0]["finish_reason"].as_str().unwrap_or("?"),
-            body["usage"].to_string()
+            body["usage"]
         );
 
         Ok(body["choices"][0]["message"]["content"]

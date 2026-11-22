@@ -46,11 +46,8 @@ fn resolve_string(s: &str, context: &std::collections::HashMap<String, JsonValue
 
     // Resolve %%var_name%% or %%var_name:default%%
     let mut scan_from = 0usize;
-    loop {
-        let start = match result[scan_from..].find("%%") {
-            Some(off) => scan_from + off,
-            None => break,
-        };
+    while let Some(off) = result[scan_from..].find("%%") {
+        let start = scan_from + off;
         let end = match result[start + 2..].find("%%") {
             Some(off) => start + 2 + off,
             None => break,
@@ -73,11 +70,8 @@ fn resolve_string(s: &str, context: &std::collections::HashMap<String, JsonValue
 
     // Resolve {{var_name}} or {{var_name:default}}
     let mut scan_from = 0usize;
-    loop {
-        let start = match result[scan_from..].find("{{") {
-            Some(off) => scan_from + off,
-            None => break,
-        };
+    while let Some(off) = result[scan_from..].find("{{") {
+        let start = scan_from + off;
         let end = match result[start + 2..].find("}}") {
             Some(off) => start + 2 + off,
             None => break,
