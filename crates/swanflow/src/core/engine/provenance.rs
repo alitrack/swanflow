@@ -483,6 +483,20 @@ pub fn check_structure(header: &ArtifactHeader) -> CheckReport {
     }
 }
 
+/// Open the database to be **reviewed**, read-only.
+///
+/// `check` only reads, but `Connection::open` gets write access, and a write-capable
+/// handle can checkpoint/shorten a WAL on exit — i.e. touch a customer's medical
+/// file during a "read-only" review. If another process holds the file, failing
+/// loudly is the right outcome; silently writing is not.
+pub fn open_read_only(path: &std::path::Path) -> Result<duckdb::Connection> {
+    let config = duckdb::Config::default()
+        .access_mode(duckdb::AccessMode::ReadOnly)
+        .context("build read-only duckdb config")?;
+    duckdb::Connection::open_with_flags(path, config)
+        .with_context(|| format!("open {} read-only", path.display()))
+}
+
 /// Level 1: is the premise still intact? Seconds, no execution.
 ///
 /// Also re-derives `artifact_id` from the header's own fields — if the stored id
@@ -725,8 +739,13 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
     // Drop the recorded output so the recorded code can recreate it verbatim.
     conn.execute_batch(&format!("DROP TABLE IF EXISTS {}", quote_ident(&out_table)))
         .with_context(|| format!("drop {out_table} in the rerun copy"))?;
-    conn.execute_batch(&header.code.text)
-        .context("re-run the code recorded in the header")?;
+    conn.execute_batch(&header.code.text).with_context(|| {
+        format!(
+            "re-run the code recorded in the header — note that {out_table} was dropped first, \
+             so code that appends to (instead of creating) the output table cannot be re-run \
+             this way; that is a limitation, not a wrong answer"
+        )
+    })?;
 
     let (rows_observed, hash_observed) = table_fingerprint(&conn, &out_table)
         .with_context(|| format!("fingerprint re-run output {out_table}"))?;
@@ -1191,6 +1210,25 @@ mod tests {
             err.contains("refusing to compare"),
             "must refuse rather than silently report equality: {err}"
         );
+    }
+
+    #[test]
+    fn read_only_open_cannot_write() {
+        // The point of open_read_only: a review must not be *able* to change the
+        // file it is reviewing, not merely refrain from doing so.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("work.duckdb");
+        seed_db(&db);
+        let conn = open_read_only(&db).unwrap();
+        assert!(
+            conn.execute_batch("DELETE FROM sales").is_err(),
+            "a read-only handle must refuse a write"
+        );
+        // ... and the data is still there, observed through the same handle.
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM sales", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3);
     }
 
     #[test]

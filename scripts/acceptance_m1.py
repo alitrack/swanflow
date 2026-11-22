@@ -139,9 +139,12 @@ def main() -> int:
           f"{id_produced[:18]}… vs {id2[:18]}…")
 
     # ── 5. --check on intact data passes ────────────────────────────────────
+    before_check = sha256_file(r_db)
     r = run("provenance", "check", "--header", r_hdr, "--db", r_db)
     check(r.returncode == 0 and "PASS" in (r.stdout or ""),
           "--check passes while the inputs are untouched", (r.stderr or "").strip()[:120])
+    check(sha256_file(r_db) == before_check,
+          "--check did not modify the file it checked (opened read-only)")
 
     # ── 6. one input row changes ⇒ --check says "data changed" ──────────────
     t_db = os.path.join(tampered, "analysis.duckdb")

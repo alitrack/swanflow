@@ -1068,7 +1068,8 @@ async fn main() -> anyhow::Result<()> {
                 by,
             } => {
                 use swanflow::core::engine::provenance::{
-                    append_replication, check, check_structure, load_header, write_header,
+                    append_replication, check, check_structure, load_header, open_read_only,
+                    write_header,
                 };
 
                 let mut h = load_header(&header)?;
@@ -1077,8 +1078,8 @@ async fn main() -> anyhow::Result<()> {
                         if !path.exists() {
                             anyhow::bail!("database not found: {}", path.display());
                         }
-                        let conn = duckdb::Connection::open(path)
-                            .map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?;
+                        // Read-only: a check may not be able to write to the file it reviews.
+                        let conn = open_read_only(path)?;
                         check(&conn, &h)?
                     }
                     None => check_structure(&h),
