@@ -33,7 +33,13 @@ SRC_GLOB=(crates/swanflow/src crates/swanflow-core/src crates/swanflow-ai/src \
 extract_test_mods() {
   awk '
     {
-      t=$0; sub(/^[ \t]+/,"",t); sub(/[ \t]+$/,"",t)
+      # Strip a trailing CR FIRST. Several files were checked in with CRLF, and
+      # [ \t] does not match \r, so `t == "#[cfg(test)]"` silently failed on
+      # them and whole test modules were counted as production code. That is
+      # why this gate read 230 on a tree that actually held 124 (design.md
+      # §20.2). A scanner whose answer depends on the line ending is not
+      # measuring the code.
+      t=$0; sub(/\r$/,"",t); sub(/^[ \t]+/,"",t); sub(/[ \t]+$/,"",t)
       if (t == "#[cfg(test)]") { pend=1; next }
       if (t ~ /^#\[cfg\(test\)\][ \t]*mod[ \t]+[A-Za-z0-9_]+[ \t]*;/) {
         m=t; sub(/^#\[cfg\(test\)\][ \t]*/,"",m); sub(/^[ \t]*mod[ \t]+/,"",m); sub(/[ \t]*;.*$/,"",m); print m; next
@@ -71,6 +77,10 @@ AWK_PROG='
 BEGIN { in_test=0; pending=0; depth=0 }
 {
   line=$0
+  # Same CR strip as extract_test_mods: the test-block detection below compares
+  # `t` against exactly "#[cfg(test)]", and a stray \r makes that comparison
+  # false, which counts test code as production code.
+  sub(/\r$/,"",line)
   cand = (line ~ /\.unwrap\(\)/ || line ~ /\.expect\(/)
   if (cand && line ~ /unwrap_or|unwrap_err|unwrap_unchecked/) cand=0
   if (cand && !in_test) printf "%s:%d: %s\n", P, FNR, line
@@ -146,7 +156,17 @@ count=$(wc -l < "$tmp")
 #        miscount was treating "two `_` arms" as "two sites removed" when each
 #        arm's Int64 and Float64 siblings have the same shape. Count SITES
 #        removed, never branches edited.
-BASELINE=230
+#   124  after fixing the scanner's CRLF blindness (design.md §20.2), which was
+#        the real reason for the 354/230 pair: four files were checked in with
+#        CRLF, `[ \t]` does not match `\r`, so `t == "#[cfg(test)]"` never
+#        matched and their whole test modules were counted as production code.
+#        Phantom inflation was a constant 106 on both sides, which is why the
+#        DELTA (-124) was always right while both totals were wrong:
+#          c064b77^  : 354 with the bug, 248 without
+#          c064b77   : 230 with the bug, 124 without
+#        Re-measured after the format-only commit normalised CRLF to LF, so the
+#        bug no longer shows up here — but it would again on any CRLF file.
+BASELINE=124
 
 echo "no-unwrap hygiene (built crates/*/src, non-test):"
 echo "  current : $count"
