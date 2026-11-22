@@ -124,6 +124,8 @@ impl NodeRegistry {
             TableToVariableNode, VariableCreatorNode, WindowNode,
         };
         #[cfg(feature = "wasm")]
+        use crate::nodes::plugin_transform::PluginTransformNode;
+        #[cfg(feature = "wasm")]
         use crate::nodes::wasm::WasmNode;
 
         self.register_node(Arc::new(SqlNode));
@@ -234,6 +236,8 @@ impl NodeRegistry {
         }
         #[cfg(feature = "wasm")]
         self.register_node(Arc::new(WasmNode));
+        #[cfg(feature = "wasm")]
+        self.register_node(Arc::new(PluginTransformNode));
         self.register_node(Arc::new(GraphRetrieverNode));
         self.register_node(Arc::new(ContextFuserNode));
         self.register_node(Arc::new(McpInvokeNode));

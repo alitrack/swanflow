@@ -309,6 +309,42 @@ impl ExtensionPlanner for SwanFlowPlanner {
                 ),
             )));
         }
+        // Both WASM arms live behind the feature: `nodes::wasm` and
+        // `nodes::plugin_transform` only exist when it is on, so an unguarded
+        // downcast here breaks every default (non-wasm) build.
+        #[cfg(feature = "wasm")]
+        if let Some(pt) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::plugin_transform::PluginTransformLogical>()
+        {
+            // The plugin host never parses payloads, so the declared schema is
+            // the only contract there is; the Exec re-checks it per batch.
+            return Ok(Some(Arc::new(
+                crate::nodes::plugin_transform::PluginTransformExec::new(
+                    pt.plugin_dir.clone(),
+                    pt.plugin.clone(),
+                    pt.function.clone(),
+                    Arc::new(pt.schema.as_arrow().clone()),
+                    physical_inputs[0].clone(),
+                ),
+            )));
+        }
+        // core.script.wasm: the node registered and planned a WasmLogical but
+        // nothing lowered it, so every workflow using it died at physical
+        // planning with "No physical plan found for user defined logical node:
+        // WasmUdf" — the same failure mode documented for McpTool above, found
+        // by actually running the node instead of trusting the registration.
+        #[cfg(feature = "wasm")]
+        if let Some(wasm) = node
+            .as_any()
+            .downcast_ref::<crate::nodes::wasm::WasmLogical>()
+        {
+            return Ok(Some(Arc::new(crate::nodes::wasm::WasmExec::new(
+                wasm.module_path.clone(),
+                wasm.function_name.clone(),
+                physical_inputs[0].clone(),
+            ))));
+        }
         if let Some(excel_scan) = node.as_any().downcast_ref::<ExcelScanLogical>() {
             let fields = excel_scan
                 .schema

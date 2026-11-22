@@ -101,6 +101,16 @@ impl WasmPluginManifest {
     }
 }
 
+/// Read a plugin's on-disk descriptor without instantiating a host.
+///
+/// Plan-time callers need the manifest (does this plugin exist? what is its
+/// entry point?) but must not pay for a wasmtime `Engine`, so this is a free
+/// function rather than something reached through a `PluginHost`.
+pub fn read_plugin_manifest(dir: &str, name: &str) -> CoreResult<WasmPluginManifest> {
+    let path = Path::new(dir).join(format!("{}.plugin.json", name));
+    WasmPluginHost::read_manifest(&path)
+}
+
 /// Store data carrying the resource limiter.
 struct HostState {
     limits: StoreLimits,

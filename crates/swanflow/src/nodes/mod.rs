@@ -33,6 +33,8 @@ pub mod sql_lineage;
 pub mod sql_lineage_columns;
 pub mod transform;
 #[cfg(feature = "wasm")]
+pub mod plugin_transform;
+#[cfg(feature = "wasm")]
 pub mod wasm;
 
 /// Port identification and description.
