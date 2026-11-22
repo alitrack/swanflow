@@ -268,9 +268,11 @@ fn run_wasm_udf(module_path: &str, function_name: &str, batch: RecordBatch) -> R
     let output_start = (output_ptr + 4) as usize;
     let output_data = wasm_mem[output_start..(output_start + output_len as usize)].to_vec();
 
-    // 10. Free WASM memory
-    // We need &mut store for dealloc, so we must drop the immutable borrow from memory.data()
-    drop(wasm_mem);
+    // 10. Free WASM memory. The immutable borrow of `store` taken by
+    // `memory.data()` above ends here on its own (its last use was the copy into
+    // `output_data`), so `dealloc` can take `&mut store`. An explicit
+    // `drop(wasm_mem)` would be a no-op on a reference — that is clippy's
+    // `drop_ref` lint, which is why there isn't one.
     dealloc.call(&mut store, (input_ptr, input_len))?;
     dealloc.call(&mut store, (output_ptr, output_len + 4))?;
 
