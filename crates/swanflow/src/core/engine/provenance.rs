@@ -79,15 +79,61 @@ pub struct TableRef {
     /// "same rows, same content, different shape".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_sha256: Option<String>,
-    /// "aggregate" (this implementation) or "row_stream" (reserved).
-    #[serde(default = "default_fingerprint_kind")]
+    /// Which question `content_sha256` answers — see [`FP_AGGREGATE`] and
+    /// [`FP_ROW_MULTISET`].
+    ///
+    /// The serde default here is the **legacy** kind deliberately. A header that
+    /// omits this field was written before `row_multiset` existed, so it is an
+    /// aggregate header; reading it as the current default would silently
+    /// re-interpret every historical artifact as changed.
+    #[serde(default = "legacy_fingerprint_kind")]
     pub fingerprint_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collected_at: Option<String>,
 }
 
-fn default_fingerprint_kind() -> String {
-    "aggregate".to_string()
+/// Order-independent **sum** of the row hashes:
+/// `sum(hash(concat_ws('|', cols)))`.
+///
+/// Cheap, and it does detect content changes — but `sum` is linear, so two
+/// different row multisets sharing one sum are indistinguishable to it. The
+/// construction cost is a fixed birthday bound (~2^32) and does **not** grow
+/// with the table, so a bigger table is not a defence.
+///
+/// Kept for reading only: artifacts already on disk carry this kind, and they
+/// must keep verifying (see `docs/design.md` §15).
+pub const FP_AGGREGATE: &str = "aggregate";
+
+/// Order-independent hash over the **sorted** row hashes:
+/// `sha256(string_agg(rowhash, '|' ORDER BY rowhash))`.
+///
+/// Collision resistance drops back to sha256 itself instead of the linear sum.
+/// Costs ~4x [`FP_AGGREGATE`] (134 ms -> 575 ms on 1M rows, 8 mixed columns,
+/// measured — `evidence/fingerprint_probe.py`). Duplicates are preserved
+/// (a multiset, not a set). This is what new headers are written with.
+pub const FP_ROW_MULTISET: &str = "row_multiset";
+
+/// The kind written into headers **this build creates**.
+pub fn new_fingerprint_kind() -> String {
+    FP_ROW_MULTISET.to_string()
+}
+
+/// The kind assumed when a header **omits** the field.
+///
+/// Separate from [`new_fingerprint_kind`] on purpose: "the field is absent"
+/// and "the current default" are different statements, and conflating them
+/// would re-label every historical artifact.
+fn legacy_fingerprint_kind() -> String {
+    FP_AGGREGATE.to_string()
+}
+
+/// Can this build recompute a fingerprint of this kind?
+///
+/// Used to refuse an unknown kind rather than guess: a hash computed a
+/// different way is not comparable with the recorded one, and reporting
+/// "different" would be a false alarm about the data.
+pub fn is_known_fingerprint_kind(kind: &str) -> bool {
+    kind == FP_AGGREGATE || kind == FP_ROW_MULTISET
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -208,11 +254,41 @@ pub fn engine_version(conn: &duckdb::Connection) -> Result<String> {
 
 /// Order-independent content fingerprint: (row count, sha256 of the aggregate).
 ///
-/// `sum(hash(row))` is commutative, so row order cannot change the result, and
-/// `sum` over `UBIGINT` widens to `HUGEINT` in DuckDB so realistic tables cannot
-/// overflow it. NULLs are rendered as an empty string (documented weakness: a
-/// NULL and an empty string collide in the fingerprint).
-pub fn table_fingerprint(conn: &duckdb::Connection, table: &str) -> Result<(i64, String)> {
+/// Content fingerprint in the **legacy** kind: `sum(hash(row))`.
+///
+/// Kept because artifacts already on disk carry this kind and must keep
+/// verifying. The name spells the kind out on purpose — it was called
+/// `table_fingerprint` before kinds existed, and that name cost a test a silent
+/// cross-kind comparison (it compared a header's `row_multiset` hash against an
+/// aggregate one and the assert happened to be about something else).
+///
+/// New code should call [`table_fingerprint_kind`] with the kind recorded in
+/// the header it is verifying.
+pub fn table_fingerprint_aggregate(conn: &duckdb::Connection, table: &str) -> Result<(i64, String)> {
+    table_fingerprint_kind(conn, table, FP_AGGREGATE)
+}
+
+/// Content fingerprint in the requested kind.
+///
+/// The two kinds answer different questions and are **not comparable**: for the
+/// same table they produce different values by construction. Callers must pass
+/// the kind recorded in the header they are verifying, never "the current
+/// default" — otherwise an old artifact reads as changed purely because the
+/// algorithm moved.
+///
+/// `FP_AGGREGATE`: `sum(hash(row))` is commutative, so row order cannot change
+/// the result, and `sum` over `UBIGINT` widens to `HUGEINT` in DuckDB so
+/// realistic tables cannot overflow it. NULLs are rendered as an empty string
+/// (documented weakness: a NULL and an empty string collide in the fingerprint).
+///
+/// `FP_ROW_MULTISET`: sort the row hashes, then hash the joined sequence. Order
+/// still cannot change the result, but the value is no longer a sum, so the
+/// linear-sum collision trick does not apply.
+pub fn table_fingerprint_kind(
+    conn: &duckdb::Connection,
+    table: &str,
+    kind: &str,
+) -> Result<(i64, String)> {
     let sql_desc = format!("DESCRIBE SELECT * FROM {}", quote_ident(table));
     let mut stmt = conn.prepare(&sql_desc)?;
     let cols: Vec<String> = {
@@ -231,18 +307,48 @@ pub fn table_fingerprint(conn: &duckdb::Connection, table: &str) -> Result<(i64,
         .map(|c| format!("COALESCE(CAST({} AS VARCHAR), '')", quote_ident(c)))
         .collect::<Vec<_>>()
         .join(", ");
-    let sql = format!(
-        "SELECT count(*), CAST(sum(hash(concat_ws('|', {row_expr}))) AS VARCHAR) FROM {}",
-        quote_ident(table)
-    );
+
+    // Each kind has its own domain-separation prefix, so a value from one kind
+    // can never be mistaken for a value from the other even if the payloads
+    // happened to collide. The aggregate prefix is byte-for-byte what it was
+    // before kinds existed — that is a compatibility guarantee, not a style
+    // choice: changing it would re-fingerprint every artifact on disk.
+    let (prefix, sql) = match kind {
+        FP_AGGREGATE => (
+            "swanbench-fingerprint-v1",
+            format!(
+                "SELECT count(*), CAST(sum(hash(concat_ws('|', {row_expr}))) AS VARCHAR) FROM {}",
+                quote_ident(table)
+            ),
+        ),
+        FP_ROW_MULTISET => (
+            "swanbench-fingerprint-rowm-v1",
+            format!(
+                // The row hash is computed once in the subquery: computing it in
+                // both string_agg and ORDER BY made the first measurement of this
+                // scheme look twice as expensive as it is (docs/design.md §15.2).
+                "SELECT count(*), sha256(string_agg(h, '|' ORDER BY h)) FROM \
+                 (SELECT CAST(hash(concat_ws('|', {row_expr})) AS VARCHAR) AS h FROM {})",
+                quote_ident(table)
+            ),
+        ),
+        other => {
+            return Err(anyhow!(
+                "unknown fingerprint kind '{other}' — refusing to compute a hash that cannot be \
+                 compared with the recorded one (known: {FP_AGGREGATE}, {FP_ROW_MULTISET})"
+            ))
+        }
+    };
+
     let (rows, agg): (i64, Option<String>) = conn
         .query_row(&sql, [], |r| Ok((r.get(0)?, r.get(1)?)))
-        .with_context(|| format!("fingerprint {table}"))?;
-    // Empty table: sum() is NULL (verified against DuckDB: count=0, agg=NULL).
+        .with_context(|| format!("fingerprint {table} ({kind})"))?;
+    // Empty table: sum() is NULL (verified against DuckDB: count=0, agg=NULL),
+    // and sha256(string_agg(...)) is NULL for the same reason.
     let agg = agg.unwrap_or_else(|| "0".to_string());
     let agg = if agg.is_empty() { "0".to_string() } else { agg };
     let mut h = Sha256::new();
-    h.update(b"swanbench-fingerprint-v1");
+    h.update(prefix.as_bytes());
     let payload = format!("{table}|{rows}|{agg}");
     h.update((payload.len() as u64).to_le_bytes());
     h.update(payload.as_bytes());
@@ -324,18 +430,21 @@ pub fn build_header(
     // could share one artifact_id. Now every input table's structure is in it.
     let schema_hash_of_output = schema_hash(conn, output_table)?;
     let env_schema_hash = schema_set_hash(conn, output_table, input_tables)?;
-    let (out_rows, out_hash) = table_fingerprint(conn, output_table)?;
+    // One kind for the whole header: mixing kinds inside a single artifact would
+    // make `--check` compare an input against a hash it cannot recompute.
+    let kind = new_fingerprint_kind();
+    let (out_rows, out_hash) = table_fingerprint_kind(conn, output_table, &kind)?;
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
     let mut inputs = Vec::new();
     for t in input_tables {
-        let (rows, content) = table_fingerprint(conn, t)?;
+        let (rows, content) = table_fingerprint_kind(conn, t, &kind)?;
         inputs.push(TableRef {
             path: (*t).to_string(),
             rows,
             content_sha256: content,
             schema_sha256: Some(schema_hash(conn, t)?),
-            fingerprint_kind: default_fingerprint_kind(),
+            fingerprint_kind: kind.clone(),
             collected_at: Some(now.clone()),
         });
     }
@@ -366,7 +475,7 @@ pub fn build_header(
             rows: out_rows,
             content_sha256: out_hash,
             schema_sha256: Some(schema_hash_of_output.clone()),
-            fingerprint_kind: default_fingerprint_kind(),
+            fingerprint_kind: kind.clone(),
             collected_at: None,
         }],
         approvals,
@@ -523,6 +632,13 @@ pub fn validate_header(h: &ArtifactHeader) -> Vec<String> {
         if input.content_sha256.len() != 64 {
             problems.push(format!("inputs[{i}].content_sha256 must be 64 hex chars"));
         }
+        if !is_known_fingerprint_kind(&input.fingerprint_kind) {
+            problems.push(format!(
+                "inputs[{i}].fingerprint_kind '{}' is not a kind this build can compute \
+                 (known: {FP_AGGREGATE}, {FP_ROW_MULTISET})",
+                input.fingerprint_kind
+            ));
+        }
         match &input.schema_sha256 {
             Some(s) if s.len() == 64 => {}
             Some(_) => problems.push(format!("inputs[{i}].schema_sha256 must be 64 hex chars")),
@@ -538,6 +654,16 @@ pub fn validate_header(h: &ArtifactHeader) -> Vec<String> {
     for (i, out) in h.outputs.iter().enumerate() {
         if out.content_sha256.len() != 64 {
             problems.push(format!("outputs[{i}].content_sha256 must be 64 hex chars"));
+        }
+        // An unknown kind cannot be recomputed, so every comparison against it
+        // would be a guess. Say so by field name instead of failing later with
+        // a message about the data.
+        if !is_known_fingerprint_kind(&out.fingerprint_kind) {
+            problems.push(format!(
+                "outputs[{i}].fingerprint_kind '{}' is not a kind this build can compute \
+                 (known: {FP_AGGREGATE}, {FP_ROW_MULTISET})",
+                out.fingerprint_kind
+            ));
         }
     }
     if h.conversation_ref.message_range_sha256.len() != 64 {
@@ -624,7 +750,10 @@ pub fn check(conn: &duckdb::Connection, header: &ArtifactHeader) -> Result<Check
     let mut inputs = Vec::new();
     let mut changed: Vec<String> = Vec::new();
     for input in &header.inputs {
-        let (rows, content) = match table_fingerprint(conn, &input.path) {
+        // Dispatch on the kind *recorded in the header*, never on the current
+        // default: an artifact written under `aggregate` must be re-fingerprinted
+        // the same way it was made, or every old artifact reports "data changed".
+        let (rows, content) = match table_fingerprint_kind(conn, &input.path, &input.fingerprint_kind) {
             Ok(v) => v,
             Err(_) => {
                 changed.push(format!("{} (missing)", input.path));
@@ -889,19 +1018,23 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
         )
     })?;
 
-    let (rows_observed, hash_observed) = table_fingerprint(&conn, &out_table)
-        .with_context(|| format!("fingerprint re-run output {out_table}"))?;
     let expected = &header.outputs[0];
 
-    // A kind mismatch means the two hashes are not answering the same question.
-    if expected.fingerprint_kind != default_fingerprint_kind() {
+    // Refuse only an *unknown* kind. A known-but-older kind is not a mismatch:
+    // it is the kind this artifact was made with, so the rerun recomputes that
+    // kind (docs/design.md §15.4). Refusing here would retire every artifact
+    // written before the default moved — the opposite of the goal.
+    if !is_known_fingerprint_kind(&expected.fingerprint_kind) {
         return Err(anyhow!(
-            "refusing to compare: header output fingerprint_kind is '{}' but reruns here produce '{}' — \
-             different kinds are not comparable (docs/design.md §8)",
-            expected.fingerprint_kind,
-            default_fingerprint_kind()
+            "refusing to compare: header output fingerprint_kind is '{}', which this build cannot \
+             compute — a hash made a different way is not comparable with the recorded one \
+             (known: {FP_AGGREGATE}, {FP_ROW_MULTISET})",
+            expected.fingerprint_kind
         ));
     }
+    let (rows_observed, hash_observed) =
+        table_fingerprint_kind(&conn, &out_table, &expected.fingerprint_kind)
+            .with_context(|| format!("fingerprint re-run output {out_table}"))?;
 
     // Column-level localisation, best effort: the rerun itself is already proven
     // (it ran from the header alone); the original table is only needed to say
@@ -968,7 +1101,10 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
     } else if identical {
         (
             verdict::PASS,
-            format!("re-ran the recorded code; {rows_observed} rows, identical aggregate fingerprint"),
+            format!(
+                "re-ran the recorded code; {rows_observed} rows, identical {} fingerprint",
+                expected.fingerprint_kind
+            ),
         )
     } else if !column_diffs.is_empty() || !columns_only_in_original.is_empty() {
         let cols: Vec<String> = column_diffs
@@ -991,9 +1127,10 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
         (
             verdict::DIFF,
             format!(
-                "output differs: {} rows now vs {} recorded; aggregate fingerprint {} vs {}",
+                "output differs: {} rows now vs {} recorded; {} fingerprint {} vs {}",
                 rows_observed,
                 expected.rows,
+                expected.fingerprint_kind,
                 &hash_observed[..12.min(hash_observed.len())],
                 &expected.content_sha256[..12.min(expected.content_sha256.len())]
             ),
@@ -1061,19 +1198,19 @@ mod tests {
     #[test]
     fn fingerprint_is_order_independent_and_change_sensitive() {
         let conn = setup();
-        let (rows1, h1) = table_fingerprint(&conn, "sales").unwrap();
+        let (rows1, h1) = table_fingerprint_aggregate(&conn, "sales").unwrap();
         conn.execute_batch("CREATE TABLE tmp AS SELECT * FROM sales;")
             .unwrap();
         conn.execute_batch("DELETE FROM sales;").unwrap();
         conn.execute_batch("INSERT INTO sales SELECT * FROM tmp ORDER BY id DESC;")
             .unwrap();
-        let (rows2, h2) = table_fingerprint(&conn, "sales").unwrap();
+        let (rows2, h2) = table_fingerprint_aggregate(&conn, "sales").unwrap();
         assert_eq!(rows1, rows2);
         assert_eq!(h1, h2, "row order must not change the fingerprint");
 
         conn.execute_batch("UPDATE sales SET region='south' WHERE id=2;")
             .unwrap();
-        let (_, h3) = table_fingerprint(&conn, "sales").unwrap();
+        let (_, h3) = table_fingerprint_aggregate(&conn, "sales").unwrap();
         assert_ne!(h1, h3, "content change must change the fingerprint");
     }
 
@@ -1157,7 +1294,7 @@ mod tests {
         // must not swallow that as an error (verified against the real engine).
         let conn = setup();
         conn.execute_batch("CREATE TABLE nothing(id INT);").unwrap();
-        let (rows, h) = table_fingerprint(&conn, "nothing").unwrap();
+        let (rows, h) = table_fingerprint_aggregate(&conn, "nothing").unwrap();
         assert_eq!(rows, 0);
         assert_eq!(h.len(), 64);
     }
@@ -1165,7 +1302,7 @@ mod tests {
     #[test]
     fn missing_table_is_an_error_not_a_zero_header() {
         let conn = setup();
-        assert!(table_fingerprint(&conn, "nope").is_err());
+        assert!(table_fingerprint_aggregate(&conn, "nope").is_err());
         assert!(schema_hash(&conn, "nope").is_err());
     }
 
@@ -1244,7 +1381,130 @@ mod tests {
         }
         assert_eq!(v["env"]["engine"]["name"], "duckdb");
         assert_eq!(h.code.nondeterministic, vec!["now()".to_string()]);
-        assert_eq!(v["inputs"][0]["fingerprint_kind"], "aggregate");
+        assert_eq!(v["inputs"][0]["fingerprint_kind"], FP_ROW_MULTISET);
+    }
+
+    // ── M1.f: the kind moved, and old artifacts must survive the move ──────
+
+    #[test]
+    fn a_header_without_fingerprint_kind_reads_as_the_legacy_kind() {
+        // The trap this guards: "the field is absent" is not "the current
+        // default". Every header written before row_multiset existed lacks the
+        // field, so it must deserialize as aggregate. If the serde default were
+        // the new kind, loading any historical artifact would claim its inputs
+        // are a different kind of hash than they are.
+        let conn = setup_with_output();
+        let h = header_for(&conn);
+        let mut v = serde_json::to_value(&h).unwrap();
+        // Two separate statements on purpose: collecting both `&mut` views into
+        // one array is a double mutable borrow of `v` (E0499).
+        v["inputs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("fingerprint_kind");
+        v["outputs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("fingerprint_kind");
+        let back: ArtifactHeader = serde_json::from_value(v).unwrap();
+        assert_eq!(back.inputs[0].fingerprint_kind, FP_AGGREGATE);
+        assert_eq!(back.outputs[0].fingerprint_kind, FP_AGGREGATE);
+    }
+
+    #[test]
+    fn row_multiset_ignores_physical_row_order() {
+        // Order independence is not a nicety: the same table stored in a
+        // different physical order must keep the same identity, or `--check`
+        // reports "data changed" after a harmless rewrite.
+        let conn = setup_with_output();
+        let before = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET).unwrap();
+        conn.execute_batch("CREATE TABLE sales_rev AS SELECT * FROM sales ORDER BY id DESC;")
+            .unwrap();
+        conn.execute_batch("DROP TABLE sales;").unwrap();
+        conn.execute_batch("ALTER TABLE sales_rev RENAME TO sales;").unwrap();
+        let after = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET).unwrap();
+        assert_eq!(before, after, "reversing the physical order must not move it");
+    }
+
+    #[test]
+    fn row_multiset_sees_a_value_change_that_the_row_count_cannot() {
+        let conn = setup_with_output();
+        let before = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET).unwrap();
+        conn.execute_batch("UPDATE sales SET region='south' WHERE id=2;").unwrap();
+        let after = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET).unwrap();
+        assert_eq!(before.0, after.0, "row count is unchanged on purpose");
+        assert_ne!(before.1, after.1, "content change must move the fingerprint");
+    }
+
+    #[test]
+    fn the_two_kinds_never_produce_the_same_value() {
+        // Domain separation: even for the same table, a value from one kind must
+        // never be mistakable for the other. This is what makes "recorded kind"
+        // a reliable instruction rather than a hint.
+        let conn = setup_with_output();
+        let a = table_fingerprint_kind(&conn, "sales", FP_AGGREGATE).unwrap().1;
+        let b = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET).unwrap().1;
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn an_aggregate_header_still_reruns_after_the_default_moved() {
+        // The migration guarantee. Take a header built by this build (which
+        // writes row_multiset), re-label it the way an older build would have
+        // written it, and confirm the rerun still PASSes. Without kind dispatch
+        // in `rerun`, this artifact would be refused and every historical
+        // artifact would silently become unverifiable.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("work.duckdb");
+        seed_db(&db);
+        let h = {
+            let conn = duckdb::Connection::open(&db).unwrap();
+            let mut h = header_for(&conn);
+            // Rewrite as an old aggregate header: kind, both fingerprints, id.
+            h.outputs[0].fingerprint_kind = FP_AGGREGATE.into();
+            h.outputs[0].content_sha256 =
+                table_fingerprint_kind(&conn, "out_region", FP_AGGREGATE).unwrap().1;
+            for i in 0..h.inputs.len() {
+                let path = h.inputs[i].path.clone();
+                h.inputs[i].fingerprint_kind = FP_AGGREGATE.into();
+                h.inputs[i].content_sha256 =
+                    table_fingerprint_kind(&conn, &path, FP_AGGREGATE).unwrap().1;
+            }
+            h.artifact_id = compute_artifact_id(&h);
+            h
+        };
+        assert_eq!(h.outputs[0].fingerprint_kind, FP_AGGREGATE);
+
+        let r = rerun(&db, &h).unwrap();
+        assert_eq!(r.verdict, verdict::PASS, "detail: {}", r.detail);
+        assert!(
+            r.detail.contains(FP_AGGREGATE),
+            "the verdict should say which kind it compared: {}",
+            r.detail
+        );
+
+        // And the aggregate value really is the old one, not a re-labelled new
+        // one — i.e. nothing about the old algorithm changed underneath it.
+        let conn = duckdb::Connection::open(&db).unwrap();
+        assert_eq!(
+            table_fingerprint_aggregate(&conn, "out_region").unwrap().1,
+            h.outputs[0].content_sha256
+        );
+        drop(h);
+    }
+
+    #[test]
+    fn an_unknown_fingerprint_kind_is_refused_by_name() {
+        let conn = setup_with_output();
+        let mut h = header_for(&conn);
+        h.outputs[0].fingerprint_kind = "sha3_stream".into();
+        let problems = validate_header(&h);
+        assert!(
+            problems.iter().any(|p| p.contains("fingerprint_kind")),
+            "an uncomputable kind must be reported by field name: {problems:?}"
+        );
+        // And the low-level call refuses rather than computing something else.
+        assert!(table_fingerprint_kind(&conn, "sales", "sha3_stream").is_err());
     }
 
     fn header_for(conn: &duckdb::Connection) -> ArtifactHeader {
@@ -1409,7 +1669,13 @@ mod tests {
     }
 
     #[test]
-    fn rerun_refuses_to_compare_a_different_fingerprint_kind() {
+    fn a_header_with_an_uncomputable_kind_is_refused_not_compared() {
+        // A kind this build cannot compute must stop the rerun *before* it
+        // compares. Note what is no longer true: an older-but-known kind is NOT
+        // a refusal — see `an_aggregate_header_still_reruns_after_the_default_
+        // moved`. Only a kind nobody can recompute is refused, and it is
+        // reported as an incomplete header rather than as a data difference,
+        // because calling it "output differs" would be a false alarm.
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("work.duckdb");
         seed_db(&db);
@@ -1418,10 +1684,12 @@ mod tests {
             header_for(&conn)
         };
         h.outputs[0].fingerprint_kind = "row_stream".into();
-        let err = rerun(&db, &h).unwrap_err().to_string();
+        let r = rerun(&db, &h).unwrap();
+        assert_eq!(r.verdict, verdict::INCOMPLETE_HEADER);
         assert!(
-            err.contains("refusing to compare"),
-            "must refuse rather than silently report equality: {err}"
+            r.problems.iter().any(|p| p.contains("fingerprint_kind")),
+            "must name the field so the operator knows what to fix: {:?}",
+            r.problems
         );
     }
 
@@ -1468,9 +1736,13 @@ mod tests {
         .unwrap();
 
         // The content really is unchanged — this is what made the hole silent.
+        // Compare in the header's own kind: the point is "content hash cannot
+        // see this", not which algorithm produced it.
         assert_eq!(
             h.inputs[0].content_sha256,
-            table_fingerprint(&wide, "jiesuan").unwrap().1,
+            table_fingerprint_kind(&wide, "jiesuan", &h.inputs[0].fingerprint_kind)
+                .unwrap()
+                .1,
             "content fingerprint is identical, so it cannot be what catches this"
         );
 
