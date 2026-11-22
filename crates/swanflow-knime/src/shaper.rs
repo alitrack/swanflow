@@ -70,7 +70,7 @@ pub fn generate_shaper_queries(archive: &KnwfArchive) -> Vec<ShaperQuery> {
         );
 
         let sql = match &trace {
-            Some(t) => build_shaper_sql(&t, chart_type),
+            Some(t) => build_shaper_sql(t, chart_type),
             None => {
                 // No data source found — generate placeholder
                 format!(
@@ -480,6 +480,7 @@ fn resolve_chart_type(name: &str) -> Option<&'static str> {
 ///   - `col::BARCHART_STACKED` → stacked bar
 ///   - `col::CATEGORY` → category grouping
 ///   - `col::COLOR` → color grouping
+///
 ///   See: https://taleshape.com/shaper/docs/dashboard-sql-reference/
 fn suffix_annotation(chart_type: &str, axis: &str) -> String {
     match (chart_type, axis) {

@@ -985,8 +985,10 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.io.database.DBConnectorMongoDBNodeFactory", "core.sql",
             |s| json!({"query": format!("ATTACH {} AS mongo_db (TYPE mongodb)", sq_lit(s.get("connection_string").and_then(|v| v.as_str()).unwrap_or("")))}));
         def!("org.knime.base.node.io.database.DBConnectorSalesforceNodeFactory", "core.sql",
-            |_s| json!({"query": format!("ATTACH '' AS sf (TYPE salesforce)",
-                )}));
+            // No formatting happens here: the statement is constant. It used to be
+            // wrapped in `format!` with no arguments, which only obscured that the
+            // connection is a fixed, unparameterised placeholder.
+            |_s| json!({"query": "ATTACH '' AS sf (TYPE salesforce)"}));
 
         // ─── Spatial / Geo (DuckDB spatial extension) ───
         def!("org.knime.base.node.io.spatial.SPATIALReaderNodeFactory", "core.sql",
@@ -1192,8 +1194,11 @@ impl KnimeNodeMapper {
                 let bins_str = s.get("bins").and_then(|v| v.as_str()).unwrap_or("");
                 let bins: Vec<&str> = bins_str.split(',').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
                 let cases: Vec<String> = bins.iter().enumerate().map(|(i, b)| {
-                    if i == 0 { format!("WHEN \"{}\" <= {} THEN 'cat_{}'", col, b, i) }
-                    else { format!("WHEN \"{}\" <= {} THEN 'cat_{}'", col, b, i) }
+                    // The two branches used to be byte-identical, so the branch
+                    // decided nothing. Collapsed to one arm rather than guessed at:
+                    // if the intent was `<` for the first bin, that is a separate
+                    // change and it would need its own evidence.
+                    format!("WHEN \"{}\" <= {} THEN 'cat_{}'", col, b, i)
                 }).collect();
                 json!({"query": format!("SELECT *, CASE {} ELSE 'cat_{}' END AS category FROM input_0", cases.join(" "), bins.len())})
             });
@@ -2631,8 +2636,10 @@ impl KnimeNodeMapper {
         def!("org.knime.base.node.preproc.shuffle.ShuffleNodeFactory", "core.sql",
             |s| {
                 let _seed = s.get("seed").and_then(|v| v.as_str()).unwrap_or("42");
-                json!({"query": format!(
-                    "SELECT *, RANDOM() AS _rand FROM input_0 ORDER BY _rand")})
+                // `_seed` is read and discarded: the seed cannot be honoured through
+                // SQL RANDOM(), so shuffling is not reproducible. Kept visible (not
+                // deleted) because that is the honest signal to the caller.
+                json!({"query": "SELECT *, RANDOM() AS _rand FROM input_0 ORDER BY _rand"})
             });
 
         // ─── Split table into N parts ───
@@ -3757,7 +3764,7 @@ impl KnimeNodeMapper {
             "core.missing.placeholder" => "Unsupported",
             "pass_through" => "Passthrough",
             t if t.starts_with("core.transform.profiler") => "Degraded",
-            t if t == "core.sql" => "Emulated",
+            "core.sql" => "Emulated",
             _ => "Full",
         }
     }

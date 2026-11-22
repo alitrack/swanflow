@@ -7,10 +7,11 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Execution mode for a workflow node/step.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum StepMode {
     #[serde(rename = "sequential")]
+    #[default]
     Sequential,
     #[serde(rename = "fan_out")]
     FanOut,
@@ -22,28 +23,17 @@ pub enum StepMode {
     Loop,
 }
 
-impl Default for StepMode {
-    fn default() -> Self {
-        Self::Sequential
-    }
-}
-
 /// Error handling mode for a workflow node/step.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub enum ErrorMode {
     #[serde(rename = "fail")]
+    #[default]
     Fail,
     #[serde(rename = "skip")]
     Skip,
     #[serde(rename = "retry")]
     Retry(u32),
-}
-
-impl Default for ErrorMode {
-    fn default() -> Self {
-        Self::Fail
-    }
 }
 
 /// An instance of a node in a workflow.

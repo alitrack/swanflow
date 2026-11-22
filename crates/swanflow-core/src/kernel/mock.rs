@@ -703,11 +703,18 @@ impl Cache for MockCache {
 // MockTelemetry — Telemetry
 // ---------------------------------------------------------------------------
 
+/// Labels attached to one metric sample.
+type Labels = Vec<(String, String)>;
+/// One recorded counter sample: `(name, value, labels)`.
+type CounterSample = (String, u64, Labels);
+/// One recorded histogram or gauge sample: `(name, value, labels)`.
+type ValueSample = (String, f64, Labels);
+
 /// Mock for Telemetry — records all metric operations.
 pub struct MockTelemetry {
-    counters: Mutex<Vec<(String, u64, Vec<(String, String)>)>>,
-    histograms: Mutex<Vec<(String, f64, Vec<(String, String)>)>>,
-    gauges: Mutex<Vec<(String, f64, Vec<(String, String)>)>>,
+    counters: Mutex<Vec<CounterSample>>,
+    histograms: Mutex<Vec<ValueSample>>,
+    gauges: Mutex<Vec<ValueSample>>,
 }
 
 impl MockTelemetry {
@@ -719,7 +726,7 @@ impl MockTelemetry {
         }
     }
 
-    pub fn counters(&self) -> Vec<(String, u64, Vec<(String, String)>)> {
+    pub fn counters(&self) -> Vec<CounterSample> {
         self.counters.lock().unwrap().clone()
     }
 }
@@ -752,9 +759,12 @@ impl Telemetry for MockTelemetry {
 // MockEventBus — EventBus
 // ---------------------------------------------------------------------------
 
+/// A subscriber: `(id, callback)`, where the callback receives `(topic, payload)`.
+type Subscriber = (String, Box<dyn Fn(&str, &str) + Send>);
+
 /// Mock for EventBus — in-memory publish/subscribe with direct callback invocation.
 pub struct MockEventBus {
-    subscribers: Mutex<HashMap<String, Vec<(String, Box<dyn Fn(&str, &str) + Send>)>>>,
+    subscribers: Mutex<HashMap<String, Vec<Subscriber>>>,
     next_id: Mutex<u64>,
 }
 
@@ -795,7 +805,7 @@ impl EventBus for MockEventBus {
 
     async fn unsubscribe(&self, subscription_id: &str) -> CoreResult<()> {
         let mut subs = self.subscribers.lock().unwrap();
-        for (_topic, callbacks) in subs.iter_mut() {
+        for callbacks in subs.values_mut() {
             callbacks.retain(|(id, _)| id != subscription_id);
         }
         Ok(())
@@ -1440,3 +1450,49 @@ mod tests {
         assert_eq!(result, vec![0, 3]);
     }
 }
+
+// ── Default for the mocks ────────────────────────────────────────────────
+//
+// Every mock here has a zero-argument `new()`, which is exactly the shape
+// `clippy::new_without_default` flags. The impls below are `Self::new()` and
+// nothing else, so they cannot drift from the constructors: if a `new()` ever
+// starts taking arguments, this file stops compiling instead of quietly
+// providing a different default.
+//
+// Written out rather than silenced with an `#[allow]` because `clippy -D
+// warnings` is meant to be a gate for this workspace — an allow-list entry
+// per mock would have made the gate lie.
+macro_rules! default_via_new {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl Default for $t {
+                fn default() -> Self {
+                    Self::new()
+                }
+            }
+        )*
+    };
+}
+
+default_via_new!(
+    MockDb,
+    MockFs,
+    MockHttp,
+    MockKeyStore,
+    MockClock,
+    MockBlobStore,
+    MockShellExec,
+    MockCancellationToken,
+    MockProgress,
+    MockLLM,
+    MockModeration,
+    MockLogger,
+    MockNotification,
+    MockCache,
+    MockTelemetry,
+    MockEventBus,
+    MockSchemaRegistry,
+    MockAuthProvider,
+    MockPluginHost,
+    MockWasmExec,
+);

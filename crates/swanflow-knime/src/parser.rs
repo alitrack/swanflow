@@ -53,7 +53,7 @@ impl KnwfParser {
             let fname = file.name().to_string();
             if fname.starts_with(prefix) && fname.ends_with(suffix) {
                 let depth = fname.matches('/').count();
-                if best.as_ref().map_or(true, |(d, _)| depth < *d) {
+                if best.as_ref().is_none_or(|(d, _)| depth < *d) {
                     best = Some((depth, fname));
                 }
             }
