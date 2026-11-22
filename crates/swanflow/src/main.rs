@@ -1181,6 +1181,12 @@ async fn main() -> anyhow::Result<()> {
                     for p in &report.problems {
                         println!("   ❌ {p}");
                     }
+                    if let Some(err) = &report.diff_error {
+                        println!(
+                            "   ❌ column diff could not be computed ({err}) — the stored table \
+                             was NOT verified against the header"
+                        );
+                    }
                     if let Some(note) = &report.engine_note {
                         println!("   ⚠️  {note}");
                     }

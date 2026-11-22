@@ -388,6 +388,9 @@ pub struct RerunReport {
     /// False when there was no stored copy of the output table to diff against
     /// (the honest "third party received only the header" case).
     pub stored_table_compared: bool,
+    /// If we failed to compute the column diff for a reason other than the
+    /// table being genuinely absent, this contains the error text.
+    pub diff_error: Option<String>,
     /// Meaningful only when `stored_table_compared`.
     pub stored_table_matches: bool,
     pub detail: String,
@@ -614,7 +617,7 @@ fn column_diff(
     conn: &duckdb::Connection,
     original_db: &std::path::Path,
     out_table: &str,
-) -> Result<(Vec<ColumnDiff>, Vec<String>, Vec<String>)> {
+) -> Result<Option<(Vec<ColumnDiff>, Vec<String>, Vec<String>)>> {
     let new_cols = describe_columns(conn, &quote_ident(out_table))?;
     conn.execute_batch(&format!(
         "ATTACH '{}' AS sb_orig (READ_ONLY);",
@@ -623,6 +626,19 @@ fn column_diff(
     .context("attach the original database read-only for column diff")?;
     let orig_qualified = format!("sb_orig.{}", quote_ident(out_table));
     let new_qualified = format!("main.{}", quote_ident(out_table));
+    // "Nothing to compare against" and "the comparison broke" must not look alike.
+    // Only the genuinely absent case may be silent; an attach/catalog failure has
+    // to reach the report, otherwise a broken diff would read as a clean pass.
+    let present: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM duckdb_tables() WHERE database_name = 'sb_orig' AND table_name = ?",
+            [out_table],
+            |r| r.get(0),
+        )
+        .context("list tables in the attached original database")?;
+    if present == 0 {
+        return Ok(None);
+    }
     let orig_cols = describe_columns(conn, &orig_qualified)?;
 
     let columns_only_in_original: Vec<String> = orig_cols
@@ -665,11 +681,11 @@ fn column_diff(
             });
         }
     }
-    Ok((
+    Ok(Some((
         column_diffs,
         columns_only_in_original,
         columns_only_in_rerun,
-    ))
+    )))
 }
 
 /// Level 2: re-run the recorded code and compare outputs bit-for-bit, with
@@ -695,6 +711,7 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
             partial: false,
             stored_table_compared: false,
             stored_table_matches: false,
+            diff_error: None,
             detail: "header is incomplete — a rerun would prove nothing".into(),
         });
     }
@@ -766,7 +783,16 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
     // *where* the output differs, so a missing original must not fail the rerun.
     // `None` means "there was no stored table to compare against" — distinct from
     // "there was one and it matched".
-    let stored = column_diff(&conn, db, &out_table).ok();
+    let mut diff_error: Option<String> = None;
+    let stored = match column_diff(&conn, db, &out_table) {
+        // Some(Some(..)) = compared; Some(None) = nothing on disk to compare;
+        // None = the comparison itself failed (surfaced, never swallowed).
+        Ok(inner) => inner,
+        Err(e) => {
+            diff_error = Some(format!("{e:#}"));
+            None
+        }
+    };
     let (mut column_diffs, columns_only_in_original, columns_only_in_rerun) = stored
         .clone()
         .unwrap_or_else(|| (Vec::new(), Vec::new(), Vec::new()));
@@ -778,6 +804,10 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
         .map(|(d, gone, new)| !d.is_empty() || !gone.is_empty() || !new.is_empty())
         .unwrap_or(false);
 
+    let stored_table_matches = stored
+        .as_ref()
+        .map(|(d, gone, new)| d.is_empty() && gone.is_empty() && new.is_empty())
+        .unwrap_or(false);
     let identical = rows_observed == expected.rows && hash_observed == expected.content_sha256;
     let partial = !header.code.nondeterministic.is_empty();
     let (v, detail) = if engine_note.is_some() {
@@ -829,9 +859,7 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
             verdict::DIFF,
             format!(
                 "output differs: {} rows now vs {} recorded; columns {}",
-                rows_observed,
-                expected.rows,
-                cols.join(", ")
+                rows_observed, expected.rows, cols.join(", ")
             ),
         )
     } else {
@@ -861,7 +889,8 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
         nondeterministic: header.code.nondeterministic.clone(),
         partial,
         stored_table_compared: stored.is_some(),
-        stored_table_matches: stored.is_some() && !stored_table_differs,
+        stored_table_matches,
+        diff_error,
         detail,
     })
 }
@@ -1136,6 +1165,11 @@ mod tests {
         assert_eq!(r.rows_observed, h.outputs[0].rows);
         assert_eq!(r.hash_observed, h.outputs[0].content_sha256);
         assert!(r.column_diffs.is_empty());
+        assert!(
+            r.diff_error.is_none(),
+            "the column diff must have actually run, not been silently skipped: {:?}",
+            r.diff_error
+        );
         // The review must not have touched the original file.
         let conn = duckdb::Connection::open(&db).unwrap();
         let n: i64 = conn
