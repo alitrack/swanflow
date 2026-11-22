@@ -259,9 +259,17 @@ pub trait NodeBehavior: Send + Sync {
     }
 
     /// Migrate config from one schema version to the next.
+    ///
+    /// The default is an **error**, not an identity function: a node that raises
+    /// [`config_version`](Self::config_version) without a migration would
+    /// otherwise feed its old config straight to `validate`, and if the old
+    /// shape happens to validate against the new schema the workflow computes
+    /// the wrong thing while looking successful. Bumping the version without
+    /// changing the config's shape is legitimate — but it must be said out
+    /// loud, by overriding this and returning the config unchanged.
     fn migrate_config(
         &self,
-        config: JsonValue,
+        _config: JsonValue,
         from_version: u32,
         to_version: u32,
     ) -> Result<JsonValue> {
@@ -272,7 +280,15 @@ pub trait NodeBehavior: Send + Sync {
                 to_version
             ));
         }
-        Ok(config)
+        Err(anyhow!(
+            "node '{}' declares config_version={} but implements no migration {}->{}; \
+             implement `migrate_config` (returning the config unchanged is a valid \
+             migration if the shape did not change)",
+            self.spec().type_id,
+            self.config_version(),
+            from_version,
+            to_version
+        ))
     }
 
     /// Build a DataFusion LogicalPlan based on input plans and configuration.

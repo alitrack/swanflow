@@ -454,3 +454,7 @@ impl WorkflowCompiler {
         Ok(migrated)
     }
 }
+
+#[cfg(test)]
+#[path = "migration_tests.rs"]
+mod migration_tests;
