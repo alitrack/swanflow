@@ -22,7 +22,7 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
 use serde_json::Value as JsonValue;
 
-use crate::nodes::{NodeBehavior, NodeCapability, NodeSpec, PortSpec};
+use swanflow_core::{NodeBehavior, NodeCapability, NodeSpec, PortSpec};
 
 const OPS: &[(&str, &str)] = &[
     ("==", "="),

@@ -5,6 +5,7 @@ members = [
     "crates/swanflow",
     "crates/swanflow-knime",
     "crates/swanflow-plugin-sdk",
+    "crates/swanflow-plugin-quality",
     "crates/swanflow-ai",
 ]
 

@@ -28,6 +28,7 @@ test = false
 swanflow-core = { path = "../swanflow-core" }
 swanflow-knime = { path = "../swanflow-knime" }
 swanflow-plugin-sdk = { path = "../swanflow-plugin-sdk" }
+swanflow-plugin-quality = { path = "../swanflow-plugin-quality", optional = true }
 # Leiden community detection for core.ai.community_batches (UA port batch 3).
 # default-features = false: no rayon (forces the deterministic sequential
 # algorithm paths), no serde/petgraph/gryf adapters — the node feeds the
@@ -96,6 +97,7 @@ default = []
 # Python runtime linkage.
 python = ["dep:pyo3", "dep:pyo3-arrow", "arrow/pyarrow"]
 extended-connectors = ["dep:tiberius", "dep:mongodb", "dep:bson", "dep:redis"]
+quality = ["dep:swanflow-plugin-quality"]
 ai = ["swanflow-ai"]
 # WASM UDF node (core.script.wasm) via wasmtime. Optional: wasmtime alone is a
 # large share of the binary. Enable with --features wasm.

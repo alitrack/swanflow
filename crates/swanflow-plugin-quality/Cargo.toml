@@ -1,0 +1,22 @@
+[package]
+name = "swanflow-plugin-quality"
+version = "0.1.0"
+edition = "2021"
+description = "Data-quality assertion nodes for SwanFlow, delivered as a plugin"
+
+[dependencies]
+# The plugin depends ONLY on the node contract (`swanflow-core`), never on the
+# `swanflow` engine crate. That is what keeps the dependency graph acyclic:
+# swanflow optionally depends on this crate, this crate depends on the contract.
+swanflow-core = { path = "../swanflow-core" }
+
+anyhow = "1.0"
+async-trait = "0.1"
+serde_json = "1.0"
+datafusion = "52.1.0"
+arrow = { version = "57.0", features = ["ffi"] }
+
+[dev-dependencies]
+# The node tests are `#[tokio::test]`; the engine crate carried tokio already,
+# but a plugin crate must declare what its own tests use.
+tokio = { version = "1.0", features = ["full"] }

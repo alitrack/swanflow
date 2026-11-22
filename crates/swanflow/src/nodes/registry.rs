@@ -9,6 +9,12 @@ pub struct NodeRegistry {
     nodes: HashMap<String, Arc<dyn NodeBehavior>>,
 }
 
+/// Prefixes owned by plugins that ship in this workspace but may not be
+/// installed (compiled in). Used only to turn "node not found" into "plugin
+/// not installed" — the distinction an old workflow needs to understand WHY
+/// its quality node vanished after P1 moved them out of the core.
+const PLUGIN_PREFIXES: &[(&str, &str)] = &[("core.quality.", "quality")];
+
 impl NodeRegistry {
     /// Create a new, empty node registry.
     pub fn new() -> Self {
@@ -28,7 +34,23 @@ impl NodeRegistry {
         self.nodes
             .get(type_id)
             .cloned()
-            .ok_or_else(|| anyhow!("Node type '{}' not found in registry", type_id))
+            .ok_or_else(|| {
+                // Distinguish a typo'd id from a plugin that simply is not in
+                // this build: same failure, different remedy.
+                if let Some((_, plugin)) =
+                    PLUGIN_PREFIXES.iter().find(|(prefix, _)| type_id.starts_with(prefix))
+                {
+                    anyhow!(
+                        "Node type '{}' belongs to the '{}' plugin, which is not installed \
+                         in this build (build with --features {} to get it)",
+                        type_id,
+                        plugin,
+                        plugin
+                    )
+                } else {
+                    anyhow!("Node type '{}' not found in registry", type_id)
+                }
+            })
     }
 
     /// List all registered node specifications.
@@ -88,10 +110,7 @@ impl NodeRegistry {
         use crate::nodes::io::{CsvWriteNode, ParquetWriteNode};
         use crate::nodes::luajit::LuaJitNode;
         use crate::nodes::mcp::McpToolNode;
-        use crate::nodes::quality::{
-            NullCheckNode, RowCountAssertNode, SchemaAssertNode, SqlAssertNode,
-            UniquenessCheckNode, ValueRangeCheckNode,
-        };
+
         use crate::nodes::relational::{
             CastNode, DistinctNode, JoinNode, LimitNode, SortNode, UnionNode,
         };
@@ -189,12 +208,19 @@ impl NodeRegistry {
         self.register_node(Arc::new(TableToVariableNode));
         self.register_node(Arc::new(GraphMergerNode));
         self.register_node(Arc::new(TableSchemaValidatorNode));
-        self.register_node(Arc::new(NullCheckNode));
-        self.register_node(Arc::new(UniquenessCheckNode));
-        self.register_node(Arc::new(RowCountAssertNode));
-        self.register_node(Arc::new(SchemaAssertNode));
-        self.register_node(Arc::new(ValueRangeCheckNode));
-        self.register_node(Arc::new(SqlAssertNode));
+        // Quality nodes live in the `swanflow-plugin-quality` crate since P1
+        // (plugin-architecture.md §P1). Registered through the swanflow_core
+        // bridge when the feature is on; without it, workflows referencing
+        // `core.quality.*` get a "plugin not installed" error (see get_node)
+        // instead of a bare "node not found".
+        #[cfg(feature = "quality")]
+        {
+            // The trait must be in scope to call name()/node_types().
+            use swanflow_core::Plugin as _;
+            let plugin = swanflow_plugin_quality::QualityPlugin;
+            let nodes = plugin.node_types();
+            self.load_plugin_nodes(plugin.name(), crate::nodes::core_bridge::CoreNodeAdapter::wrap_all(nodes));
+        }
         self.register_node(Arc::new(SemanticCleanerNode));
         self.register_node(Arc::new(AiRouterNode));
         // BoxedPython is a pure-DataFusion placeholder (no pyo3) — stays
@@ -378,5 +404,54 @@ mod shell_marker_tests {
                 "{type_id} description must point at the real alternative ({hint})"
             );
         }
+    }
+}
+
+/// P1 (plugin-architecture.md): `core.quality.*` left the core for the
+/// `swanflow-plugin-quality` crate. A workflow written before that split must
+/// learn *why* its node vanished — "plugin not installed" tells the operator
+/// what to do, while a bare "not found" reads like a typo and sends them
+/// hunting for a misspelling that does not exist.
+#[cfg(test)]
+mod plugin_prefix_tests {
+    use super::*;
+
+    /// `get_node` returns `Result<Arc<dyn NodeBehavior>>`, and `dyn
+    /// NodeBehavior` is not `Debug`, so `unwrap_err()` is unavailable here.
+    fn error_for(type_id: &str) -> String {
+        match NodeRegistry::new().get_node(type_id) {
+            Ok(_) => panic!("'{type_id}' must not resolve in an empty registry"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_known_plugin_prefix_names_the_plugin_and_the_remedy() {
+        let err = error_for("core.quality.null_check");
+        assert!(
+            err.contains("'quality' plugin"),
+            "must name the plugin that owns the id, got: {err}"
+        );
+        assert!(
+            err.contains("not installed"),
+            "must say the plugin is not installed rather than that the node is unknown, got: {err}"
+        );
+        assert!(
+            err.contains("--features quality"),
+            "must tell the operator how to get the node back, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_id_is_not_blamed_on_a_plugin() {
+        let err = error_for("core.nope.definitely_missing");
+        assert!(
+            err.contains("not found"),
+            "an unknown id keeps the original message, got: {err}"
+        );
+        assert!(
+            !err.contains("plugin"),
+            "a typo must not be blamed on a plugin, got: {err}"
+        );
     }
 }

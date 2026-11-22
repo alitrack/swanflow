@@ -21,7 +21,7 @@ pub mod io;
 pub mod luajit;
 pub mod mcp;
 pub mod missing;
-pub mod quality;
+pub mod core_bridge;
 pub mod registry;
 pub mod relational;
 pub mod middleware;

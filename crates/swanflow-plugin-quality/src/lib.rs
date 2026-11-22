@@ -21,9 +21,8 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::*;
 use serde_json::Value as JsonValue;
 
-use crate::nodes::config as cfg;
-use crate::nodes::{NodeBehavior, NodeCapability, NodeSpec, PortSpec};
-
+use swanflow_core::config as cfg;
+use swanflow_core::{NodeBehavior, NodeCapability, NodeSpec, Plugin, PortSpec};
 // ── NullCheckNode ──────────────────────────────────────────────
 
 /// Check null percentage for specified columns.
@@ -662,5 +661,41 @@ mod tests {
         assert!(node
             .validate(&serde_json::json!({"columns": ["id"]}))
             .is_ok());
+    }
+}
+
+// ── Plugin facade ─────────────────────────────────────────────
+//
+// The static plugin seam from plugin-architecture.md §2: a host that links
+// this crate calls `plugin.node_types()` and feeds the result to
+// `NodeRegistry::load_plugin_nodes`. Nothing in swanflow references the
+// `core.quality.*` ids any more — this crate is their only home.
+
+/// The data-quality plugin: the six `core.quality.*` nodes.
+pub struct QualityPlugin;
+
+impl Plugin for QualityPlugin {
+    fn name(&self) -> &str {
+        "quality"
+    }
+
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    fn description(&self) -> &str {
+        "Data-quality assertions: null_check, uniqueness_check, row_count_assert, \
+         schema_assert, value_range_check, sql_assert"
+    }
+
+    fn node_types(&self) -> Vec<Box<dyn NodeBehavior>> {
+        vec![
+            Box::new(NullCheckNode),
+            Box::new(UniquenessCheckNode),
+            Box::new(RowCountAssertNode),
+            Box::new(SchemaAssertNode),
+            Box::new(ValueRangeCheckNode),
+            Box::new(SqlAssertNode),
+        ]
     }
 }
