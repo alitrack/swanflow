@@ -147,6 +147,41 @@ pub fn schema_hash(conn: &duckdb::Connection, table: &str) -> Result<String> {
     Ok(hex(&h.finalize()))
 }
 
+/// Schema *set* fingerprint: the output table plus every input table, each
+/// labelled, hashed in declaration order.
+///
+/// Why this exists: hashing only the output table let two different input
+/// schemas share one `artifact_id`. Reproduced during M1 verification — input
+/// column `z INTEGER` vs `z BIGINT`, same values, same output table
+/// (`out_n: n BIGINT`), identical id `sha256:a958f80f…`. That is exactly the
+/// failure §4 promises cannot happen ("输入变了要能发现"), and it fails in the
+/// direction that matters: a reviewer cannot tell the artifact was produced
+/// from a different shape of data.
+///
+/// Input schemas are included by *identity*, so a change to any input's
+/// columns or types moves the id even when the values and the output are
+/// untouched.
+pub fn schema_set_hash(
+    conn: &duckdb::Connection,
+    output_table: &str,
+    input_tables: &[&str],
+) -> Result<String> {
+    let mut parts: Vec<String> = Vec::with_capacity(input_tables.len() + 1);
+    // Output first, then inputs in the caller's order — the same order
+    // `compute_artifact_id` walks `inputs[]`, so the two stay reconcilable.
+    parts.push(format!("out|{}|{}", output_table, schema_hash(conn, output_table)?));
+    for t in input_tables {
+        parts.push(format!("in|{}|{}", t, schema_hash(conn, t)?));
+    }
+    let mut h = Sha256::new();
+    h.update(b"swanbench-schema-set-v1");
+    for line in &parts {
+        h.update((line.len() as u64).to_le_bytes());
+        h.update(line.as_bytes());
+    }
+    Ok(hex(&h.finalize()))
+}
+
 /// Engine version as reported by DuckDB itself (`SELECT version()`).
 pub fn engine_version(conn: &duckdb::Connection) -> Result<String> {
     let v: String = conn
@@ -245,7 +280,10 @@ pub fn build_header(
         name: "duckdb".to_string(),
         version: engine_version(conn)?,
     };
-    let schema_hash = schema_hash(conn, output_table)?;
+    // §4: `env.schema_hash` exists so that "输入变了要能发现". Hashing the
+    // output table alone did not deliver that — two different input schemas
+    // could share one artifact_id. Now every input table's structure is in it.
+    let schema_hash = schema_set_hash(conn, output_table, input_tables)?;
     let (out_rows, out_hash) = table_fingerprint(conn, output_table)?;
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
@@ -978,6 +1016,60 @@ mod tests {
             a,
             schema_hash(&conn, "wider").unwrap(),
             "type change must change hash"
+        );
+    }
+
+    #[test]
+    fn a_different_input_schema_must_move_the_artifact_id() {
+        // Reproduces the hole found during M1 verification: `env.schema_hash`
+        // used to fingerprint only the OUTPUT table, so an input whose column
+        // type changed (INTEGER -> BIGINT — same values, same output table)
+        // kept the same artifact_id. That breaks the one invariant §4 promises
+        // ("输入变了要能发现"), and it breaks it in the direction that matters:
+        // a reviewer cannot tell the artifact came from a different shape of
+        // data.
+        let mk = |input_type: &str| {
+            let conn = duckdb::Connection::open_in_memory().unwrap();
+            conn.execute_batch(&format!("CREATE TABLE jiesuan(a INTEGER, z {input_type});"))
+                .unwrap();
+            conn.execute_batch("INSERT INTO jiesuan VALUES (1,100),(2,200),(3,300);")
+                .unwrap();
+            conn.execute_batch("CREATE TABLE out_n AS SELECT count(*) AS n FROM jiesuan;")
+                .unwrap();
+            conn
+        };
+        let code = "CREATE TABLE out_n AS SELECT count(*) AS n FROM jiesuan;";
+        let narrow = mk("INTEGER");
+        let wide = mk("BIGINT");
+
+        let h_narrow = build_header(
+            &narrow, "out_n", "row count", code, "sql", &["jiesuan"], conv(), vec![],
+        )
+        .unwrap();
+        let h_wide = build_header(
+            &wide, "out_n", "row count", code, "sql", &["jiesuan"], conv(), vec![],
+        )
+        .unwrap();
+
+        // Preconditions that made this hole invisible: output shape, output
+        // content and input content are all identical. Only the input *schema*
+        // differs — so only a schema-sensitive id can catch it.
+        assert_eq!(
+            schema_hash(&narrow, "out_n").unwrap(),
+            schema_hash(&wide, "out_n").unwrap(),
+            "the output table is identical, so an output-only schema hash sees nothing"
+        );
+        assert_eq!(
+            h_narrow.outputs[0].content_sha256, h_wide.outputs[0].content_sha256,
+            "the output content is identical too"
+        );
+        assert_eq!(
+            h_narrow.inputs[0].content_sha256, h_wide.inputs[0].content_sha256,
+            "and the input content hashes are identical — values were unchanged"
+        );
+        assert_ne!(
+            h_narrow.artifact_id, h_wide.artifact_id,
+            "an input schema change MUST move the id even when values and output match"
         );
     }
 
