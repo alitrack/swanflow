@@ -4,10 +4,15 @@
 #   1. check — cargo check + clippy + fmt (all three blocking)
 #   2. test  — cargo test (needs DuckDB shared library available)
 #
-# WARNING: Cargo.lock is .gitignored (we're a library, not an application).
-# CI uses `cargo check --locked` to verify minimal version resolution in
-# the lock that IS committed (un-gitignore Cargo.lock if you want MSRV
-# guarantees per <https://blog.rust-lang.org/2023/08/24/cargo-lock-for-libs.html>).
+# NOTE: Cargo.lock is .gitignored (we're a library, not an application), so the
+# lock file is NOT in the repo and `--locked` is deliberately NOT used below.
+# This header used to claim "CI uses `cargo check --locked` to verify minimal
+# version resolution" — no step ever passed that flag, and with the lock
+# untracked it would have failed outright. Corrected in §20 of the spec rather
+# than quietly deleted: the resolution here is whatever the runner resolves
+# fresh, which is not reproducible build-to-build.
+# (Un-gitignore Cargo.lock if you want per-<https://blog.rust-lang.org/2023/08/24/cargo-lock-for-libs.html>
+# MSRV guarantees and real --locked verification; that is a separate decision.)
 
 name: CI
 
