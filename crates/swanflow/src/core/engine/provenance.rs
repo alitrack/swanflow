@@ -1514,6 +1514,34 @@ mod tests {
     }
 
     #[test]
+    fn a_locale_difference_does_not_change_the_id() {
+        // DECISION (swanbench §14.5): locale is recorded but deliberately NOT in
+        // the identity, because DuckDB does not let it change results. Verified
+        // over 5 locales (C / zh_CN / en_US / de_DE / tr_TR) x 6 query shapes
+        // (CJK ordering, number and date formatting, aggregation, string
+        // grouping, upper/lower incl. the Turkish dotted-i trap): every result
+        // was identical, row for row.
+        //
+        // This test exists so the decision is not silently reversed. If someone
+        // starts feeding locale into the hash, this goes red — and they should
+        // read §14.5 before overriding it, because the cost is real: the same
+        // analysis on a differently-configured machine would then stop matching
+        // its own artifact, which is the failure mode this tool exists to
+        // prevent.
+        let conn = setup_with_output();
+        let h = header_for(&conn);
+        let base = compute_artifact_id(&h);
+
+        let mut moved = h.clone();
+        moved.env.locale = Some("de_DE.UTF-8".into());
+        assert_eq!(compute_artifact_id(&moved), base, "locale must not move the id");
+
+        let mut unset = h.clone();
+        unset.env.locale = None;
+        assert_eq!(compute_artifact_id(&unset), base, "locale absent must not move the id");
+    }
+
+    #[test]
     fn appending_a_replication_does_not_change_the_artifact_id() {
         let conn = setup_with_output();
         let mut h = header_for(&conn);
