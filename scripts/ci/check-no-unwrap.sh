@@ -136,10 +136,16 @@ count=$(wc -l < "$tmp")
 #        first. 114 of the 120 were the two copies of kernel/mock.rs (§17.2b),
 #        which is why the drift looked like "nothing changed" per file.
 #   230  after paying it down: one `lk()` helper per kernel/mock.rs copy
-#        (57 sites each) + 4 real production unwraps turned into plan errors
-#        (compiler.rs x3, knime/parser.rs) + 2 `_` arms that hard-cast to
-#        StringArray rewritten to arrow's own formatter (excel.rs: Int32 /
-#        Utf8View / Boolean / Date columns used to panic mid-export).
+#        (57 sites each = 114) + compiler.rs x3 + knime/parser.rs x1 + the
+#        six catch-all `downcast_ref::<...>().unwrap()` sites in excel.rs
+#        (marker-cell arm and table-writer arm, each with Int64 / Float64 /
+#        `_`->StringArray) = -124 total. 354 - 124 = 230.
+#
+#        CORRECTION (design.md §19.2): this comment used to say "2 `_` arms"
+#        for excel.rs, which sums to -120 and lands on 234, not 230. The
+#        miscount was treating "two `_` arms" as "two sites removed" when each
+#        arm's Int64 and Float64 siblings have the same shape. Count SITES
+#        removed, never branches edited.
 BASELINE=230
 
 echo "no-unwrap hygiene (built crates/*/src, non-test):"
