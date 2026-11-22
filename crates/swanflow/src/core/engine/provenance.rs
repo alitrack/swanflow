@@ -609,15 +609,24 @@ fn describe_columns(conn: &duckdb::Connection, qualified: &str) -> Result<Vec<St
     Ok(out)
 }
 
+/// Where the rerun differs from the shipped table:
+/// (column-level multiset diffs, columns only in the original, columns only in the rerun).
+type ColumnDiffSet = (Vec<ColumnDiff>, Vec<String>, Vec<String>);
+
 /// Where exactly does the rerun differ from the shipped result?
 ///
 /// Multiset semantics (`EXCEPT ALL`) per column, so duplicates count and no
 /// ordering assumption is needed. Column set differences are reported as names.
+///
+/// Three outcomes, because "no difference" has three meanings here:
+/// `Ok(Some(..))` compared (an empty diff set means they match), `Ok(None)` the
+/// original has no such table (the honest header-only review), and `Err(..)` the
+/// comparison itself failed — which must reach the report, never be swallowed.
 fn column_diff(
     conn: &duckdb::Connection,
     original_db: &std::path::Path,
     out_table: &str,
-) -> Result<Option<(Vec<ColumnDiff>, Vec<String>, Vec<String>)>> {
+) -> Result<Option<ColumnDiffSet>> {
     let new_cols = describe_columns(conn, &quote_ident(out_table))?;
     conn.execute_batch(&format!(
         "ATTACH '{}' AS sb_orig (READ_ONLY);",
