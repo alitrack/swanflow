@@ -6,7 +6,6 @@ autobins = false
 description = "Rust-native Data Science DAG Engine — WASM UDF · AI Agent · DBX-Compatible Connectors"
 license = "Apache-2.0"
 repository = "https://github.com/alitrack/swanflow"
-homepage = "https://github.com/alitrack/swanflow"
 keywords = ["datafusion", "arrow", "workflow", "etl", "data-science", "wasm"]
 categories = ["database", "science", "wasm"]
 

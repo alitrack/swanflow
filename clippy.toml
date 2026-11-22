@@ -2,7 +2,13 @@
 # See https://doc.rust-lang.org/clippy/ for available lints
 
 # === Banned patterns (compile error) ===
-disallowed-methods = [
+# `dbg!` is a MACRO, so it belongs under disallowed-macros. It sat under
+# disallowed-methods until design.md §19, where clippy reported
+#   warning: expected a function, found a macro
+# on this very line — i.e. the ban was inert and had been the whole time.
+# A guard rail that only produces a config warning is worse than none: the
+# warning scrolls past on every run, so nobody reads the clippy output at all.
+disallowed-macros = [
   { path = "std::dbg", reason = "remove before commit — use tracing::debug!" },
 ]
 
