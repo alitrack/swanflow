@@ -70,6 +70,10 @@ bson = { version = "2", optional = true, features = ["chrono-0_4"] }
 wasmtime = { version = "28.0.0", optional = true, default-features = false, features = ["cranelift", "runtime"] }
 # sqlx removed: postgres/mysql/sqlite access now goes through DuckDB scanners (ATTACH)
 chrono = { version = "0.4", features = ["serde"] }
+# Non-destructive reruns work on a throwaway copy of the database; TempDir's
+# drop-on-any-exit is what keeps a PHI-bearing copy from being left behind when
+# the rerun fails halfway.
+tempfile = "3.26.0"
 # Webhook ingress (ADR-014 Stage 4): hyper 1.x + hyper-util are already in
 # the lockfile via reqwest's tree — zero new crates downloaded, we just
 # declare the direct dependency for the daemon's HTTP listener.
@@ -96,6 +100,3 @@ ai = ["swanflow-ai"]
 # WASM UDF node (core.script.wasm) via wasmtime. Optional: wasmtime alone is a
 # large share of the binary. Enable with --features wasm.
 wasm = ["dep:wasmtime"]
-
-[dev-dependencies]
-tempfile = "3.26.0"

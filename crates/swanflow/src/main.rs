@@ -1,5 +1,4 @@
 use clap::{Parser, Subcommand};
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use swanflow::core::connection_config::SwanFlowConnection;
@@ -202,6 +201,45 @@ enum ProvenanceCommands {
         /// Print only the artifact id (for scripting)
         #[arg(long)]
         print_id: bool,
+    },
+    /// Level 1 replicate: is the premise still intact? (seconds, no execution)
+    /// Checks header completeness, re-derives artifact_id, and re-fingerprints
+    /// every recorded input.
+    Check {
+        /// Artifact header written by `provenance header`
+        #[arg(long)]
+        header: PathBuf,
+        /// DuckDB database to check the inputs against (omit for a structural
+        /// header check only)
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Record this check in the header's `replications` audit trail
+        #[arg(long)]
+        record: bool,
+        /// Who is running the check (stored in the audit trail)
+        #[arg(long)]
+        by: Option<String>,
+    },
+    /// Level 2 replicate: re-run the recorded code and compare outputs
+    /// bit-for-bit, with column-level localisation. Works from the header alone
+    /// — no original session, no agent. Non-destructive: runs on a throwaway
+    /// copy of the database.
+    Rerun {
+        /// Artifact header written by `provenance header`
+        #[arg(long)]
+        header: PathBuf,
+        /// DuckDB database holding the input tables
+        #[arg(long)]
+        db: PathBuf,
+        /// Record this rerun in the header's `replications` audit trail
+        #[arg(long)]
+        record: bool,
+        /// Who is running the rerun (stored in the audit trail)
+        #[arg(long)]
+        by: Option<String>,
+        /// Print only the verdict (for scripting)
+        #[arg(long)]
+        print_verdict: bool,
     },
 }
 
@@ -1021,6 +1059,156 @@ async fn main() -> anyhow::Result<()> {
                             header.code.nondeterministic.join(", ")
                         );
                     }
+                }
+            }
+            ProvenanceCommands::Check {
+                header,
+                db,
+                record,
+                by,
+            } => {
+                use swanflow::core::engine::provenance::{
+                    append_replication, check, check_structure, load_header, write_header,
+                };
+
+                let mut h = load_header(&header)?;
+                let report = match &db {
+                    Some(path) => {
+                        if !path.exists() {
+                            anyhow::bail!("database not found: {}", path.display());
+                        }
+                        let conn = duckdb::Connection::open(path)
+                            .map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?;
+                        check(&conn, &h)?
+                    }
+                    None => check_structure(&h),
+                };
+
+                println!("🔍 Replicate --check: {}", header.display());
+                println!("   id       {}", h.artifact_id);
+                println!("   id ok    {}", if report.id_verified { "re-derives ✅" } else { "does NOT re-derive ❌" });
+                for input in &report.inputs {
+                    println!(
+                        "   input    {}  {}  ({} rows now, {} recorded)",
+                        input.path, input.status, input.rows_observed, input.rows_expected
+                    );
+                }
+                for p in &report.problems {
+                    println!("   ❌ {p}");
+                }
+                if let Some(note) = &report.engine_note {
+                    println!("   ⚠️  {note}");
+                }
+                println!("   verdict  {}", report.verdict.to_uppercase());
+                println!("   → {}", report.detail);
+
+                if record {
+                    append_replication(
+                        &mut h,
+                        "check",
+                        &report.verdict,
+                        by.clone(),
+                        Some(report.detail.clone()),
+                    );
+                    write_header(&header, &h)?;
+                    println!("   📝 recorded in {}.replications", header.display());
+                }
+                if !matches!(report.verdict.as_str(), "pass") {
+                    anyhow::bail!("verdict: {}", report.verdict);
+                }
+            }
+            ProvenanceCommands::Rerun {
+                header,
+                db,
+                record,
+                by,
+                print_verdict,
+            } => {
+                use swanflow::core::engine::provenance::{
+                    append_replication, load_header, rerun, write_header,
+                };
+
+                if !db.exists() {
+                    anyhow::bail!("database not found: {}", db.display());
+                }
+                let mut h = load_header(&header)?;
+                let report = rerun(&db, &h)?;
+
+                if print_verdict {
+                    println!("{}", report.verdict);
+                } else {
+                    println!("♻️  Replicate --rerun: {}", header.display());
+                    println!("   id       {}", h.artifact_id);
+                    println!(
+                        "   rows     {} recorded → {} observed",
+                        report.rows_expected, report.rows_observed
+                    );
+                    println!(
+                        "   hash     {}… → {}…",
+                        &report.hash_expected[..12.min(report.hash_expected.len())],
+                        &report.hash_observed[..12.min(report.hash_observed.len())]
+                    );
+                    for d in &report.column_diffs {
+                        println!(
+                            "   column   {}  only-in-original {} / only-in-rerun {}",
+                            d.column, d.extra_in_original, d.extra_in_rerun
+                        );
+                    }
+                    if !report.columns_only_in_original.is_empty() {
+                        println!(
+                            "   columns gone  {}",
+                            report.columns_only_in_original.join(", ")
+                        );
+                    }
+                    if !report.columns_only_in_rerun.is_empty() {
+                        println!("   columns new   {}", report.columns_only_in_rerun.join(", "));
+                    }
+                    if report.stored_table_compared {
+                        println!(
+                            "   stored   {}",
+                            if report.stored_table_matches {
+                                "table on disk matches the header ✅"
+                            } else {
+                                "table on disk does NOT match the header ❗"
+                            }
+                        );
+                    } else {
+                        println!(
+                            "   stored   no copy on disk to compare against (header-only review)"
+                        );
+                    }
+                    for p in &report.problems {
+                        println!("   ❌ {p}");
+                    }
+                    if let Some(note) = &report.engine_note {
+                        println!("   ⚠️  {note}");
+                    }
+                    if report.partial {
+                        println!(
+                            "   ⚠️  PARTIAL — code is non-deterministic ({}): the comparison is \
+                             reported, not certified",
+                            report.nondeterministic.join(", ")
+                        );
+                    }
+                    println!("   verdict  {}", report.verdict.to_uppercase());
+                    println!("   → {}", report.detail);
+                }
+
+                if record {
+                    append_replication(
+                        &mut h,
+                        "rerun",
+                        &report.verdict,
+                        by.clone(),
+                        Some(report.detail.clone()),
+                    );
+                    write_header(&header, &h)?;
+                    if !print_verdict {
+                        println!("   📝 recorded in {}.replications", header.display());
+                    }
+                }
+                if !matches!(report.verdict.as_str(), "pass") {
+                    anyhow::bail!("verdict: {}", report.verdict);
                 }
             }
         },
