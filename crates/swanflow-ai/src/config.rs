@@ -18,9 +18,8 @@ impl RouterConfig {
     /// Returns `AiError::ParseError` if the YAML/JSON is malformed.
     pub fn from_settings(settings: &str) -> Result<Self, AiError> {
         // Try YAML first
-        match serde_yaml::from_str::<RouterConfig>(settings) {
-            Ok(cfg) => return Ok(cfg),
-            Err(_) => {}
+        if let Ok(cfg) = serde_yaml::from_str::<RouterConfig>(settings) {
+            return Ok(cfg);
         }
         // Fallback to JSON
         serde_json::from_str(settings)

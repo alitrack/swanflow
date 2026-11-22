@@ -40,7 +40,7 @@ fn classify_error(error: &str) -> ErrorKind {
 /// - Medium: nested objects or 6–15 fields
 /// - Complex: deeply nested, arrays, or > 15 fields
 pub fn measure_config_complexity(config: &Value) -> ConfigComplexity {
-    let field_count = count_fields(config, 0);
+    let field_count = count_fields(config);
     let max_depth = measure_depth(config);
     let has_arrays = has_array_values(config);
 
@@ -54,20 +54,24 @@ pub fn measure_config_complexity(config: &Value) -> ConfigComplexity {
 }
 
 /// Count total number of leaf fields in a JSON value.
-fn count_fields(value: &Value, depth: usize) -> usize {
+///
+/// `depth` used to be threaded through the recursion but was never read, so it
+/// is gone: the parameter implied the count depended on nesting, which it does
+/// not.
+fn count_fields(value: &Value) -> usize {
     match value {
         Value::Object(map) => {
             if map.is_empty() {
                 1
             } else {
-                map.values().map(|v| count_fields(v, depth + 1)).sum()
+                map.values().map(count_fields).sum()
             }
         }
         Value::Array(arr) => {
             if arr.is_empty() {
                 1
             } else {
-                arr.iter().map(|v| count_fields(v, depth + 1)).sum()
+                arr.iter().map(count_fields).sum()
             }
         }
         _ => 1,
@@ -81,14 +85,14 @@ fn measure_depth(value: &Value) -> usize {
             if map.is_empty() {
                 1
             } else {
-                1 + map.values().map(|v| measure_depth(v)).max().unwrap_or(0)
+                1 + map.values().map(measure_depth).max().unwrap_or(0)
             }
         }
         Value::Array(arr) => {
             if arr.is_empty() {
                 1
             } else {
-                1 + arr.iter().map(|v| measure_depth(v)).max().unwrap_or(0)
+                1 + arr.iter().map(measure_depth).max().unwrap_or(0)
             }
         }
         _ => 1,
@@ -99,7 +103,7 @@ fn measure_depth(value: &Value) -> usize {
 fn has_array_values(value: &Value) -> bool {
     match value {
         Value::Array(_) => true,
-        Value::Object(map) => map.values().any(|v| has_array_values(v)),
+        Value::Object(map) => map.values().any(has_array_values),
         _ => false,
     }
 }
