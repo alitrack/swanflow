@@ -41,6 +41,13 @@ pub struct Env {
     pub params: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,
+    /// `skill:name@version` of the skill package that produced this artifact.
+    ///
+    /// Part of the identity on purpose: the same SQL run under a different
+    /// template version is a different analysis, and "这个结果是用哪版模板算的"
+    /// must be answerable from the header alone (specs/skill-package.md §5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -63,6 +70,15 @@ pub struct TableRef {
     pub path: String,
     pub rows: i64,
     pub content_sha256: String,
+    /// Per-input schema fingerprint.
+    ///
+    /// Separate from `env.schema_hash` on purpose: the env-level hash is a
+    /// *set* hash that includes the output table, so it cannot be recomputed in
+    /// a header-only review (the output table is gone by design). This one can —
+    /// the input table is always present — which is what lets `--check` catch
+    /// "same rows, same content, different shape".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_sha256: Option<String>,
     /// "aggregate" (this implementation) or "row_stream" (reserved).
     #[serde(default = "default_fingerprint_kind")]
     pub fingerprint_kind: String,
@@ -254,12 +270,35 @@ pub fn compute_artifact_id(h: &ArtifactHeader) -> String {
     if let Some(p) = &h.env.params {
         feed(&p.to_string());
     }
+    // The skill package version is part of the identity: a different template
+    // version is a different analysis, even with identical code text.
+    if let Some(skill) = &h.env.skill {
+        feed(skill);
+    }
     for input in &h.inputs {
         feed(&input.path);
         feed(&input.rows.to_string());
         feed(&input.content_sha256);
+        // Feed the schema fingerprint too, so a header edited to point at a
+        // differently-shaped table cannot keep the original id.
+        if let Some(schema) = &input.schema_sha256 {
+            feed(schema);
+        }
     }
     format!("sha256:{}", hex(&hasher.finalize()))
+}
+
+/// Attach the producing skill package and **re-derive the artifact id**.
+///
+/// Separate from `append_replication` on purpose, and the difference is the
+/// whole point: an audit record must not move the id, but the identity of the
+/// analysis must. A different skill version is a different analysis.
+pub fn with_skill(mut header: ArtifactHeader, skill: Option<String>) -> ArtifactHeader {
+    if header.env.skill != skill {
+        header.env.skill = skill;
+        header.artifact_id = compute_artifact_id(&header);
+    }
+    header
 }
 
 /// Build a header for one materialized output table.
@@ -283,7 +322,8 @@ pub fn build_header(
     // §4: `env.schema_hash` exists so that "输入变了要能发现". Hashing the
     // output table alone did not deliver that — two different input schemas
     // could share one artifact_id. Now every input table's structure is in it.
-    let schema_hash = schema_set_hash(conn, output_table, input_tables)?;
+    let schema_hash_of_output = schema_hash(conn, output_table)?;
+    let env_schema_hash = schema_set_hash(conn, output_table, input_tables)?;
     let (out_rows, out_hash) = table_fingerprint(conn, output_table)?;
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
@@ -294,6 +334,7 @@ pub fn build_header(
             path: (*t).to_string(),
             rows,
             content_sha256: content,
+            schema_sha256: Some(schema_hash(conn, t)?),
             fingerprint_kind: default_fingerprint_kind(),
             collected_at: Some(now.clone()),
         });
@@ -312,15 +353,19 @@ pub fn build_header(
         conversation_ref: conversation,
         env: Env {
             engine,
-            schema_hash,
+            schema_hash: env_schema_hash,
             params: None,
             locale: std::env::var("LANG").ok(),
+            // Set afterwards by `with_skill` (which re-derives the id). None
+            // here means "no skill package was involved", not "unknown".
+            skill: None,
         },
         inputs,
         outputs: vec![TableRef {
             path: output_table.to_string(),
             rows: out_rows,
             content_sha256: out_hash,
+            schema_sha256: Some(schema_hash_of_output.clone()),
             fingerprint_kind: default_fingerprint_kind(),
             collected_at: None,
         }],
@@ -478,6 +523,17 @@ pub fn validate_header(h: &ArtifactHeader) -> Vec<String> {
         if input.content_sha256.len() != 64 {
             problems.push(format!("inputs[{i}].content_sha256 must be 64 hex chars"));
         }
+        match &input.schema_sha256 {
+            Some(s) if s.len() == 64 => {}
+            Some(_) => problems.push(format!("inputs[{i}].schema_sha256 must be 64 hex chars")),
+            // A header without it cannot be checked for "same rows, same
+            // content, different shape" — that is a real gap, not a style
+            // issue, so it is refused by field name rather than passed over.
+            None => problems.push(format!(
+                "inputs[{i}].schema_sha256 is missing — re-emit the header with a current \
+                 swanflow: without it a reviewer cannot verify the input's shape"
+            )),
+        }
     }
     for (i, out) in h.outputs.iter().enumerate() {
         if out.content_sha256.len() != 64 {
@@ -581,6 +637,19 @@ pub fn check(conn: &duckdb::Connection, header: &ArtifactHeader) -> Result<Check
                 continue;
             }
         };
+        // Schema verification. Per-input, because the input table is always
+        // present even in a header-only review (env.schema_hash is a set hash
+        // that also covers the absent output table, so it cannot be recomputed
+        // here). Without this, "same rows, same content, different shape"
+        // passed silently — the exact hole inputs[].schema_sha256 exists for.
+        let schema_changed = match &input.schema_sha256 {
+            Some(recorded) => match schema_hash(conn, &input.path) {
+                Ok(live) => &live != recorded,
+                // Table missing is already reported above; do not double-count.
+                Err(_) => false,
+            },
+            None => false,
+        };
         let (status, note) = if rows != input.rows {
             (
                 "rows_changed",
@@ -590,6 +659,15 @@ pub fn check(conn: &duckdb::Connection, header: &ArtifactHeader) -> Result<Check
             (
                 "content_changed",
                 format!("{}: same row count, different content", input.path),
+            )
+        } else if schema_changed {
+            (
+                "schema_changed",
+                format!(
+                    "{}: same row count and same content, but the table's SCHEMA changed \
+                     (columns or types) — this is not the same input",
+                    input.path
+                ),
             )
         } else {
             ("match", String::new())
@@ -1364,6 +1442,75 @@ mod tests {
             .query_row("SELECT count(*) FROM sales", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn check_catches_a_shape_change_that_content_hashing_cannot() {
+        // The gap this closes: same rows, same values, different column type.
+        // Content fingerprints are identical, so only the per-input schema
+        // fingerprint can tell — and `--check` must say so instead of PASS.
+        let mk = |input_type: &str| {
+            let conn = duckdb::Connection::open_in_memory().unwrap();
+            conn.execute_batch(&format!("CREATE TABLE jiesuan(a INTEGER, z {input_type});"))
+                .unwrap();
+            conn.execute_batch("INSERT INTO jiesuan VALUES (1,100),(2,200),(3,300);")
+                .unwrap();
+            conn.execute_batch("CREATE TABLE out_n AS SELECT count(*) AS n FROM jiesuan;")
+                .unwrap();
+            conn
+        };
+        let code = "CREATE TABLE out_n AS SELECT count(*) AS n FROM jiesuan;";
+        let narrow = mk("INTEGER");
+        let wide = mk("BIGINT");
+        let h = build_header(
+            &narrow, "out_n", "row count", code, "sql", &["jiesuan"], conv(), vec![],
+        )
+        .unwrap();
+
+        // The content really is unchanged — this is what made the hole silent.
+        assert_eq!(
+            h.inputs[0].content_sha256,
+            table_fingerprint(&wide, "jiesuan").unwrap().1,
+            "content fingerprint is identical, so it cannot be what catches this"
+        );
+
+        let r = check(&wide, &h).unwrap();
+        assert_eq!(r.verdict, verdict::DATA_CHANGED, "a shape change must not pass");
+        assert_eq!(r.inputs[0].status, "schema_changed");
+        assert!(r.detail.contains("SCHEMA"), "detail must name the reason: {}", r.detail);
+    }
+
+    #[test]
+    fn a_header_without_per_input_schema_is_refused_by_field_name() {
+        let conn = setup_with_output();
+        let mut h = header_for(&conn);
+        h.inputs[0].schema_sha256 = None;
+        let problems = validate_header(&h);
+        assert!(
+            problems.iter().any(|p| p.contains("inputs[0].schema_sha256")),
+            "must name the field, not fail vaguely: {problems:?}"
+        );
+        assert_eq!(check(&conn, &h).unwrap().verdict, verdict::INCOMPLETE_HEADER);
+    }
+
+    #[test]
+    fn attaching_a_skill_moves_the_id_but_a_replication_does_not() {
+        let conn = setup_with_output();
+        let h = header_for(&conn);
+        let base = h.artifact_id.clone();
+        assert!(h.env.skill.is_none());
+
+        let tagged = with_skill(h.clone(), Some("医保自查-DRG高倍率病例筛查@0.1.0".into()));
+        assert_eq!(tagged.env.skill.as_deref(), Some("医保自查-DRG高倍率病例筛查@0.1.0"));
+        assert_ne!(tagged.artifact_id, base, "a different template version is a different analysis");
+        // ...and the new id must still re-derive from its own fields.
+        assert_eq!(compute_artifact_id(&tagged), tagged.artifact_id);
+
+        // Contrast: an audit record must NOT move the id (that is what makes
+        // repeated reviews possible at all).
+        let mut audited = tagged.clone();
+        append_replication(&mut audited, "check", verdict::PASS, Some("lhy".into()), None);
+        assert_eq!(compute_artifact_id(&audited), tagged.artifact_id);
     }
 
     #[test]

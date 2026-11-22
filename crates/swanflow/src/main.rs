@@ -212,6 +212,11 @@ enum ProvenanceCommands {
         /// Print only the artifact id (for scripting)
         #[arg(long)]
         print_id: bool,
+        /// The skill package that produced this table, as `name@version`.
+        /// Part of the identity: a different template version is a different
+        /// analysis, so it moves the artifact_id (specs/skill-package.md §5).
+        #[arg(long)]
+        skill: Option<String>,
     },
     /// Level 1 replicate: is the premise still intact? (seconds, no execution)
     /// Checks header completeness, re-derives artifact_id, and re-fingerprints
@@ -999,9 +1004,10 @@ async fn main() -> anyhow::Result<()> {
                 inputs,
                 out,
                 print_id,
+                skill,
             } => {
                 use swanflow::core::engine::provenance::{
-                    build_header, write_header, ConversationRef,
+                    build_header, with_skill, write_header, ConversationRef,
                 };
 
                 if !db.exists() {
@@ -1052,6 +1058,10 @@ async fn main() -> anyhow::Result<()> {
                     conv,
                     Vec::new(),
                 )?;
+                // The skill version is part of the identity, so it must be set
+                // before the header is written — and setting it re-derives the
+                // id (unlike an audit record, which must not).
+                let header = with_skill(header, skill.clone());
 
                 let out_path =
                     out.unwrap_or_else(|| PathBuf::from(format!("{table}.sbheader.json")));
