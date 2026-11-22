@@ -90,7 +90,16 @@ impl WorkflowCompiler {
 
         // 2. Process nodes in topological order
         for node_idx in sorted_indices {
-            let node = workflow.graph.node_weight(node_idx).unwrap();
+            // petgraph guarantees a live `NodeIndex` has a weight, and this one
+            // came straight out of `toposort` on the same graph — so the only way
+            // to miss is a bug in our own indexing. Reported as a plan error
+            // rather than a panic: a malformed workflow must not take the process
+            // down, because a panic here loses the diagnostics for the whole DAG.
+            let node = workflow.graph.node_weight(node_idx).ok_or_else(|| {
+                datafusion::error::DataFusionError::Plan(format!(
+                    "internal: toposort produced node index {node_idx:?} that is absent from the graph"
+                ))
+            })?;
             let mut is_placeholder = false;
 
             // ── Loop mode: embed sub_workflow as nested stages ──────────
@@ -133,9 +142,14 @@ impl WorkflowCompiler {
                 .graph
                 .edges_directed(node_idx, petgraph::Direction::Incoming)
             {
-                let source_node = workflow.graph.node_weight(edge.source()).unwrap();
-                if let Some(&src_level) = node_levels.get(&source_node.id) {
-                    level = level.max(src_level + 1);
+                // `edges_directed` only yields edges whose endpoints are live, so
+                // the lookup always hits. Written as `if let` so that a future
+                // change to how edges are collected degrades to "ignore that edge"
+                // instead of panicking in the middle of planning.
+                if let Some(source_node) = workflow.graph.node_weight(edge.source()) {
+                    if let Some(&src_level) = node_levels.get(&source_node.id) {
+                        level = level.max(src_level + 1);
+                    }
                 }
             }
             node_levels.insert(node.id, level);
@@ -154,7 +168,10 @@ impl WorkflowCompiler {
             incoming_edges.sort_by_key(|e| e.weight().target_port);
 
             for edge in incoming_edges {
-                let source_node = workflow.graph.node_weight(edge.source()).unwrap();
+                // Same reasoning as above: the endpoint is live by construction.
+                let Some(source_node) = workflow.graph.node_weight(edge.source()) else {
+                    continue;
+                };
                 if let Some(outputs) = self.compiled_outputs.get(&source_node.id) {
                     if let Some(plan) = outputs.get(&(edge.weight().source_port as usize)) {
                         input_plans.push(plan.clone());

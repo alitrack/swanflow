@@ -374,9 +374,15 @@ impl KnwfParser {
                 Ok(Event::End(ref e)) => {
                     let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                     if tag == "config" && stack.len() > 1 {
-                        let (name, map) = stack.pop().unwrap();
-                        if let Some((_, parent)) = stack.last_mut() {
-                            parent.insert(name, serde_json::Value::Object(map));
+                        // The length check above already guarantees a frame, so
+                        // `pop` never returns None here. Written as `if let` so the
+                        // guard and the pop stay visibly connected: if the
+                        // condition is ever relaxed, a malformed document is
+                        // ignored instead of panicking the whole import.
+                        if let Some((name, map)) = stack.pop() {
+                            if let Some((_, parent)) = stack.last_mut() {
+                                parent.insert(name, serde_json::Value::Object(map));
+                            }
                         }
                     }
                 }

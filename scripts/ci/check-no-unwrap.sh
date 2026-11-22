@@ -127,7 +127,20 @@ count=$(wc -l < "$tmp")
 # Leaving BASELINE at a high value after a reduction is a process violation —
 # the gate is a ceiling, not an inventory, so 230-then-+4 would pass unless
 # re-pinned. Pay the reduction down AND re-pin together.
-BASELINE=234
+#
+# Re-pin history:
+#   234  the gate's original calibration (commit c2a5888).
+#   354  drifted +120 over the ceiling while §18.1's `|| true` + `| head -50`
+#        made the check job green no matter what. The check job had been RED
+#        the whole time; nobody could see it because clippy's step was swallowed
+#        first. 114 of the 120 were the two copies of kernel/mock.rs (§17.2b),
+#        which is why the drift looked like "nothing changed" per file.
+#   230  after paying it down: one `lk()` helper per kernel/mock.rs copy
+#        (57 sites each) + 4 real production unwraps turned into plan errors
+#        (compiler.rs x3, knime/parser.rs) + 2 `_` arms that hard-cast to
+#        StringArray rewritten to arrow's own formatter (excel.rs: Int32 /
+#        Utf8View / Boolean / Date columns used to panic mid-export).
+BASELINE=230
 
 echo "no-unwrap hygiene (built crates/*/src, non-test):"
 echo "  current : $count"

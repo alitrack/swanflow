@@ -17,6 +17,21 @@ use crate::core::kernel::core::*;
 use crate::core::kernel::plugin::*;
 use crate::core::kernel::runtime::*;
 
+/// Lock one of the mocks' interior-mutability `Mutex`es.
+///
+/// See the twin of this function in `crates/swanflow-core/src/kernel/mock.rs`
+/// for the full rationale; this file is a copy of that one and carries the same
+/// change so the two trees do not diverge further before §17.2b unifies them.
+///
+/// Short version: 57 call sites all made the same panic-on-poison choice
+/// invisibly. For a mock, recovering is the useful behaviour (a poisoned lock
+/// means an earlier caller panicked mid-update; the failing test should report
+/// its own assertion, not a second cascading panic). Production code should do
+/// the opposite, which is exactly why the decision belongs in one visible place.
+fn lk<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // ---------------------------------------------------------------------------
 // MockDb — DbRead + DbWrite
 // ---------------------------------------------------------------------------
@@ -59,7 +74,7 @@ impl DbRead for MockDb {
 #[async_trait]
 impl DbWrite for MockDb {
     async fn execute(&self, sql: &str) -> CoreResult<u64> {
-        self.executed.lock().unwrap().push(sql.to_string());
+        lk(&self.executed).push(sql.to_string());
         Ok(1)
     }
 }
@@ -165,7 +180,7 @@ impl MockKeyStore {
     }
 
     pub fn with_entry(self, key: &str, value: &str) -> Self {
-        self.store.lock().unwrap().insert(key.to_string(), value.to_string());
+        lk(&self.store).insert(key.to_string(), value.to_string());
         self
     }
 }
@@ -173,27 +188,22 @@ impl MockKeyStore {
 #[async_trait]
 impl KeyStore for MockKeyStore {
     async fn get(&self, key: &str) -> CoreResult<Option<String>> {
-        Ok(self.store.lock().unwrap().get(key).cloned())
+        Ok(lk(&self.store).get(key).cloned())
     }
 
     async fn set(&self, key: &str, value: &str) -> CoreResult<()> {
-        self.store
-            .lock()
-            .unwrap()
+        lk(&self.store)
             .insert(key.to_string(), value.to_string());
         Ok(())
     }
 
     async fn delete(&self, key: &str) -> CoreResult<()> {
-        self.store.lock().unwrap().remove(key);
+        lk(&self.store).remove(key);
         Ok(())
     }
 
     async fn list_keys(&self, prefix: &str) -> CoreResult<Vec<String>> {
-        Ok(self
-            .store
-            .lock()
-            .unwrap()
+        Ok(lk(&self.store)
             .keys()
             .filter(|k| k.starts_with(prefix))
             .cloned()
@@ -219,7 +229,7 @@ impl MockClock {
 
     /// Advance the clock by `secs` seconds.
     pub fn advance(&self, secs: f64) {
-        let mut now = self.now.lock().unwrap();
+        let mut now = lk(&self.now);
         *now += secs;
     }
 }
@@ -227,7 +237,7 @@ impl MockClock {
 #[async_trait]
 impl Clock for MockClock {
     fn now_unix_secs(&self) -> f64 {
-        *self.now.lock().unwrap()
+        *lk(&self.now)
     }
 
     async fn sleep(&self, secs: f64) {
@@ -269,7 +279,7 @@ impl MockBlobStore {
     }
 
     pub fn with_blob(self, key: &str, data: Vec<u8>) -> Self {
-        self.blobs.lock().unwrap().insert(key.to_string(), data);
+        lk(&self.blobs).insert(key.to_string(), data);
         self
     }
 }
@@ -277,21 +287,21 @@ impl MockBlobStore {
 #[async_trait]
 impl BlobStore for MockBlobStore {
     async fn put(&self, key: &str, data: Vec<u8>) -> CoreResult<()> {
-        self.blobs.lock().unwrap().insert(key.to_string(), data);
+        lk(&self.blobs).insert(key.to_string(), data);
         Ok(())
     }
 
     async fn get(&self, key: &str) -> CoreResult<Option<Vec<u8>>> {
-        Ok(self.blobs.lock().unwrap().get(key).cloned())
+        Ok(lk(&self.blobs).get(key).cloned())
     }
 
     async fn delete(&self, key: &str) -> CoreResult<()> {
-        self.blobs.lock().unwrap().remove(key);
+        lk(&self.blobs).remove(key);
         Ok(())
     }
 
     async fn exists(&self, key: &str) -> bool {
-        self.blobs.lock().unwrap().contains_key(key)
+        lk(&self.blobs).contains_key(key)
     }
 }
 
@@ -312,17 +322,13 @@ impl MockShellExec {
     }
 
     pub fn with_result(self, command: &str, output: ShellOutput) -> Self {
-        self.results
-            .lock()
-            .unwrap()
+        lk(&self.results)
             .insert(command.to_string(), (Ok(output),));
         self
     }
 
     pub fn with_error(self, command: &str, error: SwanFlowError) -> Self {
-        self.results
-            .lock()
-            .unwrap()
+        lk(&self.results)
             .insert(command.to_string(), (Err(error),));
         self
     }
@@ -331,7 +337,7 @@ impl MockShellExec {
 #[async_trait]
 impl ShellExec for MockShellExec {
     async fn run(&self, command: &str, _args: &[String]) -> CoreResult<ShellOutput> {
-        let results = self.results.lock().unwrap();
+        let results = lk(&self.results);
         match results.get(command) {
             Some((Ok(out),)) => Ok(ShellOutput {
                 exit_code: out.exit_code,
@@ -370,7 +376,7 @@ impl MockCancellationToken {
 #[async_trait]
 impl CancellationToken for MockCancellationToken {
     fn is_cancelled(&self) -> bool {
-        *self.cancelled.lock().unwrap()
+        *lk(&self.cancelled)
     }
 
     async fn wait_cancelled(&self) {
@@ -381,7 +387,7 @@ impl CancellationToken for MockCancellationToken {
     }
 
     fn cancel(&self) {
-        *self.cancelled.lock().unwrap() = true;
+        *lk(&self.cancelled) = true;
     }
 }
 
@@ -423,27 +429,23 @@ impl MockProgress {
     }
 
     pub fn reports(&self) -> Vec<(f64, String)> {
-        self.reports.lock().unwrap().clone()
+        lk(&self.reports).clone()
     }
 }
 
 #[async_trait]
 impl Progress for MockProgress {
     async fn report(&self, fraction: f64, message: Option<&str>) {
-        self.reports
-            .lock()
-            .unwrap()
+        lk(&self.reports)
             .push((fraction, message.unwrap_or_default().to_string()));
     }
 
     fn last_reported(&self) -> Option<(f64, String)> {
-        self.reports.lock().unwrap().last().cloned()
+        lk(&self.reports).last().cloned()
     }
 
     async fn complete(&self, message: Option<&str>) {
-        self.reports
-            .lock()
-            .unwrap()
+        lk(&self.reports)
             .push((1.0, message.unwrap_or("complete").to_string()));
     }
 }
@@ -467,7 +469,7 @@ impl MockLLM {
     }
 
     pub fn with_response(self, content: &str) -> Self {
-        self.responses.lock().unwrap().push(content.to_string());
+        lk(&self.responses).push(content.to_string());
         self
     }
 }
@@ -475,8 +477,8 @@ impl MockLLM {
 #[async_trait]
 impl LLMInfer for MockLLM {
     async fn complete(&self, _request: LlmRequest) -> CoreResult<LlmResponse> {
-        let mut idx = self.index.lock().unwrap();
-        let responses = self.responses.lock().unwrap();
+        let mut idx = lk(&self.index);
+        let responses = lk(&self.responses);
         let content = responses.get(*idx).cloned().unwrap_or_default();
         *idx += 1;
         Ok(LlmResponse {
@@ -546,12 +548,12 @@ impl MockModeration {
     }
 
     pub fn with_flag(self, category: &str) -> Self {
-        self.flagged.lock().unwrap().push(category.to_string());
+        lk(&self.flagged).push(category.to_string());
         self
     }
 
     pub fn with_safe_threshold(self, threshold: f64) -> Self {
-        *self.threshold.lock().unwrap() = threshold;
+        *lk(&self.threshold) = threshold;
         self
     }
 }
@@ -559,7 +561,7 @@ impl MockModeration {
 #[async_trait]
 impl Moderation for MockModeration {
     async fn check(&self, _text: &str) -> CoreResult<ModerationResult> {
-        let flagged = self.flagged.lock().unwrap().clone();
+        let flagged = lk(&self.flagged).clone();
         let is_safe = flagged.is_empty();
         Ok(ModerationResult {
             is_safe,
@@ -602,14 +604,14 @@ impl MockLogger {
     }
 
     pub fn entries(&self) -> Vec<LogEntry> {
-        self.entries.lock().unwrap().clone()
+        lk(&self.entries).clone()
     }
 }
 
 #[async_trait]
 impl Logger for MockLogger {
     async fn log(&self, level: LogLevel, message: &str, fields: Vec<(String, String)>) {
-        self.entries.lock().unwrap().push(LogEntry {
+        lk(&self.entries).push(LogEntry {
             level,
             message: message.to_string(),
             fields,
@@ -634,16 +636,14 @@ impl MockNotification {
     }
 
     pub fn sent(&self) -> Vec<(String, String, String)> {
-        self.sent.lock().unwrap().clone()
+        lk(&self.sent).clone()
     }
 }
 
 #[async_trait]
 impl Notification for MockNotification {
     async fn send(&self, channel: &str, title: &str, body: &str) -> CoreResult<()> {
-        self.sent
-            .lock()
-            .unwrap()
+        lk(&self.sent)
             .push((channel.to_string(), title.to_string(), body.to_string()));
         Ok(())
     }
@@ -673,29 +673,24 @@ impl MockCache {
 #[async_trait]
 impl Cache for MockCache {
     async fn get(&self, key: &str) -> CoreResult<Option<String>> {
-        Ok(self
-            .store
-            .lock()
-            .unwrap()
+        Ok(lk(&self.store)
             .get(key)
             .map(|(v, _)| v.clone()))
     }
 
     async fn set(&self, key: &str, value: &str, ttl_secs: u64) -> CoreResult<()> {
-        self.store
-            .lock()
-            .unwrap()
+        lk(&self.store)
             .insert(key.to_string(), (value.to_string(), ttl_secs));
         Ok(())
     }
 
     async fn invalidate(&self, key: &str) -> CoreResult<()> {
-        self.store.lock().unwrap().remove(key);
+        lk(&self.store).remove(key);
         Ok(())
     }
 
     async fn exists(&self, key: &str) -> bool {
-        self.store.lock().unwrap().contains_key(key)
+        lk(&self.store).contains_key(key)
     }
 }
 
@@ -727,30 +722,24 @@ impl MockTelemetry {
     }
 
     pub fn counters(&self) -> Vec<CounterSample> {
-        self.counters.lock().unwrap().clone()
+        lk(&self.counters).clone()
     }
 }
 
 #[async_trait]
 impl Telemetry for MockTelemetry {
     async fn counter_inc(&self, name: &str, value: u64, labels: Vec<(String, String)>) {
-        self.counters
-            .lock()
-            .unwrap()
+        lk(&self.counters)
             .push((name.to_string(), value, labels));
     }
 
     async fn histogram_observe(&self, name: &str, value: f64, labels: Vec<(String, String)>) {
-        self.histograms
-            .lock()
-            .unwrap()
+        lk(&self.histograms)
             .push((name.to_string(), value, labels));
     }
 
     async fn gauge_set(&self, name: &str, value: f64, labels: Vec<(String, String)>) {
-        self.gauges
-            .lock()
-            .unwrap()
+        lk(&self.gauges)
             .push((name.to_string(), value, labels));
     }
 }
@@ -780,7 +769,7 @@ impl MockEventBus {
 #[async_trait]
 impl EventBus for MockEventBus {
     async fn publish(&self, topic: &str, payload: &str) -> CoreResult<()> {
-        let subs = self.subscribers.lock().unwrap();
+        let subs = lk(&self.subscribers);
         if let Some(callbacks) = subs.get(topic) {
             for (_, cb) in callbacks {
                 cb(topic, payload);
@@ -793,8 +782,8 @@ impl EventBus for MockEventBus {
     where
         F: Fn(&str, &str) + Send + 'static,
     {
-        let mut subs = self.subscribers.lock().unwrap();
-        let mut next = self.next_id.lock().unwrap();
+        let mut subs = lk(&self.subscribers);
+        let mut next = lk(&self.next_id);
         let id = format!("sub_{}", *next);
         *next += 1;
         subs.entry(topic.to_string())
@@ -804,7 +793,7 @@ impl EventBus for MockEventBus {
     }
 
     async fn unsubscribe(&self, subscription_id: &str) -> CoreResult<()> {
-        let mut subs = self.subscribers.lock().unwrap();
+        let mut subs = lk(&self.subscribers);
         for callbacks in subs.values_mut() {
             callbacks.retain(|(id, _)| id != subscription_id);
         }
@@ -832,19 +821,17 @@ impl MockSchemaRegistry {
 #[async_trait]
 impl SchemaRegistry for MockSchemaRegistry {
     async fn register_schema(&self, name: &str, columns: Vec<SchemaColumn>) -> CoreResult<()> {
-        self.schemas
-            .lock()
-            .unwrap()
+        lk(&self.schemas)
             .insert(name.to_string(), columns);
         Ok(())
     }
 
     async fn get_schema(&self, name: &str) -> CoreResult<Option<Vec<SchemaColumn>>> {
-        Ok(self.schemas.lock().unwrap().get(name).cloned())
+        Ok(lk(&self.schemas).get(name).cloned())
     }
 
     async fn find_by_column(&self, column_name: &str) -> CoreResult<Vec<String>> {
-        let schemas = self.schemas.lock().unwrap();
+        let schemas = lk(&self.schemas);
         let mut result = Vec::new();
         for (name, cols) in schemas.iter() {
             if cols.iter().any(|c| c.name == column_name) {
@@ -872,7 +859,7 @@ impl MockAuthProvider {
     }
 
     pub fn with_token(self, value: &str) -> Self {
-        *self.token_value.lock().unwrap() = value.to_string();
+        *lk(&self.token_value) = value.to_string();
         self
     }
 }
@@ -881,7 +868,7 @@ impl MockAuthProvider {
 impl AuthProvider for MockAuthProvider {
     async fn authenticate(&self, _credentials: AuthCredentials) -> CoreResult<AuthToken> {
         Ok(AuthToken {
-            value: self.token_value.lock().unwrap().clone(),
+            value: lk(&self.token_value).clone(),
             expires_at: None,
             permissions: vec!["*".into()],
         })
@@ -915,7 +902,7 @@ impl MockPluginHost {
     }
 
     pub fn with_plugin(self, name: &str, version: &str) -> Self {
-        self.plugins.lock().unwrap().insert(
+        lk(&self.plugins).insert(
             name.to_string(),
             PluginDescriptor {
                 name: name.to_string(),
@@ -932,12 +919,12 @@ impl MockPluginHost {
 #[async_trait]
 impl PluginHost for MockPluginHost {
     async fn scan(&self, _dir: &str) -> CoreResult<Vec<PluginDescriptor>> {
-        Ok(self.plugins.lock().unwrap().values().cloned().collect())
+        Ok(lk(&self.plugins).values().cloned().collect())
     }
 
     async fn load(&self, name: &str) -> CoreResult<PluginHandle> {
-        if self.plugins.lock().unwrap().contains_key(name) {
-            self.loaded.lock().unwrap().push(name.to_string());
+        if lk(&self.plugins).contains_key(name) {
+            lk(&self.loaded).push(name.to_string());
             Ok(PluginHandle {
                 name: name.to_string(),
                 plugin_type: PluginType::Wasm,
@@ -956,15 +943,13 @@ impl PluginHost for MockPluginHost {
     }
 
     async fn unload(&self, handle: &PluginHandle) -> CoreResult<()> {
-        self.loaded
-            .lock()
-            .unwrap()
+        lk(&self.loaded)
             .retain(|n| n != &handle.name);
         Ok(())
     }
 
     fn loaded(&self) -> Vec<String> {
-        self.loaded.lock().unwrap().clone()
+        lk(&self.loaded).clone()
     }
 }
 
@@ -985,7 +970,7 @@ impl MockWasmExec {
     }
 
     pub fn with_module(self, name: &str, exports: Vec<String>) -> Self {
-        self.modules.lock().unwrap().insert(
+        lk(&self.modules).insert(
             name.to_string(),
             WasmModule {
                 name: name.to_string(),
@@ -1000,10 +985,7 @@ impl MockWasmExec {
 impl WasmExec for MockWasmExec {
     async fn compile(&self, bytes: &[u8]) -> CoreResult<WasmModule> {
         let name = format!("mod_{}", bytes.len());
-        let module = self
-            .modules
-            .lock()
-            .unwrap()
+        let module = lk(&self.modules)
             .get(&name)
             .cloned()
             .unwrap_or(WasmModule {

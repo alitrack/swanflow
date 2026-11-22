@@ -1276,25 +1276,17 @@ impl ExcelTemplateWritingStream {
                 for (field, (r, c)) in &marker_coords {
                     if let Ok(col_idx) = first_batch.schema().index_of(field) {
                         let array = first_batch.column(col_idx);
-                        // Simplified: convert type to string for cell injection
+                        // Single value for a marker cell. Rendered through arrow's
+                        // own formatter rather than a typed downcast: the previous
+                        // three-arm match had a `_` arm that assumed `StringArray`,
+                        // so an Int32 / Utf8View / Boolean / Date marker column
+                        // panicked on the downcast instead of exporting. This is
+                        // the same idiom the reader already uses (see the
+                        // `array_value_to_string` call further up this file).
                         let val = if array.is_null(0) {
                             "".to_string()
                         } else {
-                            // Basic type handling
-                            match array.data_type() {
-                                DataType::Int64 => {
-                                    let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
-                                    a.value(0).to_string()
-                                }
-                                DataType::Float64 => {
-                                    let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
-                                    a.value(0).to_string()
-                                }
-                                _ => {
-                                    let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                                    a.value(0).to_string()
-                                }
-                            }
+                            render_cell(array.as_ref(), 0, "marker")?
                         };
                         if let Err(e) = worksheet.write(*r, *c, val) {
                             // P2-13: cell/header write failures fail the export.
@@ -1328,23 +1320,31 @@ impl ExcelTemplateWritingStream {
                     for c in 0..batch.num_columns() {
                         let array = batch.column(c);
                         if !array.is_null(r) {
+                            // Numbers are written as numbers so the workbook can sum
+                            // them; every other logical type is rendered by arrow.
+                            // The old `_` arm hard-cast to `StringArray`, so an
+                            // Int32 / Utf8View / Boolean / Date column panicked
+                            // mid-export — and because the write below is `.ok()`,
+                            // the panic was the only signal that anything was wrong.
                             match array.data_type() {
                                 DataType::Int64 => {
-                                    let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
-                                    worksheet
-                                        .write(current_row, col_start + c as u16, a.value(r) as f64)
-                                        .ok();
+                                    if let Some(a) = array.as_any().downcast_ref::<Int64Array>() {
+                                        worksheet
+                                            .write(current_row, col_start + c as u16, a.value(r) as f64)
+                                            .ok();
+                                    }
                                 }
                                 DataType::Float64 => {
-                                    let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
-                                    worksheet
-                                        .write(current_row, col_start + c as u16, a.value(r))
-                                        .ok();
+                                    if let Some(a) = array.as_any().downcast_ref::<Float64Array>() {
+                                        worksheet
+                                            .write(current_row, col_start + c as u16, a.value(r))
+                                            .ok();
+                                    }
                                 }
                                 _ => {
-                                    let a = array.as_any().downcast_ref::<StringArray>().unwrap();
+                                    let text = render_cell(array.as_ref(), r, "table")?;
                                     worksheet
-                                        .write(current_row, col_start + c as u16, a.value(r))
+                                        .write(current_row, col_start + c as u16, text)
                                         .ok();
                                 }
                             }
@@ -1662,6 +1662,64 @@ impl ExcelReportWritingStream {
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
         Ok(())
+    }
+}
+
+/// Render one cell of any arrow logical type as text.
+///
+/// This exists so the two writers below cannot drift back to a hard
+/// `downcast_ref::<StringArray>()` in their "anything else" arm. That cast used
+/// to decide the behaviour for every type nobody enumerated — and an Int32,
+/// Utf8View, Boolean or Date column panicked there instead of exporting.
+/// `Utf8View` matters in practice: DuckDB `VARCHAR` arrives as arrow 57's
+/// `Utf8View`, so this was reachable from ordinary SQL output, not a corner case.
+///
+/// `array_value_to_string` already covers every logical type, and the reader
+/// above uses it for the same job, so the exporter and the reader now agree on
+/// how a value is spelled.
+fn render_cell(
+    array: &dyn Array,
+    row: usize,
+    what: &str,
+) -> Result<String, datafusion::error::DataFusionError> {
+    datafusion::arrow::util::display::array_value_to_string(array, row).map_err(|e| {
+        datafusion::error::DataFusionError::Execution(format!(
+            "excel export: cannot render {} cell (row {}) of type {:?}: {}",
+            what,
+            row,
+            array.data_type(),
+            e
+        ))
+    })
+}
+
+#[cfg(test)]
+mod cell_render_tests {
+    use super::*;
+    use datafusion::arrow::array::{ArrayRef, BooleanArray, Int32Array, Int64Array, StringViewArray};
+    use std::sync::Arc;
+
+    /// Every type here is one the old `_ => downcast::<StringArray>()` arm
+    /// claimed to handle and then panicked on.
+    #[test]
+    fn renders_the_types_that_used_to_panic() {
+        let int32: ArrayRef = Arc::new(Int32Array::from(vec![Some(7)]));
+        let utf8view: ArrayRef = Arc::new(StringViewArray::from(vec![Some("abc")]));
+        let boolean: ArrayRef = Arc::new(BooleanArray::from(vec![Some(true)]));
+        let int64: ArrayRef = Arc::new(Int64Array::from(vec![Some(30)]));
+
+        assert_eq!(render_cell(int32.as_ref(), 0, "marker").unwrap(), "7");
+        assert_eq!(render_cell(utf8view.as_ref(), 0, "marker").unwrap(), "abc");
+        assert_eq!(render_cell(boolean.as_ref(), 0, "marker").unwrap(), "true");
+        assert_eq!(render_cell(int64.as_ref(), 0, "marker").unwrap(), "30");
+    }
+
+    /// A null must render as an empty string, not as an error: the writers skip
+    /// nulls, but a marker cell can still reach here with one.
+    #[test]
+    fn renders_null_as_empty() {
+        let int32: ArrayRef = Arc::new(Int32Array::from(vec![None]));
+        assert_eq!(render_cell(int32.as_ref(), 0, "marker").unwrap(), "");
     }
 }
 

@@ -14,5 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The gate's self-test runs FIRST and is deliberately not `|| true`: a green
+      # gate that has never been seen to go red is indistinguishable from one that
+      # cannot. This job was exactly that until design.md §19 — it checked a
+      # fossil tree and used BRE alternation that could never match.
+      - name: Prove the layer check can fail
+        run: bash scripts/ci/check-layering.sh --selftest
       - name: Run layer check
         run: bash scripts/ci/check-layering.sh
