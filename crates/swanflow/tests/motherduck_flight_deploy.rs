@@ -242,35 +242,25 @@ async fn second_deploy_chains_rollback_pointer() {
     assert_eq!(m2.rollback.as_deref(), Some("swanflow-deploy-testdag.json"));
     assert_eq!(state.create_count.load(Ordering::SeqCst), 2);
 
-    // Simulate the previous manifest snapshot (history file the rollback
-    // path reads) with v1's source.
-    let prev = swanflow::deploy::DeployManifest {
-        dag_id: "testdag".into(),
-        mode: "inline".into(),
-        deployed_at: m2.deployed_at.clone(),
-        owner_hint: m2.owner_hint.clone(),
-        flights: vec![swanflow::deploy::FlightRecord {
-            flight_id: m2.flights[0].flight_id.clone(),
-            flight_name: "swanflow_inline_testdag".into(),
-            version: 1,
-            source_sha256: {
-                use sha2::{Digest, Sha256};
-                let mut h = Sha256::new();
-                h.update(v1_source.as_bytes());
-                h.finalize()
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            },
-        }],
-        rollback: None,
-    };
-    std::fs::write(
-        flights_dir.join("history-swanflow-deploy-testdag.json"),
-        serde_json::to_string_pretty(&prev).unwrap(),
-    )
-    .unwrap();
-    // Restore v1 source on disk so the digest check passes.
+    // The outgoing v1 manifest is archived automatically — the rollback
+    // pointer resolves without anyone hand-writing the history file (this
+    // test used to simulate it, papering over the dangling pointer).
+    let history_path = flights_dir.join("history-swanflow-deploy-testdag.json");
+    assert!(
+        history_path.is_file(),
+        "deploy archives the outgoing manifest"
+    );
+    let archived: swanflow::deploy::DeployManifest =
+        serde_json::from_str(&std::fs::read_to_string(&history_path).unwrap()).unwrap();
+    assert!(archived.rollback.is_none(), "archived manifest is v1");
+    assert_ne!(
+        archived.flights[0].source_sha256, m2.flights[0].source_sha256,
+        "archived manifest carries v1's digest"
+    );
+
+    // Operator restores the v1 sources (the git-checkout step the rollback
+    // design assumes: flights/ is the source of truth, history records the
+    // digests that are valid to push).
     std::fs::write(flights_dir.join("swanflow_inline_testdag.py"), v1_source).unwrap();
 
     // Rollback: update_flight with v1 source.
@@ -292,6 +282,110 @@ async fn second_deploy_chains_rollback_pointer() {
     assert!(
         updated[0].1.contains("v1"),
         "update_flight carries the v1 source"
+    );
+}
+
+#[tokio::test]
+async fn deploy_refused_when_live_local_sources_drifted() {
+    let (endpoint, state) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let flights_dir: PathBuf = dir.path().join("flights");
+
+    deployer::deploy(
+        vec![simple_program("swanflow_inline_testdag", "v1")],
+        "inline",
+        "testdag",
+        &flights_dir,
+        &flights_dir,
+        Some(endpoint.clone()),
+        Some("mock-token".into()),
+    )
+    .await
+    .unwrap();
+
+    // Tamper with the local source of the live deployment.
+    std::fs::write(
+        flights_dir.join("swanflow_inline_testdag.py"),
+        "# tampered\n",
+    )
+    .unwrap();
+
+    // The next deploy must refuse BEFORE any MCP call fires.
+    let err = deployer::deploy(
+        vec![simple_program("swanflow_inline_testdag", "v2")],
+        "inline",
+        "testdag",
+        &flights_dir,
+        &flights_dir,
+        Some(endpoint),
+        Some("mock-token".into()),
+    )
+    .await
+    .expect_err("deploy over drifted live state must refuse");
+    assert!(
+        err.to_string().contains("digest mismatch"),
+        "error names the drift: {err}"
+    );
+    assert_eq!(
+        state.create_count.load(Ordering::SeqCst),
+        1,
+        "refusal costs zero MCP calls"
+    );
+}
+
+#[tokio::test]
+async fn check_seals_the_program_set_and_refuses_drift() {
+    let (endpoint, _state) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let flights_dir: PathBuf = dir.path().join("flights");
+
+    // Nothing deployed yet → explicit refusal, not a silent pass.
+    let err = deployer::check("testdag", &flights_dir, &flights_dir).expect_err("no manifest");
+    assert!(err.to_string().contains("nothing to check"));
+
+    deployer::deploy(
+        vec![simple_program("swanflow_inline_testdag", "v1")],
+        "inline",
+        "testdag",
+        &flights_dir,
+        &flights_dir,
+        Some(endpoint),
+        Some("mock-token".into()),
+    )
+    .await
+    .unwrap();
+
+    // Intact local copies → Ok.
+    deployer::check("testdag", &flights_dir, &flights_dir).expect("intact copies pass");
+
+    // Tampered local copy → SwapGate names both hashes.
+    std::fs::write(
+        flights_dir.join("swanflow_inline_testdag.py"),
+        "# tampered\n",
+    )
+    .unwrap();
+    let err = deployer::check("testdag", &flights_dir, &flights_dir).expect_err("drift refused");
+    let msg = err.to_string();
+    assert!(msg.contains("drifted"), "error names drift: {msg}");
+    assert!(msg.contains("!="), "error shows sealed vs current: {msg}");
+
+    // A manifest that predates sealing is refused explicitly.
+    let manifest_path = flights_dir.join(deployer::manifest_file_name("testdag"));
+    let manifest: swanflow::deploy::DeployManifest =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let unsealed = swanflow::deploy::DeployManifest {
+        programs_hash: None,
+        ..manifest
+    };
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&unsealed).unwrap(),
+    )
+    .unwrap();
+    let err = deployer::check("testdag", &flights_dir, &flights_dir).expect_err("unsealed refused");
+    assert!(
+        err.to_string().contains("predates sealing"),
+        "missing seal is an explicit error: {err}"
     );
 }
 

@@ -42,6 +42,12 @@ pub struct DeployManifest {
     /// Pointer (file name) of the previous manifest — chain for rollback.
     /// `None` on first deployment → rollback refused.
     pub rollback: Option<String>,
+    /// FNV-1a seal over the deployed program set (flight_name, source),
+    /// computed via `core::verified_swap::source_hash` at deploy time.
+    /// `None` in manifests that predate sealing — `deployer::check` refuses
+    /// those explicitly instead of silently passing.
+    #[serde(default)]
+    pub programs_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

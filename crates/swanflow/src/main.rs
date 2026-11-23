@@ -125,6 +125,11 @@ enum Commands {
         /// Directory for deploy manifests (default: ./flights)
         #[arg(long)]
         manifest_dir: Option<PathBuf>,
+        /// Read-only integrity probe: rebuild the program-set seal from the
+        /// local flights/ copies and compare against the manifest (no token,
+        /// no network; non-zero exit on drift or missing seal)
+        #[arg(long, conflicts_with = "rollback")]
+        check: bool,
         /// Roll back to the previous deployment instead of deploying
         #[arg(long)]
         rollback: bool,
@@ -880,6 +885,7 @@ async fn main() -> anyhow::Result<()> {
             token,
             flights_dir,
             manifest_dir,
+            check,
             rollback,
         } => {
             use swanflow::deploy;
@@ -888,6 +894,17 @@ async fn main() -> anyhow::Result<()> {
             let dag_id = workflow.id.to_string();
             let flights_dir = flights_dir.unwrap_or_else(|| PathBuf::from("flights"));
             let manifest_dir = manifest_dir.unwrap_or_else(|| flights_dir.clone());
+
+            if check {
+                deploy::deployer::check(&dag_id, &flights_dir, &manifest_dir)?;
+                println!(
+                    "✅ dag {dag_id}: local flights/ copies match the sealed program set (manifest at {})",
+                    manifest_dir
+                        .join(deploy::deployer::manifest_file_name(&dag_id))
+                        .display()
+                );
+                return Ok(());
+            }
 
             if rollback {
                 let restored = deploy::deployer::rollback(
