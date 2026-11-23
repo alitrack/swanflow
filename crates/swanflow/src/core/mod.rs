@@ -11,6 +11,7 @@ pub mod retry;
 #[cfg(test)]
 mod sql_collapse_probe;
 pub mod templating;
+pub mod verified_swap;
 
 /// Canonical in-context table name for a node's materialization.
 ///
