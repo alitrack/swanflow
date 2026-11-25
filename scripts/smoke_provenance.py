@@ -78,8 +78,12 @@ def main() -> int:
               header["env"]["engine"]["version"])
         check(len(header["inputs"]) == 1 and header["inputs"][0]["path"] == "sales",
               "input fingerprint recorded", str(header["inputs"][0]["rows"]) if header["inputs"] else "none")
-        check(header["outputs"][0]["fingerprint_kind"] == "aggregate",
-              "output fingerprint_kind=aggregate")
+        # 契约已迁移：新写入的 header 用 row_multiset（c24645e「move new headers to
+        # row_multiset, keep old ones verifiable」），legacy 的 aggregate 只在老 header
+        # 缺字段时才被假定。断言的意图是「不是逐行哈希」，故两者都算合法，但新写必须是新的。
+        check(header["outputs"][0]["fingerprint_kind"] == "row_multiset",
+              "output fingerprint_kind=row_multiset (new default)",
+              header["outputs"][0]["fingerprint_kind"])
         check(header["outputs"][0]["rows"] == 3, "output rows counted",
               str(header["outputs"][0]["rows"]))
 
