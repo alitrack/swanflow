@@ -11,10 +11,15 @@ import os
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 
 import duckdb
 
-BIN = os.environ.get("SWANFLOW_BIN", "/tmp/sb-target/debug/swanflow")
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Default to THIS repo's build, not a copy somewhere else: a stale binary at a
+# fixed /tmp path made this script pass while testing old code (the FL-7 fix
+# appeared to "not work" for exactly that reason).
+BIN = os.environ.get("SWANFLOW_BIN", os.path.join(_REPO, "target/debug/swanflow"))
 fails = []
 
 
@@ -26,8 +31,12 @@ def check(cond, label, detail=""):
 
 def main() -> int:
     if not os.path.exists(BIN):
-        print(f"SKIP: binary not built at {BIN}")
-        return 0
+        # Loud, not quiet: a missing binary means nothing was verified, and
+        # returning 0 here would report success for a test that never ran.
+        print(f"FAIL: binary not built at {BIN} (run `cargo build`)")
+        return 1
+    mtime = datetime.fromtimestamp(os.path.getmtime(BIN)).isoformat(timespec="seconds")
+    print(f"binary: {BIN} (mtime {mtime})")
 
     work = tempfile.mkdtemp(prefix="sb-smoke-")
     db = os.path.join(work, "demo.duckdb")
@@ -78,12 +87,16 @@ def main() -> int:
               header["env"]["engine"]["version"])
         check(len(header["inputs"]) == 1 and header["inputs"][0]["path"] == "sales",
               "input fingerprint recorded", str(header["inputs"][0]["rows"]) if header["inputs"] else "none")
-        # 契约已迁移：新写入的 header 用 row_multiset（c24645e「move new headers to
-        # row_multiset, keep old ones verifiable」），legacy 的 aggregate 只在老 header
-        # 缺字段时才被假定。断言的意图是「不是逐行哈希」，故两者都算合法，但新写必须是新的。
-        check(header["outputs"][0]["fingerprint_kind"] == "row_multiset",
-              "output fingerprint_kind=row_multiset (new default)",
-              header["outputs"][0]["fingerprint_kind"])
+        # 契约已迁移两次：aggregate → row_multiset（c24645e）→ row_multiset_framed
+        # （FL-7：旧 kind 用 concat_ws('|', …) 拼列，('a|b','c') 与 ('a','b|c') 撞成
+        # 同一指纹，进而同一 artifact_id）。断言的意图是「不是逐行哈希」，本 build
+        # 写新 kind；这里用白名单而不是钉死某一个字符串——钉死的结果是每次契约迁移
+        # 都要来改这个脚本（status.md §2.4 记的就是这个教训）。
+        _known = {"aggregate", "row_multiset", "row_multiset_framed"}
+        _kind = header["outputs"][0]["fingerprint_kind"]
+        check(_kind in _known, f"output fingerprint_kind is a known kind ({_kind})", _kind)
+        check(_kind == "row_multiset_framed",
+              "output fingerprint_kind is the current default", _kind)
         check(header["outputs"][0]["rows"] == 3, "output rows counted",
               str(header["outputs"][0]["rows"]))
 

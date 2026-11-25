@@ -113,9 +113,26 @@ pub const FP_AGGREGATE: &str = "aggregate";
 /// (a multiset, not a set). This is what new headers are written with.
 pub const FP_ROW_MULTISET: &str = "row_multiset";
 
+/// Order-independent hash over framed row hashes: every column is rendered as
+/// `V<octet-length>:<value>` (or `N` for NULL) and the frames are concatenated
+/// **without any separator** before hashing.
+///
+/// The framing exists because the older kinds joined columns with `'|'`: a row
+/// `('a|b', 'c')` and a row `('a', 'b|c')` both flatten to `a|b|c`, so two
+/// genuinely different datasets produced the same fingerprint — and therefore
+/// the same `artifact_id`, with `--check` reporting "match" on swapped data
+/// (`docs/findings-log.md` FL-7). `COALESCE(..., '')` on the old path also made
+/// NULL and the empty string collide.
+///
+/// Frames are self-delimiting: a frame is either the single byte `N`, or `V`
+/// followed by a decimal length, `:`, and exactly that many octets. So
+/// concatenation is injective and no separator (and no equal spirit of
+/// separator) can be smuggled across a column boundary.
+pub const FP_ROW_MULTISET_FRAMED: &str = "row_multiset_framed";
+
 /// The kind written into headers **this build creates**.
 pub fn new_fingerprint_kind() -> String {
-    FP_ROW_MULTISET.to_string()
+    FP_ROW_MULTISET_FRAMED.to_string()
 }
 
 /// The kind assumed when a header **omits** the field.
@@ -133,7 +150,7 @@ fn legacy_fingerprint_kind() -> String {
 /// different way is not comparable with the recorded one, and reporting
 /// "different" would be a false alarm about the data.
 pub fn is_known_fingerprint_kind(kind: &str) -> bool {
-    kind == FP_AGGREGATE || kind == FP_ROW_MULTISET
+    kind == FP_AGGREGATE || kind == FP_ROW_MULTISET || kind == FP_ROW_MULTISET_FRAMED
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -315,6 +332,22 @@ pub fn table_fingerprint_kind(
         .collect::<Vec<_>>()
         .join(", ");
 
+    // Framed rendering for `FP_ROW_MULTISET_FRAMED`: no separator between
+    // columns, so a `|` inside a value cannot impersonate a column boundary.
+    // NULL gets its own frame so it can never collide with the empty string.
+    let framed_expr = cols
+        .iter()
+        .map(|c| {
+            let q = quote_ident(c);
+            format!(
+                "CASE WHEN {q} IS NULL THEN 'N' \
+                 ELSE 'V' || octet_length(CAST(CAST({q} AS VARCHAR) AS BLOB)) || ':' \
+                 || CAST({q} AS VARCHAR) END"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
     // Each kind has its own domain-separation prefix, so a value from one kind
     // can never be mistaken for a value from the other even if the payloads
     // happened to collide. The aggregate prefix is byte-for-byte what it was
@@ -339,10 +372,22 @@ pub fn table_fingerprint_kind(
                 quote_ident(table)
             ),
         ),
+        FP_ROW_MULTISET_FRAMED => (
+            // New prefix: the payload is built differently, so reusing the v1
+            // prefix would make a framed value and a legacy value comparable —
+            // exactly the "silently aliasing" failure the kind field exists to stop.
+            "swanbench-fingerprint-rowm-v2",
+            format!(
+                "SELECT count(*), sha256(string_agg(h, '|' ORDER BY h)) FROM \
+                 (SELECT CAST(hash(concat({framed_expr})) AS VARCHAR) AS h FROM {})",
+                quote_ident(table)
+            ),
+        ),
         other => {
             return Err(anyhow!(
                 "unknown fingerprint kind '{other}' — refusing to compute a hash that cannot be \
-                 compared with the recorded one (known: {FP_AGGREGATE}, {FP_ROW_MULTISET})"
+                 compared with the recorded one (known: {FP_AGGREGATE}, {FP_ROW_MULTISET}, \
+                 {FP_ROW_MULTISET_FRAMED})"
             ))
         }
     };
@@ -647,7 +692,7 @@ pub fn validate_header(h: &ArtifactHeader) -> Vec<String> {
         if !is_known_fingerprint_kind(&input.fingerprint_kind) {
             problems.push(format!(
                 "inputs[{i}].fingerprint_kind '{}' is not a kind this build can compute \
-                 (known: {FP_AGGREGATE}, {FP_ROW_MULTISET})",
+                 (known: {FP_AGGREGATE}, {FP_ROW_MULTISET}, {FP_ROW_MULTISET_FRAMED})",
                 input.fingerprint_kind
             ));
         }
@@ -673,7 +718,7 @@ pub fn validate_header(h: &ArtifactHeader) -> Vec<String> {
         if !is_known_fingerprint_kind(&out.fingerprint_kind) {
             problems.push(format!(
                 "outputs[{i}].fingerprint_kind '{}' is not a kind this build can compute \
-                 (known: {FP_AGGREGATE}, {FP_ROW_MULTISET})",
+                 (known: {FP_AGGREGATE}, {FP_ROW_MULTISET}, {FP_ROW_MULTISET_FRAMED})",
                 out.fingerprint_kind
             ));
         }
@@ -1045,7 +1090,7 @@ pub fn rerun(db: &std::path::Path, header: &ArtifactHeader) -> Result<RerunRepor
         return Err(anyhow!(
             "refusing to compare: header output fingerprint_kind is '{}', which this build cannot \
              compute — a hash made a different way is not comparable with the recorded one \
-             (known: {FP_AGGREGATE}, {FP_ROW_MULTISET})",
+             (known: {FP_AGGREGATE}, {FP_ROW_MULTISET}, {FP_ROW_MULTISET_FRAMED})",
             expected.fingerprint_kind
         ));
     }
@@ -1415,7 +1460,7 @@ mod tests {
         }
         assert_eq!(v["env"]["engine"]["name"], "duckdb");
         assert_eq!(h.code.nondeterministic, vec!["now()".to_string()]);
-        assert_eq!(v["inputs"][0]["fingerprint_kind"], FP_ROW_MULTISET);
+        assert_eq!(v["inputs"][0]["fingerprint_kind"], FP_ROW_MULTISET_FRAMED);
     }
 
     // ── M1.f: the kind moved, and old artifacts must survive the move ──────
@@ -1479,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    fn the_two_kinds_never_produce_the_same_value() {
+    fn the_three_kinds_never_produce_the_same_value() {
         // Domain separation: even for the same table, a value from one kind must
         // never be mistakable for the other. This is what makes "recorded kind"
         // a reliable instruction rather than a hint.
@@ -1490,7 +1535,74 @@ mod tests {
         let b = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET)
             .unwrap()
             .1;
+        let c = table_fingerprint_kind(&conn, "sales", FP_ROW_MULTISET_FRAMED)
+            .unwrap()
+            .1;
         assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn a_column_boundary_cannot_be_smuggled_into_a_value() {
+        // FL-7. The legacy kinds flatten a row with `concat_ws('|', ...)`, so
+        // ('a|b','c') and ('a','b|c') both become `a|b|c` and fingerprint the
+        // same — two different datasets, one artifact_id, and --check says
+        // "match" on swapped data. The framed kind must separate them.
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let mut fp = |rows: &[(&str, &str)], kind: &str| {
+            conn.execute("DROP TABLE IF EXISTS t", []).unwrap();
+            conn.execute("CREATE TABLE t (a VARCHAR, b VARCHAR)", [])
+                .unwrap();
+            for (a, b) in rows {
+                conn.execute("INSERT INTO t VALUES (?, ?)", duckdb::params![a, b])
+                    .unwrap();
+            }
+            table_fingerprint_kind(&conn, "t", kind).unwrap().1
+        };
+
+        let split_after = [("a|b", "c")];
+        let split_before = [("a", "b|c")];
+
+        // Documented, deliberate weakness of the legacy kinds: this is the
+        // regression this test exists for, not a property to preserve silently.
+        assert_eq!(
+            fp(&split_after, FP_ROW_MULTISET),
+            fp(&split_before, FP_ROW_MULTISET),
+            "legacy row_multiset is expected to collide here (that is FL-7)"
+        );
+
+        assert_ne!(
+            fp(&split_after, FP_ROW_MULTISET_FRAMED),
+            fp(&split_before, FP_ROW_MULTISET_FRAMED),
+            "framed kind must not collide across a column boundary"
+        );
+    }
+
+    #[test]
+    fn a_null_is_not_the_empty_string_in_the_framed_kind() {
+        // The legacy path renders NULL as '' (COALESCE), so a row of NULL and a
+        // row of '' fingerprint identically. The framed kind gives NULL its own
+        // frame, which is the whole point of framing.
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let mut fp = |value: Option<&str>, kind: &str| {
+            conn.execute("DROP TABLE IF EXISTS n", []).unwrap();
+            conn.execute("CREATE TABLE n (a VARCHAR, b VARCHAR)", [])
+                .unwrap();
+            conn.execute("INSERT INTO n VALUES (?, 'x')", duckdb::params![value])
+                .unwrap();
+            table_fingerprint_kind(&conn, "n", kind).unwrap().1
+        };
+
+        assert_eq!(
+            fp(None, FP_ROW_MULTISET),
+            fp(Some(""), FP_ROW_MULTISET),
+            "legacy kind is expected to collide NULL with '' "
+        );
+        assert_ne!(
+            fp(None, FP_ROW_MULTISET_FRAMED),
+            fp(Some(""), FP_ROW_MULTISET_FRAMED)
+        );
     }
 
     #[test]

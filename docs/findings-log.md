@@ -58,8 +58,28 @@
   探针法 = registry-loaded ext vs `allow_unsigned_extensions` 本地 LOAD 双路对比
 - 备注 `env:` 缓存哈希不一致属环境级，但「失败不抛错」是产品缺陷，两条分开记
 
----
+### FL-7: 行指纹用 `concat_ws('|', …)` 拼列，跨列边界的 `|` 让两份不同数据撞成同一个 artifact_id
+- 症状：把输入表换成分隔符位置不同、内容等价的另一份数据（`('a|b','c')` ↔ `('a','b|c')`），
+  `content_sha256` 与 `artifact_id` 完全相同，`--check` 判 "match"、`--rerun` 给出不同数字
+  却宣称是同一个 artifact
+- caught by: 对抗复核（pi 块 A），随后本地复现确认 —— 真实 duckdb 2.0.1 上
+  `sum(hash(concat_ws('|', …)))` 两边均为 `17800819962751210911`，而两表内容不同；
+  按 `compute_artifact_id` 的 feed 列表推出 id 也相同（`sha256:b3aa3d8daa680ba9…`）
+- should have been: unit —— 「不同数据必须不同指纹」是行指纹的定义，本该有一条属性测试
+  钉住，而不是只测「改一个值指纹会变」（那个测试抓不到跨列搬移）
+- 同源次生问题：`COALESCE(CAST(col AS VARCHAR), '')` 让 NULL 与空串撞同一指纹
+  （注释已承认，但没有任何测试钉住它，因此修复时一并解决）
+- guard now: 新增 kind `row_multiset_framed`（新默认）——每列渲染成
+  `V<octet_length>:<value>`、NULL 渲染成 `N`，列间**不加任何分隔符**，拼接因此是单射；
+  域分隔前缀换成 `swanbench-fingerprint-rowm-v2`。两个旧 kind 保持可读（老 header 照旧
+  能验证，沿用 `aggregate → row_multiset` 的迁移模式）。测试
+  `a_column_boundary_cannot_be_smuggled_into_a_value` 与
+  `a_null_is_not_the_empty_string_in_the_framed_kind` 同时断言「旧 kind 确实撞」
+  和「新 kind 必须不撞」——把已知弱点写进测试，而不是留在注释里
+- 备注：指纹算法迁移会让同一份数据在迁移后得到不同 id。这是有意的（id 由指纹派生），
+  代价是迁移前的 artifact 与新 artifact 无法互相比对；`fingerprint_kind` 字段正是为此存在
 
+---
 ## Tally（每 10 条更新）
 
 | should have been | 条数 |
@@ -67,6 +87,7 @@
 | unit（节点契约/错误处理） | 4（FL-1/3/5/6） |
 | gate（派生矩阵挂 CI） | 1（FL-2） |
 | unit + layering 门 | 1（FL-4） |
+| unit（行指纹的属性测试） | 1（FL-7） |
 
 **结论（6 条样本）**：系统性失守层是 **unit 的节点契约面**——E2E 在抓本该
 单测拦的问题。下一个加固方向：给每个注册节点的 `validate()`/`propose_plan()`
