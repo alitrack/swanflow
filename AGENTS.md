@@ -41,6 +41,27 @@ make release  # optimized single binary -> target/release/swanflow
 CI runs `cargo fmt --check` + `clippy -D warnings` + the layering gate.
 Fix warnings at the source; never `allow()` your way past the gate.
 
+## Read this before you change that
+
+One row per area. Read the file before editing, not after the gate goes red.
+
+| Changing | Read first |
+|---|---|
+| Anything | `.agents/status.md` — current state, `UNMEASURED` markers, open problems, **rejected designs (do not re-propose 3.1)** |
+| Node types / registry / planner | `docs/adr/ADR-001`, `ADR-009`, `crates/swanflow/src/nodes/registry.rs`; check the 81 registered names before adding an 82nd |
+| Module boundaries / new imports | `docs/adr/ADR-005`, `ADR-006`, `ADR-008`; run `scripts/ci/check-layering.sh` |
+| Middleware stack | `docs/adr/ADR-012` — exactly three entries in `nodes/middleware.rs` |
+| Error / retry / fan-out policy | `docs/adr/ADR-013` — two inline retry loops are intentional (see rejected 3.1) |
+| DuckDB coupling | `docs/adr/ADR-004` — mandatory, never optional |
+| Schema-driven config | `docs/adr/ADR-011` |
+| A bug that got past a test | `docs/findings-log.md` — add an `FL-N` entry in the same commit, it is mandatory |
+| Anything non-trivial | `openspec/changes/<name>/` — proposal with Non-goals first |
+
+`.agents/status.md` is the state file, `docs/findings-log.md` is the escape ledger,
+`docs/adr/` is the decision record. Keep all three current in the same commit that
+invalidates them; do not let them drift into history books.
+
+
 ## Change Workflow (OpenSpec)
 
 All non-trivial changes go through OpenSpec
