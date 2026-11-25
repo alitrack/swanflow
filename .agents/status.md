@@ -81,6 +81,16 @@ FL-5 Excel 图表 schema、FL-6 luajit 安装失败返 NULL）。E2E 在替单�
 - `findings-log.md` 的 tally 每 10 条更新一次，现在 6 条，**还差 4 条才轮到下一次
   tally**。别为凑数把非缺陷记进去。
 
+### 2.4 已修：脚本断言了被退役的契约（2026-11-25，8bf6823）
+
+`scripts/smoke_provenance.py` 断言 `fingerprint_kind == "aggregate"`，而 `c24645e`
+已把新写入的 header 迁到 `row_multiset`（`aggregate` 只保留为「老 header 缺字段」
+时的 legacy 假定）。脚本没跟着改，于是在 main 上跑就是红的——**红的是脚本，不是代码**。
+已改成断言本 build 实际写入的 kind，并保留原意（「不是逐行哈希」）。
+
+教训（写在这里因为会再犯）：**契约迁移时，断言旧契约的脚本是第二个要改的地方**。
+`cargo test` 全绿也发现不了，因为这类脚本不在 `cargo test` 里。
+
 ---
 
 ## 3. 被否决的方案（试过，别再来一次）
