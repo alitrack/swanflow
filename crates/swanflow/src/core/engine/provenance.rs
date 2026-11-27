@@ -114,7 +114,7 @@ pub const FP_AGGREGATE: &str = "aggregate";
 pub const FP_ROW_MULTISET: &str = "row_multiset";
 
 /// Order-independent hash over framed row hashes: every column is rendered as
-/// `V<octet-length>:<value>` (or `N` for NULL) and the frames are concatenated
+/// `V<byte-length>:<value>` (or `N` for NULL) and the frames are concatenated
 /// **without any separator** before hashing.
 ///
 /// The framing exists because the older kinds joined columns with `'|'`: a row
@@ -125,9 +125,17 @@ pub const FP_ROW_MULTISET: &str = "row_multiset";
 /// NULL and the empty string collide.
 ///
 /// Frames are self-delimiting: a frame is either the single byte `N`, or `V`
-/// followed by a decimal length, `:`, and exactly that many octets. So
+/// followed by a decimal length, `:`, and exactly that many bytes. So
 /// concatenation is injective and no separator (and no equal spirit of
 /// separator) can be smuggled across a column boundary.
+///
+/// The length is `strlen()`, which counts **bytes** (`strlen('中') = 3`), not
+/// `length()`, which counts characters. Do not "simplify" this to
+/// `octet_length(CAST(col AS BLOB))`: on DuckDB 2.0.1 that cast raises
+/// `Conversion Error: Invalid byte encountered in STRING -> BLOB conversion`
+/// for any non-ASCII value, which made the whole fingerprint path hard-error on
+/// tables containing CJK or emoji text. Two independent reviews caught it
+/// (see FL-7); `a_non_ascii_value_can_be_fingerprinted` is the guard.
 pub const FP_ROW_MULTISET_FRAMED: &str = "row_multiset_framed";
 
 /// The kind written into headers **this build creates**.
@@ -341,8 +349,7 @@ pub fn table_fingerprint_kind(
             let q = quote_ident(c);
             format!(
                 "CASE WHEN {q} IS NULL THEN 'N' \
-                 ELSE 'V' || octet_length(CAST(CAST({q} AS VARCHAR) AS BLOB)) || ':' \
-                 || CAST({q} AS VARCHAR) END"
+                 ELSE 'V' || strlen(CAST({q} AS VARCHAR)) || ':' || CAST({q} AS VARCHAR) END"
             )
         })
         .collect::<Vec<_>>()
@@ -1602,6 +1609,44 @@ mod tests {
         assert_ne!(
             fp(None, FP_ROW_MULTISET_FRAMED),
             fp(Some(""), FP_ROW_MULTISET_FRAMED)
+        );
+    }
+
+    #[test]
+    fn a_non_ascii_value_can_be_fingerprinted() {
+        // Regression guard for the first attempt at FL-7, which computed the
+        // frame length as octet_length(CAST(col AS BLOB)). That cast raises
+        // "Invalid byte encountered in STRING -> BLOB conversion" for any
+        // non-ASCII value on DuckDB 2.0.1, so the new default kind hard-errored
+        // on every table containing CJK or emoji — while all the tests above,
+        // written with ASCII fixtures, stayed green. strlen() counts bytes and
+        // accepts the same strings, so it is both correct and total.
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let mut fp = |rows: &[(&str, Option<&str>)]| {
+            conn.execute("DROP TABLE IF EXISTS m", []).unwrap();
+            conn.execute("CREATE TABLE m (a VARCHAR, b VARCHAR)", [])
+                .unwrap();
+            for (a, b) in rows {
+                conn.execute("INSERT INTO m VALUES (?, ?)", duckdb::params![a, b])
+                    .unwrap();
+            }
+            // .expect(): the point of this test is that this must not error.
+            table_fingerprint_kind(&conn, "m", FP_ROW_MULTISET_FRAMED)
+                .expect("a non-ASCII table must be fingerprintable")
+                .1
+        };
+
+        // 中 = 3 bytes, 🙂 = 4 bytes; a character-counting length would emit
+        // 'V1:中' and a reader consuming 1 byte would truncate the value.
+        let cjk = fp(&[("中", Some("a"))]);
+        let emoji = fp(&[("🙂", Some("b"))]);
+        assert_ne!(cjk, emoji, "distinct non-ASCII values must not collide");
+
+        // And the byte-length framing must still separate the column boundary.
+        assert_ne!(
+            fp(&[("中文abc", Some("日"))]),
+            fp(&[("中文", Some("abc日"))]),
+            "framing must hold across a column boundary for multi-byte text"
         );
     }
 

@@ -70,12 +70,21 @@
 - 同源次生问题：`COALESCE(CAST(col AS VARCHAR), '')` 让 NULL 与空串撞同一指纹
   （注释已承认，但没有任何测试钉住它，因此修复时一并解决）
 - guard now: 新增 kind `row_multiset_framed`（新默认）——每列渲染成
-  `V<octet_length>:<value>`、NULL 渲染成 `N`，列间**不加任何分隔符**，拼接因此是单射；
+  `V<strlen>:<value>`（strlen 数**字节**：`strlen('中') = 3`）、NULL 渲染成 `N`，列间
+  **不加任何分隔符**，拼接因此是单射；
   域分隔前缀换成 `swanbench-fingerprint-rowm-v2`。两个旧 kind 保持可读（老 header 照旧
   能验证，沿用 `aggregate → row_multiset` 的迁移模式）。测试
   `a_column_boundary_cannot_be_smuggled_into_a_value` 与
   `a_null_is_not_the_empty_string_in_the_framed_kind` 同时断言「旧 kind 确实撞」
   和「新 kind 必须不撞」——把已知弱点写进测试，而不是留在注释里
+- 修复本身的第一版就带着第二个 bug（本节订正记录）：帧长度写成
+  `octet_length(CAST(col AS BLOB))`，而 DuckDB 2.0.1 的 STRING→BLOB 强转对任何
+  非 ASCII 值直接抛 `Conversion Error: Invalid byte encountered in STRING -> BLOB
+  conversion`——新默认 kind 在含中文/emoji 的表上整条指纹路径硬错。上面两个 guard
+  测试全是 ASCII 夹具，照样全绿：**ASCII 夹具对「字节长度」类实现是盲的**。
+  改用 `strlen()`（同样数字节，且对任意字符串有定义），并补属性测试
+  `a_non_ascii_value_can_be_fingerprinted`：非 ASCII 值必须可指纹化、互不撞、
+  framing 在跨列的多字节文本上仍成立。
 - 备注：指纹算法迁移会让同一份数据在迁移后得到不同 id。这是有意的（id 由指纹派生），
   代价是迁移前的 artifact 与新 artifact 无法互相比对；`fingerprint_kind` 字段正是为此存在
 
