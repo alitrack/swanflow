@@ -1557,7 +1557,7 @@ mod tests {
         // same — two different datasets, one artifact_id, and --check says
         // "match" on swapped data. The framed kind must separate them.
         let conn = duckdb::Connection::open_in_memory().unwrap();
-        let mut fp = |rows: &[(&str, &str)], kind: &str| {
+        let fp = |rows: &[(&str, &str)], kind: &str| {
             conn.execute("DROP TABLE IF EXISTS t", []).unwrap();
             conn.execute("CREATE TABLE t (a VARCHAR, b VARCHAR)", [])
                 .unwrap();
@@ -1592,7 +1592,7 @@ mod tests {
         // row of '' fingerprint identically. The framed kind gives NULL its own
         // frame, which is the whole point of framing.
         let conn = duckdb::Connection::open_in_memory().unwrap();
-        let mut fp = |value: Option<&str>, kind: &str| {
+        let fp = |value: Option<&str>, kind: &str| {
             conn.execute("DROP TABLE IF EXISTS n", []).unwrap();
             conn.execute("CREATE TABLE n (a VARCHAR, b VARCHAR)", [])
                 .unwrap();
@@ -1622,7 +1622,7 @@ mod tests {
         // written with ASCII fixtures, stayed green. strlen() counts bytes and
         // accepts the same strings, so it is both correct and total.
         let conn = duckdb::Connection::open_in_memory().unwrap();
-        let mut fp = |rows: &[(&str, Option<&str>)]| {
+        let fp = |rows: &[(&str, Option<&str>)]| {
             conn.execute("DROP TABLE IF EXISTS m", []).unwrap();
             conn.execute("CREATE TABLE m (a VARCHAR, b VARCHAR)", [])
                 .unwrap();

@@ -617,10 +617,11 @@ fn kleene_or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn at(s: &str) -> DateTime<Utc> {
-        Utc.datetime_from_str(s, "%Y-%m-%d %H:%M:%S").unwrap()
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+            .unwrap()
+            .and_utc()
     }
 
     fn ctx(now: &str, mat: Option<&str>, eval: Option<&str>) -> EvalContext {

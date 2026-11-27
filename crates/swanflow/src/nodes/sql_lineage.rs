@@ -233,14 +233,6 @@ impl<'a> sqlparser::ast::Visitor for ReadWriteVisitor<'a> {
 mod tests {
     use super::*;
 
-    fn reads(sql: &str) -> Vec<String> {
-        extract_lineage(sql).reads
-    }
-
-    fn writes(sql: &str) -> Vec<String> {
-        extract_lineage(sql).writes
-    }
-
     #[test]
     fn plain_select_single_table() {
         let l = extract_lineage("SELECT a FROM orders");
