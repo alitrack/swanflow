@@ -110,10 +110,19 @@ jobs:
       # nodes::relational::tests::join_renames_only_the_colliding_column (that
       # test passes alone and in a serial run). Without this the job can fail for
       # a reason unrelated to the change under test.
+      #
+      # `timeout-minutes: 30`, not 10: cargo test builds in the test profile
+      # (cfg(test) on), which shares NOTHING with the check job's artifacts, so
+      # on a cold cache this step recompiles the whole workspace from scratch —
+      # on a 2-core runner that alone is >10 min (falsified 2026-11-27: the log
+      # ends mid-`Compiling`, `Running unittests` never appears). Once one green
+      # run warms the rust-cache, the step should drop back to minutes; the
+      # budget must fit the cold case or the first run after any cache eviction
+      # fails for reasons unrelated to the change.
       - name: cargo test (lib)
         run: cargo test --lib -- --test-threads=1
-        timeout-minutes: 10
+        timeout-minutes: 30
 
       - name: cargo test (doc)
         run: cargo test --doc
-        timeout-minutes: 10
+        timeout-minutes: 30
