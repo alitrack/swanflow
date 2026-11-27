@@ -281,7 +281,6 @@ mod tests {
         use crate::nodes::{NodeBehavior, NodeSpec};
         use anyhow::Result;
         use datafusion::logical_expr::LogicalPlan;
-        use std::sync::Arc;
 
         #[derive(Debug)]
         struct TypedDummy;

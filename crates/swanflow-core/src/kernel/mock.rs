@@ -1377,7 +1377,7 @@ mod tests {
     async fn test_mock_eventbus() {
         use std::sync::Arc;
         let bus = Arc::new(MockEventBus::new());
-        let bus_clone = bus.clone();
+        let _bus_clone = bus.clone();
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let ev_clone = events.clone();
         let sid = bus
